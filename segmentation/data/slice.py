@@ -114,7 +114,7 @@ def get_mask(tiff, shp, column="Glaciers"):
         return shp.loc[shp.intersects(bbox_poly["geometry"][0])]
     
     classes = sorted(list(set(shp[column])))
-    print(f"Classes = {classes}")
+    # print(f"Classes = {classes}")
 
     shapefile_crs = rasterio.crs.CRS.from_string(str(shp.crs))
 
@@ -202,41 +202,40 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
         elevation = dem_np[:,:,0][:,:,None]
         slope = dem_np[:,:,1][:,:,None]
         slope = np.sin(slope*np.pi/180)
-        aspect = dem_np[:,:,2][:,:,None]
-        curvature = dem_np[:,:,3][:,:,None]
-        aspect_sin = np.sin(aspect*np.pi/180)
-        aspect_cos = np.cos(aspect*np.pi/180)
-        slope_aspect_sin = slope*aspect_sin
-        slope_aspect_cos = slope*aspect_cos
-        dem_np = np.concatenate((elevation, slope_aspect_sin, 
-                                slope_aspect_cos, curvature), axis=2)
+        # aspect = dem_np[:,:,2][:,:,None]
+        # curvature = dem_np[:,:,3][:,:,None]
+        # aspect_sin = np.sin(aspect*np.pi/180)
+        # aspect_cos = np.cos(aspect*np.pi/180)
+        # slope_aspect_sin = slope*aspect_sin
+        # slope_aspect_cos = slope*aspect_cos
+        dem_np = np.concatenate((elevation, slope), axis=2)
         return dem_np
 
-    def compute_lat_lon(dem):
-        x = np.linspace(0, dem.shape[1]-1, dem.shape[1]).astype(np.int64)
-        y = np.linspace(0, dem.shape[0]-1, dem.shape[0]).astype(np.int64)
-        xv, yv = np.meshgrid(x,y)
-        idx = np.zeros((dem.shape[0], dem.shape[1], 2))
-        idx[:,:,0] = xv
-        idx[:,:,1] = yv
-        lat_lon = np.apply_along_axis(
-            lambda x:rasterio.transform.xy(dem.transform, x[0], x[1]), 
-        axis=2, arr=idx)
-        lon, lat = transform(dem.crs, {'init': 'EPSG:4326'},
-                     lat_lon[:,:,0].flatten(), lat_lon[:,:,1].flatten())
-        lon = np.asarray(lon).reshape(dem.shape).astype(np.float32)
-        lat = np.asarray(lat).reshape(dem.shape).astype(np.float32)
-        lat_lon = np.concatenate((lat[:,:,None], lon[:,:,None]), axis=2)
-        return lat_lon
+    # def compute_lat_lon(dem):
+    #     x = np.linspace(0, dem.shape[1]-1, dem.shape[1]).astype(np.int64)
+    #     y = np.linspace(0, dem.shape[0]-1, dem.shape[0]).astype(np.int64)
+    #     xv, yv = np.meshgrid(x,y)
+    #     idx = np.zeros((dem.shape[0], dem.shape[1], 2))
+    #     idx[:,:,0] = xv
+    #     idx[:,:,1] = yv
+    #     lat_lon = np.apply_along_axis(
+    #         lambda x:rasterio.transform.xy(dem.transform, x[0], x[1]), 
+    #     axis=2, arr=idx)
+    #     lon, lat = transform(dem.crs, {'init': 'EPSG:4326'},
+    #                  lat_lon[:,:,0].flatten(), lat_lon[:,:,1].flatten())
+    #     lon = np.asarray(lon).reshape(dem.shape).astype(np.float32)
+    #     lat = np.asarray(lat).reshape(dem.shape).astype(np.float32)
+    #     lat_lon = np.concatenate((lat[:,:,None], lon[:,:,None]), axis=2)
+    #     return lat_lon
 
     tiff_np = np.transpose(tiff.read(), (1, 2, 0)).astype(np.float32)
     tiff_np = np.nan_to_num(tiff_np)
     dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
     dem_np = np.nan_to_num(dem_np)
     dem_np = compute_dems(dem_np)
-    lat_lon_np = compute_lat_lon(dem)
-    tiff_np = np.concatenate((tiff_np, dem_np, lat_lon_np), axis=2)
-    tiff_np = tiff_np[:, :, conf["use_bands"]]
+    # lat_lon_np = compute_lat_lon(dem)
+    tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
+    # tiff_np = tiff_np[:, :, conf["use_bands"]]
     tiff_np = np.nan_to_num(tiff_np.astype(np.float32))
 
     if conf["add_ndvi"]:
@@ -270,7 +269,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
                     save_slice(mask_slice, savepath / mask_fname)
                     final_save_slice[np.sum(final_save_slice[:, :, :7], axis=2) == 0] = 0
                     save_slice(final_save_slice, savepath / tiff_fname)
-                    print(f"Saved image {filenum} slice {slicenum}")
+                    # print(f"Saved image {filenum} slice {slicenum}")
             slicenum += 1
     return np.mean(tiff_np, axis=(0, 1)), np.std(tiff_np, axis=(0, 1)), np.min(tiff_np, axis=(0, 1)), np.max(tiff_np, axis=(0, 1)), saved_df
 
