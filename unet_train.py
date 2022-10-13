@@ -33,11 +33,16 @@ warnings.filterwarnings("ignore")
 if __name__ == "__main__":
     conf = Dict(yaml.safe_load(open('./conf/unet_train.yaml')))
     data_dir = pathlib.Path(conf.data_dir)
+    output_dir = pathlib.Path(conf.output_dir)
+    phys_dir = pathlib.Path(conf.physics_dir)
     class_name = conf.class_name
     run_name = conf.run_name
     processed_dir = data_dir
-    train_loader, val_loader, test_folder = fetch_loaders(
-        processed_dir, conf.batch_size, conf.use_channels, conf.normalize, val_folder='val', test_folder="test")
+    train_loader, val_loader, test_folder = fetch_loaders(processed_dir, phys_dir, conf.batch_size, conf.use_channels, conf.normalize, conf.use_physics, val_folder='val', test_folder="test")
+    
+    if conf.use_physics:
+        conf.model_opts.args.inchannels += 1
+    
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
         loss_fn=loss_fn,
@@ -51,7 +56,7 @@ if __name__ == "__main__":
     if conf.fine_tune:
         fn.log(logging.INFO, f"Finetuning the model")
         run_name = conf.run_name + "_finetuned"
-        model_path = f"{data_dir}/runs/{conf.run_name}/models/model_final.pt"
+        model_path = f"{output_dir}/runs/{conf.run_name}/models/model_final.pt"
         if torch.cuda.is_available():
             state_dict = torch.load(model_path)
         else:
@@ -64,14 +69,14 @@ if __name__ == "__main__":
         exit()
 
     # Setup logging
-    writer = SummaryWriter(f"{data_dir}/runs/{run_name}/logs/")
+    writer = SummaryWriter(f"{output_dir}/runs/{run_name}/logs/")
     writer.add_text("Configuration Parameters", json.dumps(conf))
-    out_dir = f"{data_dir}/runs/{run_name}/models/"
+    out_dir = f"{output_dir}/runs/{run_name}/models/"
     loss_val = np.inf
 
     fn.print_conf(conf)
 
-    with open(f"{data_dir}/runs/{run_name}/conf.json", 'w') as f:
+    with open(f"{output_dir}/runs/{run_name}/conf.json", 'w') as f:
         j = json.dumps(conf, sort_keys=True)
         f.write(j)
     
@@ -104,9 +109,10 @@ if __name__ == "__main__":
         loss_test, test_metric = fn.validate(epoch, val_loader, frame, conf, test=True)
         fn.log_metrics(writer, test_metric, epoch, "test", conf.log_opts.mask_names)
 
-        if (epoch - 1) % 5 == 0:
-            fn.log_images( writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)
-            fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize)
+        # TODO: Physics stuff breaks this because we are generating on the fly
+        # if (epoch - 1) % 5 == 0:
+        #     fn.log_images( writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)
+        #     fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize)
 
         # Save best model
         if new_loss_val < loss_val:
