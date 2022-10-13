@@ -5,6 +5,7 @@ Created on Wed Feb 24 13:27:56 2021
 
 @author: Aryal007
 """
+import istarmap
 import os, yaml, warnings, random, pdb, multiprocessing
 from pathlib import Path
 import numpy as np
@@ -54,7 +55,7 @@ if __name__ == '__main__':
 
         pbar = tqdm(total=len(meta), desc=f'Processing dataset {split}')
         with multiprocessing.Pool(32) as pool:
-            for result in pool.starmap(process, enumerate(meta)):
+            for result in pool.istarmap(process, enumerate(meta)):
                 mu, s, mi, ma = result
                 means.append(mu)
                 stds.append(s)
