@@ -15,6 +15,7 @@ from pathlib import Path
 from skimage.color import rgb2hsv
 from rasterio.warp import transform
 
+import physics
 
 def read_shp(filename):
     """
@@ -235,6 +236,10 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
     dem_np = compute_dems(dem_np)
     # lat_lon_np = compute_lat_lon(dem)
     tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
+
+    phys_np = physics.compute_phys_v2(dem_np[:,:,0], conf["physics_res"])
+    tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
+
     # tiff_np = tiff_np[:, :, conf["use_bands"]]
     tiff_np = np.nan_to_num(tiff_np.astype(np.float32))
 

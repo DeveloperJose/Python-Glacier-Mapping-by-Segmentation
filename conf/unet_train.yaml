@@ -1,15 +1,14 @@
-data_dir: "/data/baryal/HKH/processed_L07_2005_cleanice"
-physics_dir: "/home/jperez/programming/glacial_phys_data/cleanice"
+data_dir: "/home/jperez/data/HKH/processed_L07_2005"
 output_dir: "/home/jperez/programming/glacier_mapping"
-gpu_rank: 1
-class_name: ["Debris"]
+gpu_rank: 0
+class_name: ["CleanIce", "Debris"]
 threshold: [0.5, 0.5]
-batch_size: 8
-run_name: "jose_baseline_clean_phys64"
-use_physics: True
+batch_size: 14 # 8
+run_name: "jose_phys_v3_w0.01_64"
+use_physics: ['physics_v3_w0.01_64'] # physics, physics_128, physics_256 | physics_v2_64, physics_v2_128, physics_v2_256 | physics_v3_w0.01_64, physics_v3_w0.1_64, physics_v3_w1_64 |
 epochs: 100
 save_every: None
-use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 normalize: "mean-std"
 loss_opts:
   name: "custom"
@@ -20,7 +19,7 @@ loss_opts:
   alpha: 0.9
 model_opts:
   args:
-    inchannels: 9
+    inchannels: 10
     outchannels: 2
     net_depth: 4
     dropout: 0.1
@@ -31,8 +30,8 @@ optim_opts:
   args:
     lr: 0.0003
 log_opts:
-  mask_names: ["Background", "Debris"]
+  mask_names: ["CleanIce", "Debris"]
 metrics_opts: ["IoU", "precision", "recall"]
 fine_tune: False
-comment: "rgb"
 find_lr: False
+comment: "rgb"

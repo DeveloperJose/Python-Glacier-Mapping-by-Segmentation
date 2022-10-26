@@ -147,7 +147,7 @@ def log_metrics(writer, metrics, epoch, stage, mask_names=None):
             writer.add_scalar(f"{stage}_{str(k)}/{name}", metric, epoch)
 
 
-def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name,  normalize):
+def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name, normalize, use_physics):
     """Log images for tensorboard
 
     Args:
@@ -196,7 +196,19 @@ def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name,  n
     y = _y
     y_hat = _y_hat
     if normalize_name == "mean-std":
-        x = (x * normalize[1]) + normalize[0]
+        if len(use_physics)>0:
+            # Revert mean-std for all other channels
+            # print(x.shape, type(normalize), type(normalize[0]), normalize[0].shape, normalize[1].shape)
+            # x[batch, rows, cols, channels]
+            x[:, :, :, :-len(use_physics)] = (x[:, :, :, :-len(use_physics)] * normalize[1]) + normalize[0]
+
+            # Revert mean-std for all physics channels
+            for phys_idx in range(len(use_physics)):
+                p_mu = x[:, :, -phys_idx].mean()
+                p_std = x[:, :, -phys_idx].std()
+                x[:, :, -phys_idx] = (x[:, :, -phys_idx] * p_std) + p_mu
+        else:
+            x = (x * normalize[1]) + normalize[0]
     else:
         x = torch.clamp(x, 0, 1)
     try:

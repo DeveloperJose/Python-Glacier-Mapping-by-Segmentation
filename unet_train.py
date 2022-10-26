@@ -34,14 +34,13 @@ if __name__ == "__main__":
     conf = Dict(yaml.safe_load(open('./conf/unet_train.yaml')))
     data_dir = pathlib.Path(conf.data_dir)
     output_dir = pathlib.Path(conf.output_dir)
-    phys_dir = pathlib.Path(conf.physics_dir)
-    class_name = conf.class_name
+    # class_name = conf.class_name
     run_name = conf.run_name
     processed_dir = data_dir
-    train_loader, val_loader, test_folder = fetch_loaders(processed_dir, phys_dir, conf.batch_size, conf.use_channels, conf.normalize, conf.use_physics, val_folder='val', test_folder="test")
+    train_loader, val_loader, test_folder = fetch_loaders(processed_dir, conf.batch_size, conf.use_channels, conf.normalize, conf.use_physics, val_folder='val', test_folder="test")
     
     if conf.use_physics:
-        conf.model_opts.args.inchannels += 1
+        conf.model_opts.args.inchannels += len(conf.use_physics)
     
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
@@ -109,10 +108,9 @@ if __name__ == "__main__":
         loss_test, test_metric = fn.validate(epoch, val_loader, frame, conf, test=True)
         fn.log_metrics(writer, test_metric, epoch, "test", conf.log_opts.mask_names)
 
-        # TODO: Physics stuff breaks this because we are generating on the fly
-        # if (epoch - 1) % 5 == 0:
-        #     fn.log_images( writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)
-        #     fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize)
+        if (epoch - 1) % 5 == 0:
+            fn.log_images(writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize, conf.use_physics)
+            fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize, conf.use_physics)
 
         # Save best model
         if new_loss_val < loss_val:
