@@ -5,17 +5,22 @@ Created on Wed Feb 24 13:26:56 2021
 
 @author: mibook
 """
-import rasterio, os, shutil, pdb
-import geopandas as gpd
-from shapely.geometry import Polygon, box
-from rasterio.features import rasterize
-from shapely.ops import cascaded_union
-import numpy as np
+import os
+import pdb
+import shutil
 from pathlib import Path
-from skimage.color import rgb2hsv
-from rasterio.warp import transform
 
-import physics
+import geopandas as gpd
+import numpy as np
+
+import glacier_mapping.segmentation.data.physics
+import rasterio
+from rasterio.features import rasterize
+from rasterio.warp import transform
+from shapely.geometry import Polygon, box
+from shapely.ops import cascaded_union
+from skimage.color import rgb2hsv
+
 
 def read_shp(filename):
     """
@@ -156,7 +161,8 @@ def add_index(tiff_np, index1, index2):
     return tiff_np
 
 
-def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
+def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **conf):
+    pbar.set_postfix_str('Loading mask')
     _mask = np.zeros((mask.shape[0], mask.shape[1]))
     for i in range(mask.shape[2]):
         _mask[mask[:, :, i] == 1] = i + 1
@@ -229,15 +235,19 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
     #     lat_lon = np.concatenate((lat[:,:,None], lon[:,:,None]), axis=2)
     #     return lat_lon
 
+    pbar.set_postfix_str('Reading TIFF')
     tiff_np = np.transpose(tiff.read(), (1, 2, 0)).astype(np.float32)
     tiff_np = np.nan_to_num(tiff_np)
+
+    pbar.set_postfix_str('Reading DEM')
     dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
     dem_np = np.nan_to_num(dem_np)
     dem_np = compute_dems(dem_np)
     # lat_lon_np = compute_lat_lon(dem)
     tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
 
-    phys_np = physics.compute_phys_v2(dem_np[:,:,0], conf["physics_res"])
+    pbar.set_postfix_str('Computing physics')
+    phys_np = physics.compute_phys_v2(dem_np[:,:,0], conf["physics_res"], conf["physics_scale"])
     tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
 
     # tiff_np = tiff_np[:, :, conf["use_bands"]]
@@ -255,6 +265,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, **conf):
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
     slicenum = 0
 
+    pbar.set_postfix_str('Slicing')
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
         for column in range(0, tiff_np.shape[0], conf["window_size"][1] - conf["overlap"]):
             mask_slice = mask[row:row + conf["window_size"][0], column:column + conf["window_size"][1]]

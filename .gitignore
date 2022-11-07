@@ -10,3 +10,5 @@ data/*
 codeexecution/*
 images/*
 runs/*
+
+output/*

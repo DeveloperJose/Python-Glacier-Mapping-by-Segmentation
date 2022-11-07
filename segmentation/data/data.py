@@ -11,7 +11,7 @@ import numpy as np
 from torchvision import transforms
 import pdb
 
-band_names = np.array(["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope"])
+band_names = np.array(["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics'])
 
 def fetch_loaders(processed_dir, batch_size=32, use_channels=[0,1], normalize=False, use_physics=False, train_folder='train', val_folder='val', test_folder='test', shuffle=True):
     """ Function to fetch dataLoaders for the Training / Validation
@@ -68,13 +68,13 @@ class GlacierDataset(Dataset):
         self.img_files = glob.glob(os.path.join(folder_path, '*tiff*'))
         self.mask_files = [s.replace("tiff", "mask") for s in self.img_files]
 
-        self.phys_files = []
-        for fname in use_physics:
-            self.phys_files.append([s.replace("tiff", fname) for s in self.img_files])
+        # self.phys_files = []
+        # for fname in use_physics:
+        #     self.phys_files.append([s.replace("tiff", fname) for s in self.img_files])
 
         self.use_channels = use_channels
         self.normalize = normalize
-        self.use_physics = use_physics
+        # self.use_physics = use_physics
         self.transforms = transforms
         arr = np.load(folder_path.parent / "normalize_train.npy")   
 
@@ -106,7 +106,10 @@ class GlacierDataset(Dataset):
             data = np.clip(data, self.min, self.max)
             data = (data - self.min) / (self.max - self.min)
         elif self.normalize == "mean-std":
-            data = (data - self.mean) / self.std
+            # mean-std all channels except physics
+            data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
+            # data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
+            # data = (data - self.mean) / self.std
         else:
             raise ValueError("normalize must be min-max or mean-std")
         label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
@@ -117,14 +120,14 @@ class GlacierDataset(Dataset):
         label = np.concatenate((label == 0, label == 1), axis=2)
         label[_mask] = 0
 
-        if len(self.phys_files)>0:
-            n = len(self.phys_files)
-            temp = np.zeros((data.shape[0], data.shape[1], len(self.use_channels)+n))
-            temp[:, :, :-n] = data
-            for phys_i in range(n):
-                im_phys_n = np.load(self.phys_files[phys_i][index])
-                temp[:, :, -phys_i] = im_phys_n
-            data = temp
+        # if len(self.phys_files)>0:
+        #     n = len(self.phys_files)
+        #     # temp = np.zeros((data.shape[0], data.shape[1], len(self.use_channels)+n))
+        #     # temp[:, :, :-n] = data
+        #     # for phys_i in range(n):
+        #     #     im_phys_n = np.load(self.phys_files[phys_i][index])
+        #     #     temp[:, :, -phys_i] = im_phys_n
+        #     data = temp
 
         if self.transforms:
             sample = {'image': data, 'mask': label}

@@ -39,8 +39,8 @@ if __name__ == "__main__":
     processed_dir = data_dir
     train_loader, val_loader, test_folder = fetch_loaders(processed_dir, conf.batch_size, conf.use_channels, conf.normalize, conf.use_physics, val_folder='val', test_folder="test")
     
-    if conf.use_physics:
-        conf.model_opts.args.inchannels += len(conf.use_physics)
+    # if conf.use_physics:
+    #     conf.model_opts.args.inchannels += len(conf.use_physics)
     
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
@@ -109,8 +109,8 @@ if __name__ == "__main__":
         fn.log_metrics(writer, test_metric, epoch, "test", conf.log_opts.mask_names)
 
         if (epoch - 1) % 5 == 0:
-            fn.log_images(writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize, conf.use_physics)
-            fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize, conf.use_physics)
+            fn.log_images(writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)
+            fn.log_images(writer, frame, val_loader, epoch, "val", conf.threshold, conf.normalize, _normalize)
 
         # Save best model
         if new_loss_val < loss_val:
@@ -118,7 +118,11 @@ if __name__ == "__main__":
             loss_val = float(new_loss_val)
 
         lr = fn.get_current_lr(frame)
-        writer.add_scalars("Loss", {"train": loss_train, "val": new_loss_val, "test": loss_test}, epoch)
+        # writer.add_scalars("Loss", {"train": loss_train, "val": new_loss_val, "test": loss_test}, epoch)
+        writer.add_scalar('loss_train', loss_train, epoch)
+        writer.add_scalar('loss_val', new_loss_val, epoch)
+        writer.add_scalar('loss_test', loss_test, epoch)
+
 
         writer.add_scalar("lr", lr, epoch)
         #writer.add_scalar("alpha", loss_alpha, epoch)
