@@ -74,7 +74,7 @@ class GlacierDataset(Dataset):
 
         self.use_channels = use_channels
         self.normalize = normalize
-        # self.use_physics = use_physics
+        self.use_physics = use_physics
         self.transforms = transforms
         arr = np.load(folder_path.parent / "normalize_train.npy")   
 
@@ -86,7 +86,7 @@ class GlacierDataset(Dataset):
 
         print(f'Using channels {band_names[use_channels]} for {folder_path}')
         temp = np.load(self.img_files[0])
-        assert temp.shape[2] == len(band_names), f'Length {len(band_names)} does not match shape[2] {temp.shape[2]} | full shape = {temp.shape}'
+        # assert temp.shape[2] == len(band_names), f'Length {len(band_names)} does not match shape[2] {temp.shape[2]} | full shape = {temp.shape}'
 
         t1, t2 = self[0]
         print(t1.shape, t2.shape)
@@ -107,9 +107,11 @@ class GlacierDataset(Dataset):
             data = (data - self.min) / (self.max - self.min)
         elif self.normalize == "mean-std":
             # mean-std all channels except physics
-            data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
-            # data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
-            # data = (data - self.mean) / self.std
+            if self.use_physics:
+                data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
+                # data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
+            else:
+                data = (data - self.mean) / self.std
         else:
             raise ValueError("normalize must be min-max or mean-std")
         label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
@@ -117,17 +119,9 @@ class GlacierDataset(Dataset):
         #twos = label == 2
         #zeros = np.invert(ones + twos)
         #label = np.concatenate((zeros, ones, twos), axis=2)
-        label = np.concatenate((label == 0, label == 1), axis=2)
+        # print('DEBUGGING', np.sum(label==0), np.sum(label==1), np.sum(label==2))
+        label = np.concatenate((label == 0, label == 1, label==2), axis=2)
         label[_mask] = 0
-
-        # if len(self.phys_files)>0:
-        #     n = len(self.phys_files)
-        #     # temp = np.zeros((data.shape[0], data.shape[1], len(self.use_channels)+n))
-        #     # temp[:, :, :-n] = data
-        #     # for phys_i in range(n):
-        #     #     im_phys_n = np.load(self.phys_files[phys_i][index])
-        #     #     temp[:, :, -phys_i] = im_phys_n
-        #     data = temp
 
         if self.transforms:
             sample = {'image': data, 'mask': label}

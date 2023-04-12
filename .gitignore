@@ -10,5 +10,6 @@ data/*
 codeexecution/*
 images/*
 runs/*
+pred_runs/*
 
 output/*

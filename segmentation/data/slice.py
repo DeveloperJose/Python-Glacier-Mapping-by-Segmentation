@@ -13,7 +13,7 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 
-import glacier_mapping.segmentation.data.physics
+from . import physics
 import rasterio
 from rasterio.features import rasterize
 from rasterio.warp import transform

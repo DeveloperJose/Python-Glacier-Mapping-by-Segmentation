@@ -219,8 +219,9 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         else:
             mask = torch.ones((target.size()[0], target.size()[2], target.size()[3]), dtype=torch.bool)
 
-        #target = target * (1 - self.label_smoothing) + self.label_smoothing / self.outchannels
+        # target = target * (1 - self.label_smoothing) + self.label_smoothing / self.outchannels
         
+        # print(pred.shape, target.shape, 'shapes')
         n, c, _, _ = pred.shape
         # softmax so that predicted map can be distributed in [0, 1]
         pred = self.act(pred)
@@ -248,6 +249,6 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         pred = pred.permute(0, 2, 3, 1)
         target = target.permute(0, 2, 3, 1)
         diceloss = 1 - ((2.0 * (pred * target)[mask].sum(dim=0) + self.smooth) / (pred[mask].sum(dim=0) + target[mask].sum(dim=0) + self.smooth))
-        diceloss = diceloss*torch.tensor([0.0, 1.0]).to(diceloss.device)
+        diceloss = diceloss*torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
         
         return diceloss, boundaryloss

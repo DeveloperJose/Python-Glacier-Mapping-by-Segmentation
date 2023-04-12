@@ -32,6 +32,13 @@ warnings.filterwarnings("ignore")
 
 if __name__ == "__main__":
     conf = Dict(yaml.safe_load(open('./conf/unet_train.yaml')))
+    #% Infer some configs
+    conf.model_opts.args.outchannels = len(conf.class_name)
+    conf.model_opts.args.inchannels = len(conf.use_channels)
+    conf.log_opts.mask_names = conf.class_name
+    conf.use_physics = 10 in conf.use_channels
+
+    #% Read all other configs
     data_dir = pathlib.Path(conf.data_dir)
     output_dir = pathlib.Path(conf.output_dir)
     # class_name = conf.class_name
@@ -39,8 +46,9 @@ if __name__ == "__main__":
     processed_dir = data_dir
     train_loader, val_loader, test_folder = fetch_loaders(processed_dir, conf.batch_size, conf.use_channels, conf.normalize, conf.use_physics, val_folder='val', test_folder="test")
     
-    # if conf.use_physics:
-    #     conf.model_opts.args.inchannels += len(conf.use_physics)
+    if conf.use_physics:
+        fn.log(logging.INFO, 'Using physics channel')
+
     
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
@@ -98,15 +106,15 @@ if __name__ == "__main__":
     for epoch in range(1, conf.epochs + 1):
         # train loop
         loss_train, train_metric, loss_alpha = fn.train_epoch(epoch, train_loader, frame, conf)
-        fn.log_metrics(writer, train_metric, epoch, "train", conf.log_opts.mask_names)
+        fn.log_metrics(writer, train_metric, epoch, "train", conf.class_names)
 
         # validation loop
         new_loss_val, val_metric = fn.validate(epoch, val_loader, frame, conf)
-        fn.log_metrics(writer, val_metric, epoch, "val", conf.log_opts.mask_names)
+        fn.log_metrics(writer, val_metric, epoch, "val", conf.class_names)
 
         # test loop
         loss_test, test_metric = fn.validate(epoch, val_loader, frame, conf, test=True)
-        fn.log_metrics(writer, test_metric, epoch, "test", conf.log_opts.mask_names)
+        fn.log_metrics(writer, test_metric, epoch, "test", conf.class_names)
 
         if (epoch - 1) % 5 == 0:
             fn.log_images(writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)

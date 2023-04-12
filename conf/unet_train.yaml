@@ -1,12 +1,11 @@
-data_dir: "/home/jperez/data/HKH/processed_L07_2005_phys64_s1/"
+data_dir: "/home/jperez/data/HKH/processed_L07_2005_phys64/"
 output_dir: "/home/jperez/programming/glacier_mapping/"
 gpu_rank: 1
-class_name: ["CleanIce", "Debris"]
-threshold: [0.5, 0.5]
+class_name: ["BG", "CleanIce", "Debris"]
+threshold: [0.5, 0.5, 0.5]
 batch_size: 16 # 14 # 8
-run_name: "physv2_64_full_nophysnorm_s1"
-# use_physics: [True] # physics, physics_128, physics_256 | physics_v2_64, physics_v2_128, physics_v2_256 | physics_v3_w0.01_64, physics_v3_w0.1_64, physics_v3_w1_64 |
-epochs: 100
+run_name: "phys64"
+epochs: 251
 save_every: None
 use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 normalize: "mean-std"
@@ -19,8 +18,8 @@ loss_opts:
   alpha: 0.9
 model_opts:
   args:
-    inchannels: 11
-    outchannels: 2
+    # inchannels: 10
+    # outchannels: 3
     net_depth: 4
     dropout: 0.1
     spatial: True
@@ -29,8 +28,6 @@ optim_opts:
   name: "Adam"
   args:
     lr: 0.0003
-log_opts:
-  mask_names: ["CleanIce", "Debris"]
 metrics_opts: ["IoU", "precision", "recall"]
 fine_tune: False
 find_lr: False
