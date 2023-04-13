@@ -1,8 +1,8 @@
-data_dir: "/home/jperez/data/HKH/processed_L07_2005_phys64"
+data_dir: "/home/jperez/data/HKH/processed_L07_2005_phys64_s1"
 normalize: "mean-std"
 gpu_rank: 0
 folder_name: "runs"
-run_name: "phys64_maskfix"
+run_name: "phys64_s1"
 # cleanice_model: "/home/jperez/programming/glacier_mapping/runs/jose_physv2_64/models/model_best.pt"
 # debris_model: "/home/jperez/programming/glacier_mapping/runs/jose_physv2_64/models/model_best.pt"
 out_processed_dir: "pred_runs/"
