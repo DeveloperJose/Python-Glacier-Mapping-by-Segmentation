@@ -74,7 +74,7 @@ def min_max(im):
 def resize(arr, new_rows, new_cols):
     arr = min_max(arr)*255
     arr = arr.astype(np.uint8).reshape(arr.shape[0], arr.shape[1])
-    arr = np.array(Image.fromarray(arr).resize((new_cols, new_rows), Image.LANCZOS))
+    arr = np.array(Image.fromarray(arr).resize((new_cols, new_rows))) #, Image.LANCZOS))
     arr = arr.astype(np.float32) / 255.0
     return arr
 

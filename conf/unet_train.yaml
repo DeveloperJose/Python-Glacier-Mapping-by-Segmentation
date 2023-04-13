@@ -2,9 +2,11 @@ data_dir: "/home/jperez/data/HKH/processed_L07_2005_phys64/"
 output_dir: "/home/jperez/programming/glacier_mapping/"
 gpu_rank: 1
 class_name: ["BG", "CleanIce", "Debris"]
+log_opts:
+  mask_names: ["BG", "CleanIce", "Debris"]
 threshold: [0.5, 0.5, 0.5]
 batch_size: 16 # 14 # 8
-run_name: "phys64"
+run_name: "phys64_maskfix"
 epochs: 251
 save_every: None
 use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]

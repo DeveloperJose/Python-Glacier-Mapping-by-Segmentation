@@ -5,7 +5,7 @@ Created on Wed Feb 24 13:27:56 2021
 
 @author: Aryal007
 """
-import istarmap
+from utils import istarmap
 import os, yaml, warnings, random, pdb, multiprocessing
 from pathlib import Path
 import numpy as np

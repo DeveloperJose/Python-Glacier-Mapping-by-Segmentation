@@ -35,7 +35,7 @@ if __name__ == "__main__":
     #% Infer some configs
     conf.model_opts.args.outchannels = len(conf.class_name)
     conf.model_opts.args.inchannels = len(conf.use_channels)
-    conf.log_opts.mask_names = conf.class_name
+    # conf.log_opts.mask_names = conf.class_name
     conf.use_physics = 10 in conf.use_channels
 
     #% Read all other configs
@@ -48,7 +48,6 @@ if __name__ == "__main__":
     
     if conf.use_physics:
         fn.log(logging.INFO, 'Using physics channel')
-
     
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
@@ -106,15 +105,15 @@ if __name__ == "__main__":
     for epoch in range(1, conf.epochs + 1):
         # train loop
         loss_train, train_metric, loss_alpha = fn.train_epoch(epoch, train_loader, frame, conf)
-        fn.log_metrics(writer, train_metric, epoch, "train", conf.class_names)
+        fn.log_metrics(writer, train_metric, epoch, "train", conf.log_opts.mask_names)
 
         # validation loop
         new_loss_val, val_metric = fn.validate(epoch, val_loader, frame, conf)
-        fn.log_metrics(writer, val_metric, epoch, "val", conf.class_names)
+        fn.log_metrics(writer, val_metric, epoch, "val", conf.log_opts.mask_names)
 
         # test loop
         loss_test, test_metric = fn.validate(epoch, val_loader, frame, conf, test=True)
-        fn.log_metrics(writer, test_metric, epoch, "test", conf.class_names)
+        fn.log_metrics(writer, test_metric, epoch, "test", conf.log_opts.mask_names)
 
         if (epoch - 1) % 5 == 0:
             fn.log_images(writer, frame, train_loader, epoch, "train", conf.threshold, conf.normalize, _normalize)

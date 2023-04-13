@@ -249,6 +249,6 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         pred = pred.permute(0, 2, 3, 1)
         target = target.permute(0, 2, 3, 1)
         diceloss = 1 - ((2.0 * (pred * target)[mask].sum(dim=0) + self.smooth) / (pred[mask].sum(dim=0) + target[mask].sum(dim=0) + self.smooth))
-        diceloss = diceloss*torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
+        #diceloss = diceloss*torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
         
         return diceloss, boundaryloss
