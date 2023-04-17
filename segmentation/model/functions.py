@@ -7,16 +7,19 @@ Created on Fri Sep  4 23:18:43 2020
 
 Training/Validation Functions
 """
-import numpy as np
-from tqdm import tqdm
-from .metrics import *
-import logging
 import datetime
+import logging
 import pdb
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torchvision.utils import make_grid
+from tqdm import tqdm
+
 from segmentation.model.losses import *
-import matplotlib.pyplot as plt
+
+from .metrics import *
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
@@ -40,7 +43,7 @@ def log(level, message):
     logging.log(level, message)
 
 
-def train_epoch(epoch, loader, frame, conf):
+def train_epoch(epoch, loader, frame):
     """Train model for one epoch
 
     This makes one pass through a dataloader and updates the model in the
@@ -58,12 +61,12 @@ def train_epoch(epoch, loader, frame, conf):
     :return (train_loss, metrics): A tuple containing the average epoch loss
       and the metrics on the training set.
     """
-    metrics_opts, n_classes, threshold, grad_accumulation_steps = conf.metrics_opts, len(
-        conf.log_opts.mask_names), conf.threshold, conf.grad_accumulation_steps
-    loss, batch_loss, tp, fp, fn = 0, 0, torch.zeros(
-        n_classes), torch.zeros(n_classes), torch.zeros(n_classes)
-    train_iterator = tqdm(
-        loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
+    metrics = frame.metrics_opts.metrics
+    n_classes: int = frame.num_classes
+    threshold = frame.metrics_opts.threshold
+
+    loss, batch_loss, tp, fp, fn = 0, 0, torch.zeros(n_classes), torch.zeros(n_classes), torch.zeros(n_classes)
+    train_iterator = tqdm(loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
     for i, (x, y) in enumerate(train_iterator):
         frame.zero_grad()
         y_hat, batch_loss = frame.optimize(x, y)
@@ -77,13 +80,13 @@ def train_epoch(epoch, loader, frame, conf):
         fp += _fp
         fn += _fn
         train_iterator.set_description("Train, Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f " % (epoch, i, batch_loss, loss / (i + 1)))
-    metrics = get_metrics(tp, fp, fn, metrics_opts)
+    metrics = get_metrics(tp, fp, fn, metrics)
     loss_alpha = frame.get_loss_alpha()
 
     return loss / (i + 1), metrics, loss_alpha
 
 
-def validate(epoch, loader, frame, conf, test=False):
+def validate(epoch, loader, frame, test=False):
     """Compute Metrics on a Validation Loader
 
     To honestly evaluate a model, we should compute its metrics on a validation
@@ -102,13 +105,17 @@ def validate(epoch, loader, frame, conf, test=False):
     :return (val_loss, metrics): A tuple containing the average validation loss
       and the metrics on the validation set.
     """
-    metrics_opts, threshold, n_classes = conf.metrics_opts, conf.threshold, len(conf.log_opts.mask_names)
+    metrics = frame.metrics_opts.metrics
+    n_classes: int = frame.num_classes
+    threshold = frame.metrics_opts.threshold
     loss, batch_loss, tp, fp, fn = 0, 0, torch.zeros(n_classes), torch.zeros(n_classes), torch.zeros(n_classes)
     if test:
         iterator = tqdm(loader, desc="Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
     else:
         iterator = tqdm(loader, desc="Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
-    def channel_first(x): return x.permute(0, 3, 1, 2)
+
+    def channel_first(x):
+        return x.permute(0, 3, 1, 2)
     for i, (x, y) in enumerate(iterator):
         y_hat = frame.infer(x)
         batch_loss = frame.calc_loss(channel_first(y_hat), channel_first(y))
@@ -126,12 +133,12 @@ def validate(epoch, loader, frame, conf, test=False):
             iterator.set_description("Val,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f " % (epoch, i, batch_loss, loss / (i + 1)))
     if not test:
         frame.val_operations(loss / len(loader.dataset))
-    metrics = get_metrics(tp, fp, fn, metrics_opts)
+    metrics = get_metrics(tp, fp, fn, metrics)
 
     return loss / (i + 1), metrics
 
 
-def log_metrics(writer, metrics, epoch, stage, mask_names=None):
+def log_metrics(writer, frame, metrics, epoch, stage):
     """Log metrics for tensorboard
     A function that logs metrics from training and testing to tensorboard
     Args:
@@ -143,11 +150,11 @@ def log_metrics(writer, metrics, epoch, stage, mask_names=None):
         mask_names(List): Names of the mask(prediction) to log mmetrics for
     """
     for k, v in metrics.items():
-        for name, metric in zip(mask_names, v):
+        for name, metric in zip(frame.mask_names, v):
             writer.add_scalar(f"{stage}_{str(k)}/{name}", metric, epoch)
 
 
-def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name, normalize):
+def log_images(writer, frame, batch, epoch, stage, normalize):
     """Log images for tensorboard
 
     Args:
@@ -160,12 +167,16 @@ def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name, no
     Return:
         Images Logged onto tensorboard
     """
+    threshold = frame.loader_opts.threshold
+    normalize_name = frame.loader_opts.normalize
+    use_physics = frame.use_physics
+
     batch = next(iter(batch))
     colors = {
         0: np.array((255, 0, 0)),
         1: np.array((222, 184, 135)),
         2: np.array((95, 158, 160)),
-        #3: np.array((165, 42, 42)),
+        # 3: np.array((165, 42, 42)),
     }
 
     def pm(x): return x.permute(0, 3, 1, 2)
@@ -177,7 +188,7 @@ def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name, no
 
     #_y_hat = np.zeros((y_hat.shape[0], y_hat.shape[1], y_hat.shape[2]))
     #y_hat = y_hat.cpu().numpy()
-    #for i in range(1, 3):
+    # for i in range(1, 3):
     #    _y_hat[y_hat[:, :, :, i] >= threshold[i - 1]] = i + 1
     #_y_hat[_y_hat == 0] = 1
     #_y_hat[y_mask] = 0
@@ -196,19 +207,17 @@ def log_images(writer, frame, batch, epoch, stage, threshold, normalize_name, no
     y = _y
     y_hat = _y_hat
     if normalize_name == "mean-std":
-        # if len(use_physics)>0:
-        # Revert mean-std for all other channels
-        #     # print(x.shape, type(normalize), type(normalize[0]), normalize[0].shape, normalize[1].shape)
-        #     # x[batch, rows, cols, channels]
-        x[:, :, :, :-1] = (x[:, :, :, :-1] * normalize[1][:-1]) + normalize[0][:-1]
-
-        #     # Revert mean-std for all physics channels
-        #     for phys_idx in range(len(use_physics)):
-        p_mu = x[:, :, -1].mean()
-        p_std = x[:, :, -1].std()
-        x[:, :, -1] = (x[:, :, -1] * p_std) + p_mu
-        # else:
-        # x = (x * normalize[1]) + normalize[0]
+        if use_physics:
+            # print(x.shape, type(normalize), type(normalize[0]), normalize[0].shape, normalize[1].shape)
+            # x[batch, rows, cols, channels]
+            x[:, :, :, :-1] = (x[:, :, :, :-1] * normalize[1][:-1]) + normalize[0][:-1]
+            #     # Revert mean-std for all physics channels
+            #     for phys_idx in range(len(use_physics)):
+            # p_mu = x[:, :, -1].mean()
+            # p_std = x[:, :, -1].std()
+            # x[:, :, -1] = (x[:, :, -1] * p_std) + p_mu
+        else:
+            x = (x * normalize[1]) + normalize[0]
     else:
         x = torch.clamp(x, 0, 1)
     try:
@@ -270,13 +279,13 @@ def get_loss(outchannels, opts=None):
     return loss_fn
 
 
-def get_metrics(tp, fp, fn, metrics_opts):
+def get_metrics(tp, fp, fn, metric_names):
     """
     Aggregate --inplace-- the mean of a matrix of tensor (across rows)
     Args:
         metrics (dict(troch.Tensor)): the matrix to get mean of
     """
-    metrics = dict.fromkeys(metrics_opts, 0)
+    metrics = dict.fromkeys(metric_names, 0)
     for metric, arr in metrics.items():
         metric_fun = globals()[metric]
         metrics[metric] = metric_fun(tp, fp, fn)
@@ -288,11 +297,11 @@ def print_conf(conf):
         log(logging.INFO, "{} = {}".format(key, value))
 
 
-def print_metrics(conf, train_metric, val_metric, test_metric, round=2):
+def print_metrics(frame, train_metric, val_metric, test_metric, round=2):
     train_classes, val_classes, test_classes = dict(), dict(), dict()
-    for i, c in enumerate(conf.log_opts.mask_names):
+    for i, c in enumerate(frame.mask_names):
         train_metric_log, val_metric_log, test_metric_log = dict(), dict(), dict()
-        for metric in conf.metrics_opts:
+        for metric in frame.metrics_opts.metrics:
             train_metric_log[metric] = np.round(train_metric[metric][i].item(), 2)
             val_metric_log[metric] = np.round(val_metric[metric][i].item(), 2)
             test_metric_log[metric] = np.round(test_metric[metric][i].item(), 2)
@@ -307,6 +316,7 @@ def print_metrics(conf, train_metric, val_metric, test_metric, round=2):
 def get_current_lr(frame):
     lr = frame.get_current_lr()
     return np.float32(lr)
+
 
 def find_lr(frame, train_loader, init_value, final_value):
     logs, losses = frame.find_lr(train_loader, init_value, final_value)

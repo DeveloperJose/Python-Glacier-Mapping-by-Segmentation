@@ -5,15 +5,20 @@ Created on Wed Feb 24 13:27:56 2021
 
 @author: Aryal007
 """
-from utils import istarmap
-import os, yaml, warnings, random, pdb, multiprocessing
+import multiprocessing
+import os
+import random
+import warnings
 from pathlib import Path
-import numpy as np
-from addict import Dict
-import segmentation.data.slice as fn
-import pandas as pd
 
+import numpy as np
+import pandas as pd
+import yaml
+from addict import Dict
 from tqdm import tqdm
+
+import segmentation.data.slice as fn
+from utils import istarmap
 
 if __name__ == '__main__':
     random.seed(42)
@@ -23,16 +28,16 @@ if __name__ == '__main__':
     conf = Dict(yaml.safe_load(open('./conf/slice_and_preprocess.yaml')))
 
     saved_df = pd.DataFrame(columns=["Landsat ID", "Image", "Slice", "Background",
-                                    "Clean Ice", "Debris", "Masked", "Background Percentage",
-                                    "Clean Ice Percentage", "Debris Percentage",
-                                    "Masked Percentage", "split"])
+                                     "Clean Ice", "Debris", "Masked", "Background Percentage",
+                                     "Clean Ice Percentage", "Debris Percentage",
+                                     "Masked Percentage", "split"])
 
     images = sorted(os.listdir(Path(conf.image_dir)))
     idx = np.random.permutation(len(images))
     splits = {
-        'test'  : sorted([images[i] for i in idx[:int(conf.test*len(images))]]),
-        'val'   : sorted([images[i] for i in idx[int(conf.test*len(images)):int((conf.test+conf.val)*len(images))]]),
-        'train' : sorted([images[i] for i in idx[int((conf.test+conf.val)*len(images)):]])
+        'test': sorted([images[i] for i in idx[:int(conf.test*len(images))]]),
+        'val': sorted([images[i] for i in idx[int(conf.test*len(images)):int((conf.test+conf.val)*len(images))]]),
+        'train': sorted([images[i] for i in idx[int((conf.test+conf.val)*len(images)):]])
     }
     labels = fn.read_shp(Path(conf.labels_dir) / "HKH_CIDC_5basins_all.shp")
     fn.remove_and_create(conf.out_dir)
@@ -69,19 +74,19 @@ if __name__ == '__main__':
 
     pbar.close()
 
-        # for i, _filename in enumerate(meta):
-        #     filename = Path(conf.image_dir) / _filename
-        #     dem_filename = Path(conf.dem_dir) / _filename
-        #     print(f"Filename: {filename.name}")
-        #     tiff = fn.read_tiff(filename)
-        #     dem = fn.read_tiff(dem_filename)
-        #     mask = fn.get_mask(tiff, labels)
-        #     mean, std, _min, _max, saved_df = fn.save_slices(
-        #     filename.name, i, tiff, dem, mask, savepath, saved_df, **conf)
-        #     means.append(mean)
-        #     stds.append(std)
-        #     mins.append(_min)
-        #     maxs.append(_max)
+    # for i, _filename in enumerate(meta):
+    #     filename = Path(conf.image_dir) / _filename
+    #     dem_filename = Path(conf.dem_dir) / _filename
+    #     print(f"Filename: {filename.name}")
+    #     tiff = fn.read_tiff(filename)
+    #     dem = fn.read_tiff(dem_filename)
+    #     mask = fn.get_mask(tiff, labels)
+    #     mean, std, _min, _max, saved_df = fn.save_slices(
+    #     filename.name, i, tiff, dem, mask, savepath, saved_df, **conf)
+    #     means.append(mean)
+    #     stds.append(std)
+    #     mins.append(_min)
+    #     maxs.append(_max)
     means = np.mean(np.asarray(means), axis=0)
     stds = np.mean(np.asarray(stds), axis=0)
     mins = np.min(np.asarray(mins), axis=0)

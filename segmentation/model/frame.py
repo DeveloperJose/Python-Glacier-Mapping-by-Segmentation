@@ -10,15 +10,20 @@ Frame to Combine Model with Optimizer
 This wraps the model and optimizer objects needed in training, so that each
 training step can be concisely called with a single method.
 """
-from .unet import *
-from .metrics import *
+import math
+import os
+from pathlib import Path
 
 import numpy as np
-import os, torch, math, random
-import pdb
-from tqdm import tqdm
-from pathlib import Path
+import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from tqdm import tqdm
+
+import segmentation.model.functions as fn
+
+from .metrics import *
+from .unet import Unet
+
 
 class Framework:
     """
@@ -26,34 +31,57 @@ class Framework:
 
     """
 
-    def __init__(self, loss_fn, model_opts=None, optimizer_opts=None,
-                 reg_opts=None, loss_opts=None, device=None):
+    def __init__(self, loss_opts=None, loader_opts=None, model_opts=None, optimizer_opts=None, reg_opts=None, metrics_opts=None, device=None):
         """
         Set Class Attrributes
         """
+        # % Device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.device.type == "cuda":
             torch.cuda.set_device(device)
-        if optimizer_opts is None:
-            optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
-        self.multi_class = True if model_opts.args.outchannels > 1 else False
-        self.num_classes = model_opts.args.outchannels
+
+
+        # % Data Loader
+        self.loader_opts = loader_opts
+        self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
+        output_classes = loader_opts.output_classes
+        # Binary Model or Multi-Class Model?
+        if len(output_classes) == 1:
+            cl_name = loader_opts.class_names[output_classes[0]]
+            self.mask_names = [f'NOT~{cl_name}', cl_name]
+        else:
+            self.mask_names = [loader_opts.class_names[i] for i in output_classes]
+
+        self.num_classes = len(self.mask_names)
+        self.multi_class = self.num_classes > 1
+
+        # % Model
+        self.model_opts = model_opts
+        self.model_opts.args.inchannels = len(loader_opts.use_channels)
+        self.model_opts.args.outchannels = self.num_classes
+        self.model = Unet(**model_opts.args).to(self.device)
+
+        # % Loss
+        self.loss_opts = loss_opts
+        self.loss_fn = fn.get_loss(self.num_classes, loss_opts).to(self.device)
         if loss_opts is not None:
             self.loss_alpha = torch.tensor([loss_opts.alpha]).to(self.device)
         else:
             self.loss_alpha = torch.tensor([0.0]).to(self.device)
         self.sigma1, self.sigma2 = torch.tensor([1.0]).to(self.device), torch.tensor([1.0]).to(self.device)
         self.sigma1, self.sigma2 = self.sigma1.requires_grad_(), self.sigma2.requires_grad_()
-        #self.loss_alpha = self.loss_alpha.requires_grad_()
-        self.loss_fn = loss_fn.to(self.device)
-        self.model = Unet(**model_opts.args).to(self.device)
-        _optimizer_params = [{'params': self.model.parameters(), **optimizer_opts["args"]},
-                            {'params': self.sigma1, **optimizer_opts["args"]},
-                            {'params': self.sigma2, **optimizer_opts["args"]}]
         if loss_opts is None:
             self.loss_weights = torch.tensor([1.0, 1.0, 1.0]).to(self.device)
         else:
             self.loss_weights = torch.tensor(loss_opts.weights).to(self.device)
+        
+        # % Optimizer
+        self.optimizer_opts = optimizer_opts
+        if optimizer_opts is None:
+            optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
+        _optimizer_params = [{'params': self.model.parameters(), **optimizer_opts["args"]},
+                             {'params': self.sigma1, **optimizer_opts["args"]},
+                             {'params': self.sigma2, **optimizer_opts["args"]}]
         optimizer_def = getattr(torch.optim, optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
         self.lrscheduler = ReduceLROnPlateau(self.optimizer, "min",
@@ -61,7 +89,10 @@ class Framework:
                                              patience=15,
                                              factor=0.1,
                                              min_lr=1e-9)
+
+        # % Regularization
         self.reg_opts = reg_opts
+        self.metrics_opts = metrics_opts
 
     def optimize(self, x, y):
         """
@@ -97,14 +128,50 @@ class Framework:
         self.lrscheduler.step(val_loss)
 
     def save(self, out_dir, epoch):
-        """
-        Save a model checkpoint
-        """
+        """Save frame as a checkpoint file"""
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
+
+        state = {
+            'epoch': epoch,
+            'state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'sigma1': self.sigma1,
+            'sigma2': self.sigma2,
+            'loss_opts': self.loss_opts,
+            'loader_opts': self.loader_opts,
+            'model_opts': self.model_opts,
+            'optimizer_opts': self.optimizer_opts,
+            'reg_opts': self.reg_opts,
+            'metrics_opts': self.metrics_opts,
+        }
         model_path = Path(out_dir, f"model_{epoch}.pt")
-        torch.save(self.model.state_dict(), model_path)
+        torch.save(state, model_path)
         print(f"Saved model {epoch}")
+
+    @staticmethod
+    def from_checkpoint(checkpoint_path: Path, device=None):
+        """Load a frame from a checkpoint file"""
+        assert checkpoint_path.exists(), 'checkpoint_path does not exist'
+        if torch.cuda.is_available():
+            state = torch.load(checkpoint_path)
+        else:
+            state = torch.load(checkpoint_path, map_location='cpu')
+
+        frame = Framework(
+            loss_opts=state['loss_opts'],
+            loader_opts=state['loader_opts'],
+            model_opts=state['model_opts'],
+            optimizer_opts=state['optimizer_opts'],
+            reg_opts=state['reg_opts'],
+            metrics_opts=state['metrics_opts'],
+            device=device
+        )
+        frame.model.load_state_dict(state['state_dict'])
+        frame.optimizer.load_state_dict(state['optimizer_state_dict'])
+        frame.sigma1 = state['sigma1']
+        frame.sigma2 = state['sigma2']
+        return frame
 
     def infer(self, x):
         """ Make a prediction for a given x
@@ -139,21 +206,21 @@ class Framework:
         diceloss = diceloss.sum()
         #loss = torch.add(torch.mul(diceloss.clone(), self.loss_alpha), torch.mul(boundaryloss.clone(), (1-self.loss_alpha)))
         loss = torch.add(
-                torch.add(
-                    torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma1))), diceloss.clone()), 
-                    torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma2))), boundaryloss.clone())
-                    ),
-                torch.abs(torch.log(torch.mul(self.sigma1, self.sigma2)))
-                )
+            torch.add(
+                torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma1))), diceloss.clone()),
+                torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma2))), boundaryloss.clone())
+            ),
+            torch.abs(torch.log(torch.mul(self.sigma1, self.sigma2)))
+        )
         if self.reg_opts:
             for reg_type in self.reg_opts.keys():
                 reg_fun = globals()[reg_type]
-                penalty = reg_fun(self.model.parameters(),self.reg_opts[reg_type],self.device)
+                penalty = reg_fun(self.model.parameters(), self.reg_opts[reg_type], self.device)
                 loss += penalty
         return loss.abs()
-    
+
     def get_loss_alpha(self):
-        #return self.loss_alpha.item()
+        # return self.loss_alpha.item()
         return (self.sigma1.item(), self.sigma2.item())
 
     def metrics(self, y_hat, y, mask, threshold):
@@ -220,26 +287,26 @@ class Framework:
             y_hat = torch.sigmoid(logits)
         return y_hat
 
-    def load_state_dict(self, state_dict):
-        self.model.load_state_dict(state_dict)
+    # def load_state_dict(self, state_dict):
+    #     self.model.load_state_dict(state_dict)
 
-    def optim_load_state_dict(self, state_dict):
-        self.optimizer.load_state_dict(state_dict)
+    # def optim_load_state_dict(self, state_dict):
+    #     self.optimizer.load_state_dict(state_dict)
 
-    def load_best(self, model_path):
-        print(f"Validation loss higher than previous for 3 steps, loading previous state")
-        if torch.cuda.is_available():
-            state_dict = torch.load(model_path)
-        else:
-            state_dict = torch.load(model_path, map_location="cpu")
-        self.load_state_dict(state_dict)
+    # def load_best(self, model_path):
+    #     print(f"Validation loss higher than previous for 3 steps, loading previous state")
+    #     if torch.cuda.is_available():
+    #         state_dict = torch.load(model_path)
+    #     else:
+    #         state_dict = torch.load(model_path, map_location="cpu")
+    #     self.load_state_dict(state_dict)
 
-    def save_best(self, out_dir):
-        print(f"Current validation loss lower than previous, saving current state")
-        if not os.path.exists(out_dir):
-            os.makedirs(out_dir)
-        model_path = Path(out_dir, f"model_best.h5")
-        torch.save(self.model.state_dict(), model_path)
+    # def save_best(self, out_dir):
+    #     print(f"Current validation loss lower than previous, saving current state")
+    #     if not os.path.exists(out_dir):
+    #         os.makedirs(out_dir)
+    #     model_path = Path(out_dir, f"model_best.h5")
+    #     torch.save(self.model.state_dict(), model_path)
 
     def freeze_layers(self, layers=None):
         for i, layer in enumerate(self.model.parameters()):

@@ -6,20 +6,17 @@ Created on Wed Feb 24 13:26:56 2021
 @author: mibook
 """
 import os
-import pdb
 import shutil
-from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
-
-from . import physics
 import rasterio
 from rasterio.features import rasterize
-from rasterio.warp import transform
 from shapely.geometry import Polygon, box
 from shapely.ops import cascaded_union
 from skimage.color import rgb2hsv
+
+from . import physics
 
 
 def read_shp(filename):
@@ -118,7 +115,7 @@ def get_mask(tiff, shp, column="Glaciers"):
         bbox_poly = gpd.GeoDataFrame({'geometry': bbox}, index=[
                                      0], crs=img_meta["crs"].data)
         return shp.loc[shp.intersects(bbox_poly["geometry"][0])]
-    
+
     classes = sorted(list(set(shp[column])))
     # print(f"Classes = {classes}")
 
@@ -174,7 +171,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
                 temp = np.zeros((conf["window_size"][0], conf["window_size"][1]))
                 temp[0:slice.shape[0], 0:slice.shape[1]] = slice
             else:
-                temp = np.zeros((conf["window_size"][0],conf["window_size"][1],slice.shape[2]))
+                temp = np.zeros((conf["window_size"][0], conf["window_size"][1], slice.shape[2]))
                 temp[0:slice.shape[0], 0:slice.shape[1], :] = slice
             slice = temp
         return slice
@@ -204,10 +201,10 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
 
     if not os.path.exists(conf["out_dir"]):
         os.makedirs(conf["out_dir"])
-    
+
     def compute_dems(dem_np):
-        elevation = dem_np[:,:,0][:,:,None]
-        slope = dem_np[:,:,1][:,:,None]
+        elevation = dem_np[:, :, 0][:, :, None]
+        slope = dem_np[:, :, 1][:, :, None]
         slope = np.sin(slope*np.pi/180)
         # aspect = dem_np[:,:,2][:,:,None]
         # curvature = dem_np[:,:,3][:,:,None]
@@ -226,7 +223,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
     #     idx[:,:,0] = xv
     #     idx[:,:,1] = yv
     #     lat_lon = np.apply_along_axis(
-    #         lambda x:rasterio.transform.xy(dem.transform, x[0], x[1]), 
+    #         lambda x:rasterio.transform.xy(dem.transform, x[0], x[1]),
     #     axis=2, arr=idx)
     #     lon, lat = transform(dem.crs, {'init': 'EPSG:4326'},
     #                  lat_lon[:,:,0].flatten(), lat_lon[:,:,1].flatten())
@@ -247,7 +244,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
     tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
 
     pbar.set_postfix_str('Computing physics')
-    phys_np = physics.compute_phys_v2(dem_np[:,:,0], conf["physics_res"], conf["physics_scale"])
+    phys_np = physics.compute_phys_v2(dem_np[:, :, 0], conf["physics_res"], conf["physics_scale"])
     tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
 
     # tiff_np = tiff_np[:, :, conf["use_bands"]]
@@ -260,7 +257,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
     if conf["add_ndsi"]:
         tiff_np = add_index(tiff_np, index1=1, index2=4)
     if conf["add_hsv"]:
-        rgb_img = tiff_np[:, :, [4,3,1]] / 255
+        rgb_img = tiff_np[:, :, [4, 3, 1]] / 255
         hsv_img = rgb2hsv(rgb_img[:, :, [2, 1, 0]])
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
     slicenum = 0
@@ -277,7 +274,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
                 final_save_slice = np.copy(tiff_slice)
 
                 if filter_percentage(final_save_slice, conf["filter"], type="image"):
-                    mask_fname, tiff_fname = "mask_" + str(filenum) + "_slice_" + str( slicenum), "tiff_" + str(filenum) + "_slice_" + str(slicenum)
+                    mask_fname, tiff_fname = "mask_" + str(filenum) + "_slice_" + str(slicenum), "tiff_" + str(filenum) + "_slice_" + str(slicenum)
                     bg, ci, deb, mas = get_pixel_count(final_save_slice, mask_slice)
                     _tot = bg + ci + deb + mas
                     _row = [filename, filenum, slicenum, bg, ci, deb, mas, bg / _tot, ci / _tot, deb / _tot, mas / _tot, os.path.basename(savepath)]
@@ -288,6 +285,7 @@ def save_slices(filename, filenum, tiff, dem, mask, savepath, saved_df, pbar, **
                     # print(f"Saved image {filenum} slice {slicenum}")
             slicenum += 1
     return np.mean(tiff_np, axis=(0, 1)), np.std(tiff_np, axis=(0, 1)), np.min(tiff_np, axis=(0, 1)), np.max(tiff_np, axis=(0, 1)), saved_df
+
 
 def remove_and_create(dirpath):
     if os.path.exists(dirpath) and os.path.isdir(dirpath):
