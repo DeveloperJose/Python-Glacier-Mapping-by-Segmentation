@@ -44,16 +44,10 @@ if __name__ == '__main__':
 
     pbar = tqdm(total=1, desc='...')
 
-    def process(i, _filename):
-        global saved_df, conf, pbar
-        filename = Path(conf.image_dir) / _filename
-        dem_filename = Path(conf.dem_dir) / _filename
-        # print(f"Filename: {filename.name}")
-        tiff = fn.read_tiff(filename)
-        dem = fn.read_tiff(dem_filename)
-        mask = fn.get_mask(tiff, labels)
-        mean, std, _min, _max, saved_df = fn.save_slices(filename.name, i, tiff, dem, mask, savepath, saved_df, pbar, **conf)
-        return mean, std, _min, _max
+    def process(i, fname):
+        global conf, pbar
+        mean, std, _min, _max, df_rows = fn.save_slices(i, fname, labels, savepath, pbar, **conf)
+        return mean, std, _min, _max, df_rows
 
     for split, meta in splits.items():
         means, stds, mins, maxs = [], [], [], []
@@ -63,30 +57,18 @@ if __name__ == '__main__':
         pbar.set_description(f'Processing dataset {split}')
         pbar.reset(len(meta))
         with multiprocessing.Pool(32) as pool:
-            for result in pool.istarmap(process, enumerate(meta)):
-                mu, s, mi, ma = result
+           for result in pool.istarmap(process, enumerate(meta)):
+                mu, s, mi, ma, df_rows = result
                 means.append(mu)
                 stds.append(s)
                 mins.append(mi)
                 maxs.append(ma)
-
+                for row in df_rows:
+                    saved_df.loc[len(saved_df.index)] = row
                 pbar.update(1)
 
     pbar.close()
 
-    # for i, _filename in enumerate(meta):
-    #     filename = Path(conf.image_dir) / _filename
-    #     dem_filename = Path(conf.dem_dir) / _filename
-    #     print(f"Filename: {filename.name}")
-    #     tiff = fn.read_tiff(filename)
-    #     dem = fn.read_tiff(dem_filename)
-    #     mask = fn.get_mask(tiff, labels)
-    #     mean, std, _min, _max, saved_df = fn.save_slices(
-    #     filename.name, i, tiff, dem, mask, savepath, saved_df, **conf)
-    #     means.append(mean)
-    #     stds.append(std)
-    #     mins.append(_min)
-    #     maxs.append(_max)
     means = np.mean(np.asarray(means), axis=0)
     stds = np.mean(np.asarray(stds), axis=0)
     mins = np.min(np.asarray(mins), axis=0)
@@ -94,4 +76,4 @@ if __name__ == '__main__':
     np.save(conf.out_dir + f"normalize_{split}", np.asarray((means, stds, mins, maxs)))
 
     saved_df.to_csv(conf.out_dir + "slice_meta.csv", encoding='utf-8', index=False)
-    print("Saving slices completed!!!")
+    print(f"Saving slices to {conf.out_dir} completed!!!")

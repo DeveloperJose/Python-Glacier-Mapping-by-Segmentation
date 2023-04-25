@@ -13,6 +13,7 @@ import pdb
 import random
 import typing
 import warnings
+from timeit import default_timer as timer
 
 import numpy as np
 import torch
@@ -40,6 +41,9 @@ if __name__ == "__main__":
     run_name: str = conf.training_opts.run_name
     output_dir = pathlib.Path(conf.training_opts.output_dir) / run_name
     model_output_dir = output_dir/'models'
+
+    if 'phys' in run_name and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels:
+        raise ValueError('Training phys model without phys channel')
 
     # % Loaders
     train_loader, val_loader, test_folder = fetch_loaders(**conf.loader_opts)
@@ -90,6 +94,7 @@ if __name__ == "__main__":
 
     # % Training Body
     loss_val = np.inf
+    start_time = timer()
     for epoch in range(1, conf.training_opts.epochs + 1):
         # train loop
         loss_train, train_metric, loss_alpha = fn.train_epoch(epoch, train_loader, frame)
@@ -128,3 +133,5 @@ if __name__ == "__main__":
 
     frame.save(model_output_dir, "final")
     writer.close()
+
+    fn.log(logging.INFO, f'Finished training {run_name} | Training took {timer()-start_time:.2f}sec')

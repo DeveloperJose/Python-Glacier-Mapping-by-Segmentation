@@ -14,10 +14,12 @@ import math
 import os
 from pathlib import Path
 
+import pandas as pd
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
+from scipy.ndimage.morphology import binary_fill_holes
 
 import segmentation.model.functions as fn
 
@@ -40,11 +42,15 @@ class Framework:
         if self.device.type == "cuda":
             torch.cuda.set_device(device)
 
-
         # % Data Loader
         self.loader_opts = loader_opts
         self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
+        self.use_channels = loader_opts.use_channels
         output_classes = loader_opts.output_classes
+
+        # Dataframe
+        self.df = pd.read_csv(Path(loader_opts.processed_dir) / 'slice_meta.csv')
+
         # Binary Model or Multi-Class Model?
         if len(output_classes) == 1:
             cl_name = loader_opts.class_names[output_classes[0]]
@@ -54,6 +60,14 @@ class Framework:
 
         self.num_classes = len(self.mask_names)
         self.multi_class = self.num_classes > 1
+        self.is_binary = len(output_classes) == 1
+        if self.is_binary:
+            self.binary_class_idx = loader_opts.output_classes[0]
+
+        # Normalization
+        self.normalization = loader_opts.normalize
+        self.norm_arr = np.load(Path(loader_opts.processed_dir) / "normalize_train.npy")
+        assert self.normalization == "mean-std" or self.normalization == "min-max", 'Invalid normalization'
 
         # % Model
         self.model_opts = model_opts
@@ -74,7 +88,7 @@ class Framework:
             self.loss_weights = torch.tensor([1.0, 1.0, 1.0]).to(self.device)
         else:
             self.loss_weights = torch.tensor(loss_opts.weights).to(self.device)
-        
+
         # % Optimizer
         self.optimizer_opts = optimizer_opts
         if optimizer_opts is None:
@@ -150,13 +164,16 @@ class Framework:
         print(f"Saved model {epoch}")
 
     @staticmethod
-    def from_checkpoint(checkpoint_path: Path, device=None):
+    def from_checkpoint(checkpoint_path: Path, device=None, testing=False):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), 'checkpoint_path does not exist'
         if torch.cuda.is_available():
             state = torch.load(checkpoint_path)
         else:
             state = torch.load(checkpoint_path, map_location='cpu')
+
+        if testing:
+            state['model_opts'].args.dropout = 0.00000001
 
         frame = Framework(
             loss_opts=state['loss_opts'],
@@ -287,27 +304,6 @@ class Framework:
             y_hat = torch.sigmoid(logits)
         return y_hat
 
-    # def load_state_dict(self, state_dict):
-    #     self.model.load_state_dict(state_dict)
-
-    # def optim_load_state_dict(self, state_dict):
-    #     self.optimizer.load_state_dict(state_dict)
-
-    # def load_best(self, model_path):
-    #     print(f"Validation loss higher than previous for 3 steps, loading previous state")
-    #     if torch.cuda.is_available():
-    #         state_dict = torch.load(model_path)
-    #     else:
-    #         state_dict = torch.load(model_path, map_location="cpu")
-    #     self.load_state_dict(state_dict)
-
-    # def save_best(self, out_dir):
-    #     print(f"Current validation loss lower than previous, saving current state")
-    #     if not os.path.exists(out_dir):
-    #         os.makedirs(out_dir)
-    #     model_path = Path(out_dir, f"model_best.h5")
-    #     torch.save(self.model.state_dict(), model_path)
-
     def freeze_layers(self, layers=None):
         for i, layer in enumerate(self.model.parameters()):
             if layers is None:
@@ -360,3 +356,96 @@ class Framework:
 
     def get_model_device(self):
         return self.model, self.device
+
+    def normalize(self, x):
+        if self.normalization == "mean-std":
+            _mean, _std = self.norm_arr[0], self.norm_arr[1]
+            return (x - _mean) / _std
+        elif self.normalization == "min-max":
+            _min, _max = self.norm_arr[2], self.norm_arr[3]
+            return (np.clip(x, _min, _max) - _min) / (_max - _min)
+        else:
+            raise Exception('Invalid normalization')
+
+    def predict_whole(self, whole_arr, window_size, threshold=None):
+        # Reduce to only needed channels to speed up further computations, normalize, and get mask
+        whole_arr = whole_arr[:, :, self.use_channels]
+        whole_arr = self.normalize(whole_arr)
+        mask = np.sum(whole_arr[:, :, :3], axis=2) < 0.001
+
+        # Perform sliding window prediction
+        y_pred = np.zeros((whole_arr.shape[0], whole_arr.shape[1]), dtype=np.uint8)
+        for row in range(0, whole_arr.shape[0], window_size[0]):
+            for column in range(0, whole_arr.shape[1], window_size[1]):
+                # Get slice from input array, pad with zeros if needed
+                current_slice = whole_arr[row:row + window_size[0], column:column + window_size[1], :]
+                if current_slice.shape[0] != window_size[0] or current_slice.shape[1] != window_size[1]:
+                    temp = np.zeros((window_size[0], window_size[1], whole_arr.shape[2]))
+                    temp[:current_slice.shape[0], :current_slice.shape[1], :] = current_slice
+                    current_slice = temp
+
+                # Slice prediction then place slice prediction into whole image prediction
+                pred = self.predict_slice(current_slice, threshold, preprocess=False, use_mask=False)
+
+                endrow_dest = row + window_size[0]
+                endrow_source = window_size[0]
+                endcolumn_dest = column + window_size[0]
+                endcolumn_source = window_size[1]
+                if endrow_dest > y_pred.shape[0]:
+                    endrow_source = y_pred.shape[0] - row
+                    endrow_dest = y_pred.shape[0]
+                if endcolumn_dest > y_pred.shape[1]:
+                    endcolumn_source = y_pred.shape[1] - column
+                    endcolumn_dest = y_pred.shape[1]
+
+                y_pred[row:endrow_dest, column:endcolumn_dest] = pred[0:endrow_source, 0:endcolumn_source]
+
+        y_pred[mask] = 0
+        return y_pred, mask
+
+    def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
+        # Process threshold parameter
+        if threshold is None:
+            threshold = [0.5] * self.num_classes
+        elif isinstance(threshold, (int, float)):
+            threshold = [threshold] * self.num_classes
+        assert isinstance(threshold, list) and len(threshold) == self.num_classes
+
+        # Reduce to only needed channels to speed up further computations, normalize, and get mask
+        if preprocess:
+            slice_arr = slice_arr[:, :, self.use_channels]
+            slice_arr = self.normalize(slice_arr)
+
+        # Send array to torch and then get prediction
+        _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float()
+        _y = self.infer(_x)
+        _y = torch.nn.Softmax(3)(_y)
+        _y = np.squeeze(_y.cpu())
+        assert _y.shape[2] == self.num_classes
+
+        # Threshold + fill holes + add mask to prediction
+        y_pred = np.zeros((_y.shape[0], _y.shape[1]), dtype=np.uint8)
+        for i in range(self.num_classes):
+            _class = _y[:, :, i] >= threshold[i]
+            _class = binary_fill_holes(_class)
+            y_pred[_class] = i
+
+        if use_mask:
+            mask = np.sum(slice_arr[:, :, :3], axis=2) < 0.001
+            y_pred[mask] = 0
+        return y_pred
+
+    def get_y_true(self, label_mask: np.ndarray, mask=None):
+        y_true = np.zeros((label_mask.shape[0], label_mask.shape[1]), dtype=np.uint8)
+        if self.is_binary:
+            assert self.binary_class_idx != 0, 'You are trying to predict BG instead of CI or DCG'
+            y_true[label_mask[:, :, self.binary_class_idx-1] != 1] = 0
+            y_true[label_mask[:, :, self.binary_class_idx-1] == 1] = 1
+        else:
+            # Label mask is always just CleanIce and Debris so do +1 to match the prediction labels
+            for i in range(label_mask.shape[2]):
+                y_true[label_mask[:, :, i] == 1] = i + 1
+
+        if mask is not None:
+            y_true[mask] = 0
+        return y_true

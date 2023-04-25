@@ -213,6 +213,9 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         self.theta0 = theta0
         self.theta = theta
 
+        if self.outchannels == 2:
+            print('customloss using masked dice')
+
     def forward(self, pred, target):
         if self.masked:
             mask = torch.sum(target, dim=1) == 1

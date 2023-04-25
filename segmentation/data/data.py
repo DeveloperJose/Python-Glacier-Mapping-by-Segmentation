@@ -82,6 +82,7 @@ class GlacierDataset(Dataset):
         self.normalize = normalize
         self.transforms = transforms
 
+        self.physics_channel = physics_channel
         self.use_physics = physics_channel in use_channels
 
         # Sanity checking
@@ -117,11 +118,11 @@ class GlacierDataset(Dataset):
             data = (data - self.min) / (self.max - self.min)
         elif self.normalize == "mean-std":
             # mean-std all channels except physics
-            if self.use_physics:
-                data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
-                # data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
-            else:
-                data = (data - self.mean) / self.std
+            # if self.use_physics:
+            #     data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
+            #     data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
+            # else:
+            data = (data - self.mean) / self.std
         else:
             raise ValueError("normalize must be min-max or mean-std")
         label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
@@ -132,9 +133,11 @@ class GlacierDataset(Dataset):
         # print('DEBUGGING', np.sum(label==0), np.sum(label==1), np.sum(label==2))
 
         # Set labels depending on problem (Binary vs Multi-Class)
+        # fn.log(logging.INFO, f'label has unique={np.unique(label)}')
         if len(self.output_classes) == 1:
             binary_class = self.output_classes[0]
-            label = np.concatenate((label != binary_class, label == binary_class), axis=2)
+            # label = np.concatenate((label != binary_class, label == binary_class), axis=2)
+            label = np.concatenate((label == 0, label == binary_class), axis=2)
         else:
             # label = np.concatenate((label == 0, label == 1, label==2), axis=2)
             label = np.concatenate([label == x for x in self.output_classes], axis=2)

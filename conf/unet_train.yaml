@@ -1,21 +1,21 @@
 training_opts:
   output_dir: "/home/jperez/programming/glacier_mapping/runs/"
-  run_name: "baseline_debris_fixmasked"
+  run_name: "multi_baseline"
   gpu_rank: 0
   epochs: 251
   fine_tune: False
   find_lr: False
 loader_opts:
   processed_dir: "/home/jperez/data/HKH/processed_L07_2005/"
-  batch_size: 16 # 14 # 8
+  batch_size: 12 # 14 # 8
   use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics']
-  output_classes: [2] # 0=BG, 1=CI, 2=Debris
+  output_classes: [0, 1, 2] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
   physics_channel: 10 # For physics experiments (No need to change)
   class_names: ['BG', 'CleanIce', 'Debris'] # All class names in the dataset (No need to change)
 metrics_opts: 
   metrics: ["IoU", "precision", "recall"]
-  threshold: [0.5, 0.5]
+  threshold: [0.5, 0.5, 0.5]
 loss_opts:
   name: "custom"
   masked: True

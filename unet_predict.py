@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     #% Load checkpoint using the training config
     checkpoint_path = runs_dir / conf.run_name / 'models' / 'model_best.pt'
-    frame: Framework = Framework.from_checkpoint(checkpoint_path, device=int(conf.gpu_rank))
+    frame: Framework = Framework.from_checkpoint(checkpoint_path, device=int(conf.gpu_rank), testing=True)
 
     #% Prepare dataframe
     columns = ["tile_name"]
@@ -49,7 +49,6 @@ if __name__ == "__main__":
     normalize:str = frame.loader_opts.normalize
     use_channels = frame.loader_opts.use_channels
     threshold = frame.metrics_opts.threshold
-    is_binary = len(frame.loader_opts.output_classes) == 1
     binary_class_idx = frame.loader_opts.output_classes[0]
     total_classes = len(frame.loader_opts.class_names)
 
@@ -72,17 +71,18 @@ if __name__ == "__main__":
         # Load data
         x = np.load(data_dir / "test" / x_fname)
         mask = np.sum(x, axis=2) == 0
-        if normalize == "mean-std":
-            if frame.use_physics:
-                x[:, :, :-1] = (x[:, :, :-1] - _mean[:-1]) / _std[:-1]
-            else:
-                x = (x - _mean) / _std
-        if normalize == "min-max":
-            x = (x - _min) / (_max - _min)
+
+        x = frame.normalize(x)
         
         y_fname = x_fname.replace("tiff", "mask")
         save_fname = x_fname.replace("tiff", "pred")
         y_true = np.load(data_dir / "test" / y_fname) + 1
+        if frame.is_binary:
+            y_true_b = y_true.copy()
+            y_true_b[y_true==binary_class_idx+1] = 2
+            y_true_b[y_true!=binary_class_idx+1] = 1
+            y_true = y_true_b
+        y_true[mask] = 0
         y_true = y_true[~mask]
 
         # Make prediction
@@ -93,23 +93,26 @@ if __name__ == "__main__":
         assert pred.shape[2] == frame.num_classes
 
         # Threshold + fill holes + add mask to prediction
-        _pred = np.zeros((pred.shape[0], pred.shape[1]))
+        y_pred = np.zeros((pred.shape[0], pred.shape[1]))
         for i in range(frame.num_classes):
             _class = pred[:, :, i] >= threshold[i]
             _class = binary_fill_holes(_class)
-            _pred[_class] = i
-        _pred += 1
-        _pred[mask] = 0
-        y_pred = _pred
+            y_pred[_class] = i
+        y_pred += 1
+        y_pred[mask] = 0
+        y_pred = y_pred
         y_pred = y_pred[~mask]
 
         # Compute precision, recall, and IoU for all classes in this slice
         # and keep running totals for all of them
         _row = [save_fname]
         for i in range(frame.num_classes):
-            if i == 0 and is_binary:
+            if i == 0 and frame.is_binary:
                 p = (y_pred != binary_class_idx+1).astype(np.uint8)
                 t = (y_true != binary_class_idx).astype(np.uint8)
+            elif frame.is_binary:
+                p = (y_pred == 2).astype(np.uint8)
+                t = (y_true == 2).astype(np.uint8)
             else:
                 p = (y_pred == i+1).astype(np.uint8)
                 t = (y_true == i).astype(np.uint8)

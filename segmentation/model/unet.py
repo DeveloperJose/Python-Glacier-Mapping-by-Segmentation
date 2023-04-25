@@ -72,6 +72,8 @@ class Unet(nn.Module):
         self.upblocks = nn.ModuleList()
         self.pool = nn.MaxPool2d(2, 2)
 
+        print('UNET dropout=', dropout)
+
         in_channels = inchannels
         out_channels = first_channel_output
         for _ in range(net_depth):

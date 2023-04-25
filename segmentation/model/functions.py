@@ -207,17 +207,17 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
     y = _y
     y_hat = _y_hat
     if normalize_name == "mean-std":
-        if use_physics:
-            # print(x.shape, type(normalize), type(normalize[0]), normalize[0].shape, normalize[1].shape)
-            # x[batch, rows, cols, channels]
-            x[:, :, :, :-1] = (x[:, :, :, :-1] * normalize[1][:-1]) + normalize[0][:-1]
-            #     # Revert mean-std for all physics channels
-            #     for phys_idx in range(len(use_physics)):
-            # p_mu = x[:, :, -1].mean()
-            # p_std = x[:, :, -1].std()
-            # x[:, :, -1] = (x[:, :, -1] * p_std) + p_mu
-        else:
-            x = (x * normalize[1]) + normalize[0]
+        # if use_physics:
+        #     # print(x.shape, type(normalize), type(normalize[0]), normalize[0].shape, normalize[1].shape)
+        #     # x[batch, rows, cols, channels]
+        #     x[:, :, :, :-1] = (x[:, :, :, :-1] * normalize[1][:-1]) + normalize[0][:-1]
+        #     #     # Revert mean-std for all physics channels
+        #     #     for phys_idx in range(len(use_physics)):
+        #     p_mu = x[:, :, -1].mean()
+        #     p_std = x[:, :, -1].std()
+        #     x[:, :, -1] = (x[:, :, -1] * p_std) + p_mu
+        # else:
+        x = (x * normalize[1]) + normalize[0]
     else:
         x = torch.clamp(x, 0, 1)
     try:

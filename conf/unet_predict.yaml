@@ -1,4 +1,4 @@
 runs_dir: "/home/jperez/programming/glacier_mapping/runs/"
-run_name: "baseline_debris"
+run_name: "multi_phys64_s1"
 output_dir: "pred_runs/"
 gpu_rank: 1

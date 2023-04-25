@@ -44,23 +44,23 @@ if __name__ == "__main__":
     
     sums = []
     for x_fname in inputs:
-        x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
-        mask = np.sum(x[:,:,:7], axis=2) == 0
+        _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
+        mask = np.sum(_x[:,:,:7], axis=2) == 0
         if conf.normalize == "mean-std":
-            x = (x - _mean) / _std
+            _x = (_x - _mean) / _std
         if conf.normalize == "min-max":
-            x = (x - _min) / (_max - _min)
+            _x = (_x - _min) / (_max - _min)
         y_fname = x_fname.replace("tiff", "mask")
         y_true = np.load(data_dir / conf.processed_dir / conf.split / y_fname) + 1
         y_true[mask] = 0
-        x = torch.from_numpy(np.expand_dims(x, axis=0)).float()
-        x = x.permute(0, 3, 1, 2).to(device)
-        x = x.requires_grad_()
-        y = model(x)
+        _x = torch.from_numpy(np.expand_dims(_x, axis=0)).float()
+        _x = _x.permute(0, 3, 1, 2).to(device)
+        _x = _x.requires_grad_()
+        y = model(_x)
         y = y.permute(0, 2, 3, 1)
         y = torch.nn.Softmax(3)(y)
         y[:,:,:,1].mean().backward()
-        _x = x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
+        _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
         _sum =  np.sum(_x, axis=(0,1))
         sums.append(_sum)
     sums = np.asarray(sums)
@@ -109,18 +109,18 @@ if __name__ == "__main__":
     b18_plot = fig.add_subplot(grid[3, 5])
     b19_plot = fig.add_subplot(grid[3, 6])
 
-    x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
-    x_plot.imshow(x[:,:,[4,2,1]]/255)
+    _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
+    x_plot.imshow(_x[:,:,[4,2,1]]/255)
     x_plot.axis("off")
     x_plot.set_title("False color composite (B5, B4, B2)")
     #plt.imshow(x[:,:,[4,2,1]]/255)
     #plt.savefig("./sailencymap/sailency_x_true.png")
 
-    mask = np.sum(x[:,:,:7], axis=2) == 0
+    mask = np.sum(_x[:,:,:7], axis=2) == 0
     if conf.normalize == "mean-std":
-        x = (x - _mean) / _std
+        _x = (_x - _mean) / _std
     if conf.normalize == "min-max":
-        x = (x - _min) / (_max - _min)
+        _x = (_x - _min) / (_max - _min)
     
     y_fname = x_fname.replace("tiff", "mask")
     y_true = np.load(data_dir / conf.processed_dir / conf.split / y_fname) + 1
@@ -131,11 +131,11 @@ if __name__ == "__main__":
     y_plot.axis("off")
     y_plot.set_title("Label")
 
-    x = torch.from_numpy(np.expand_dims(x, axis=0)).float()
+    _x = torch.from_numpy(np.expand_dims(_x, axis=0)).float()
     
-    x = x.permute(0, 3, 1, 2).to(device)
-    x = x.requires_grad_()
-    y = model(x)
+    _x = _x.permute(0, 3, 1, 2).to(device)
+    _x = _x.requires_grad_()
+    y = model(_x)
     y = y.permute(0, 2, 3, 1)
     y = torch.nn.Softmax(3)(y)
 
@@ -143,7 +143,7 @@ if __name__ == "__main__":
     plt.imshow(_y.detach().cpu().numpy()[0,:,:,1])
     plt.savefig("./sailencymap/sailency_y_pred.png")
     y[:,:,:,1].mean().backward()
-    _x = x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
+    _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
 
     for i in range(_x.shape[2]):
         #plt.figure()

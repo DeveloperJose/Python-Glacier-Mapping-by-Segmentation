@@ -11,5 +11,5 @@ codeexecution/*
 images/*
 runs/*
 pred_runs/*
-
 output/*
+*.tif

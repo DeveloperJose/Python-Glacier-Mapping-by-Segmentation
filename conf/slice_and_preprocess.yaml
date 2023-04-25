@@ -1,7 +1,7 @@
 image_dir: "/data/baryal/HKH/Landsat7_2005/"
-dem_dir: "/data/baryal/HKH/DEM/"
+dem_dir: None # "/data/baryal/HKH/DEM/"
 labels_dir: "/data/baryal/HKH/labels/"
-out_dir: "/home/jperez/data/HKH/processed_L07_2005_phys128_s1/"
+out_dir: "/home/jperez/data/HKH/processed_L07_2005_nodem/"
 window_size: [512, 512]
 overlap: 64
 filter: 0.1
@@ -11,7 +11,7 @@ add_ndvi: False
 add_ndwi: False
 add_ndsi: False
 add_hsv: False
-physics_res: 128 # int or "full"
+physics_res: 64 # int or "full" or None
 physics_scale: 1
 # bands: ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", "phys"]
 # use_bands: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
