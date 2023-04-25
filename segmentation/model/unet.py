@@ -7,11 +7,12 @@ Created on Fri Sep  4 22:41:45 2020
 
 UNet Model Class
 
-This code holds the defination for u-net model
+This code holds the definition for a U-Net model
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class ConvBlock(nn.Module):
     """
@@ -20,11 +21,12 @@ class ConvBlock(nn.Module):
     Transforms large image with small inchannels into smaller image with larger
     outchannels, via two convolution / relu pairs.
     """
-    def __init__(self,inchannels,outchannels,dropout,spatial,kernel_size=3,padding=1):
+
+    def __init__(self, inchannels, outchannels, dropout, spatial, kernel_size=3, padding=1):
         super().__init__()
         self.outchannels = outchannels
-        self.conv1 = nn.Conv2d(inchannels,outchannels,kernel_size=kernel_size,padding=padding)
-        self.conv2 = nn.Conv2d(outchannels,outchannels,kernel_size=kernel_size,padding=padding)
+        self.conv1 = nn.Conv2d(inchannels, outchannels, kernel_size=kernel_size, padding=padding)
+        self.conv2 = nn.Conv2d(outchannels, outchannels, kernel_size=kernel_size, padding=padding)
         self.conv_bn = nn.BatchNorm2d(outchannels)
         self.dropoutprob = dropout
         if self.dropoutprob > 0:
@@ -48,6 +50,7 @@ class UpBlock(nn.Module):
     Transforms small image with large inchannels into larger image with smaller
     outchannels, via two convolution / relu pairs.
     """
+
     def __init__(self, inchannels, outchannels, dropout, spatial, kernel_size=2, stride=2):
         super().__init__()
         self.upconv = nn.ConvTranspose2d(inchannels, outchannels, kernel_size=kernel_size, stride=stride)
@@ -66,7 +69,8 @@ class Unet(nn.Module):
     Combines the encoder and decoder blocks with skip connections, to arrive at
     a U-Net model.
     """
-    def __init__(self,inchannels,outchannels,net_depth,dropout=0.2,spatial=False,first_channel_output=16):
+
+    def __init__(self, inchannels, outchannels, net_depth, dropout=0.2, spatial=False, first_channel_output=16):
         super().__init__()
         self.downblocks = nn.ModuleList()
         self.upblocks = nn.ModuleList()

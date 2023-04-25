@@ -7,18 +7,19 @@ Created on Thurs Sep 30 21:42:33 2021
 
 metrics
 """
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
 import pdb
-from torchvision.ops import sigmoid_focal_loss
+
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from skimage.filters import gaussian
+from torchvision.ops import sigmoid_focal_loss
 
 
 class diceloss(torch.nn.Module):
-    def __init__(self, act=torch.nn.Sigmoid(), smooth=1.0, outchannels=1, label_smoothing=0, 
-            masked=False, boundary=0.5, gaussian_blur_sigma=None):
+    def __init__(self, act=torch.nn.Sigmoid(), smooth=1.0, outchannels=1, label_smoothing=0,
+                 masked=False, boundary=0.5, gaussian_blur_sigma=None):
         super().__init__()
         self.act = act
         self.smooth = smooth
@@ -44,16 +45,17 @@ class diceloss(torch.nn.Module):
 
         target = target * (1 - self.label_smoothing) + \
             self.label_smoothing / self.outchannels
-        
+
         pred = self.act(pred).permute(0, 2, 3, 1)
         target = target.permute(0, 2, 3, 1)
-        
+
         dice = 1 - ((2.0 * (pred * target)[mask].sum(dim=0) + self.smooth) / (
             pred[mask].sum(dim=0) + target[mask].sum(dim=0) + self.smooth))
 
         dice = dice*torch.tensor([0.0, 1.0]).to(dice.device)
 
         return dice.sum()
+
 
 class boundaryloss(nn.Module):
     """Boundary Loss proposed in:
@@ -117,6 +119,7 @@ class boundaryloss(nn.Module):
 
         return loss
 
+
 class iouloss(torch.nn.Module):
     def __init__(self, act=torch.nn.Sigmoid(), smooth=1.0, outchannels=1, label_smoothing=0, masked=False):
         super().__init__()
@@ -141,7 +144,7 @@ class iouloss(torch.nn.Module):
         B_sum = target[mask].sum(dim=0)
         union = A_sum + B_sum - intersection
         iou = 1 - ((intersection + self.smooth) / (union + self.smooth))
-        
+
         return iou
 
 
@@ -160,7 +163,7 @@ class celoss(torch.nn.Module):
 
 
 class nllloss(torch.nn.Module):
-    def __init__(self,act=torch.nn.Sigmoid(),smooth=1.0,outchannels=1,label_smoothing=0,masked=False):
+    def __init__(self, act=torch.nn.Sigmoid(), smooth=1.0, outchannels=1, label_smoothing=0, masked=False):
         super().__init__()
         self.act = act
         self.smooth = smooth
@@ -203,7 +206,7 @@ class focalloss(torch.nn.modules.loss._WeightedLoss):
 
 class customloss(torch.nn.modules.loss._WeightedLoss):
     def __init__(self, act=torch.nn.Sigmoid(), smooth=1.0, outchannels=1,
-            label_smoothing=0, masked=True, theta0=3, theta=5):
+                 label_smoothing=0, masked=True, theta0=3, theta=5):
         super().__init__()
         self.act = act
         self.smooth = smooth
@@ -223,7 +226,7 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
             mask = torch.ones((target.size()[0], target.size()[2], target.size()[3]), dtype=torch.bool)
 
         # target = target * (1 - self.label_smoothing) + self.label_smoothing / self.outchannels
-        
+
         # print(pred.shape, target.shape, 'shapes')
         n, c, _, _ = pred.shape
         # softmax so that predicted map can be distributed in [0, 1]
@@ -256,5 +259,5 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         # Only used masked dice loss when doing binary models
         if self.outchannels == 2:
             diceloss = diceloss*torch.tensor([0.0, 1.0]).to(diceloss.device)
-        
+
         return diceloss, boundaryloss

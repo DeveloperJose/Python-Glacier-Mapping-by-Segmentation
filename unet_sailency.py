@@ -1,17 +1,22 @@
-from segmentation.model.frame import Framework
-import segmentation.model.functions as fn
-
-import yaml, pdb, os, pathlib, torch
-from addict import Dict
-import numpy as np
+import os
+import pathlib
+import pdb
 from pprint import pprint
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import yaml
+from addict import Dict
+
+import segmentation.model.functions as fn
+from segmentation.model.frame import Framework
 
 if __name__ == "__main__":
     channels = ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"]
-        #"elevation", 
-        #"slope * sin(aspect)", "slope * cos(aspect)", "curvature", "latitude", "longitude",
-        #"NDVI", "NDWI", "NDSI", "Hue", "Saturation", "Value"]
+    # "elevation",
+    #"slope * sin(aspect)", "slope * cos(aspect)", "curvature", "latitude", "longitude",
+    # "NDVI", "NDWI", "NDSI", "Hue", "Saturation", "Value"]
     conf = Dict(yaml.safe_load(open('./conf/unet_sailency.yaml')))
     data_dir = pathlib.Path(conf.data_dir)
     sailency_dir = data_dir / conf.processed_dir / "sailency" / conf.run_name
@@ -41,11 +46,11 @@ if __name__ == "__main__":
 
     files = sorted(os.listdir(data_dir / conf.processed_dir / conf.split))
     inputs = [x for x in files if "tiff" in x]
-    
+
     sums = []
     for x_fname in inputs:
-        _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
-        mask = np.sum(_x[:,:,:7], axis=2) == 0
+        _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:, :, conf.use_channels]
+        mask = np.sum(_x[:, :, :7], axis=2) == 0
         if conf.normalize == "mean-std":
             _x = (_x - _mean) / _std
         if conf.normalize == "min-max":
@@ -59,9 +64,9 @@ if __name__ == "__main__":
         y = model(_x)
         y = y.permute(0, 2, 3, 1)
         y = torch.nn.Softmax(3)(y)
-        y[:,:,:,1].mean().backward()
-        _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
-        _sum =  np.sum(_x, axis=(0,1))
+        y[:, :, :, 1].mean().backward()
+        _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1, 2, 0)
+        _sum = np.sum(_x, axis=(0, 1))
         sums.append(_sum)
     sums = np.asarray(sums)
     scores = np.mean(sums, axis=0)
@@ -69,11 +74,11 @@ if __name__ == "__main__":
     scores = dict(sorted(scores.items(), key=lambda item: item[1]))
     print(scores)
     pdb.set_trace()
-    
+
     #_y = y
-    #plt.imshow(_y.detach().cpu().numpy()[0,:,:,1])
-    #plt.savefig("./sailencymap/sailency_y_pred.png")
-    #y[:,:,:,1].mean().backward()
+    # plt.imshow(_y.detach().cpu().numpy()[0,:,:,1])
+    # plt.savefig("./sailencymap/sailency_y_pred.png")
+    # y[:,:,:,1].mean().backward()
     #_x = x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
 
     inputs_dict = dict(enumerate(inputs))
@@ -109,30 +114,30 @@ if __name__ == "__main__":
     b18_plot = fig.add_subplot(grid[3, 5])
     b19_plot = fig.add_subplot(grid[3, 6])
 
-    _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:,:,conf.use_channels]
-    x_plot.imshow(_x[:,:,[4,2,1]]/255)
+    _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:, :, conf.use_channels]
+    x_plot.imshow(_x[:, :, [4, 2, 1]]/255)
     x_plot.axis("off")
     x_plot.set_title("False color composite (B5, B4, B2)")
-    #plt.imshow(x[:,:,[4,2,1]]/255)
-    #plt.savefig("./sailencymap/sailency_x_true.png")
+    # plt.imshow(x[:,:,[4,2,1]]/255)
+    # plt.savefig("./sailencymap/sailency_x_true.png")
 
-    mask = np.sum(_x[:,:,:7], axis=2) == 0
+    mask = np.sum(_x[:, :, :7], axis=2) == 0
     if conf.normalize == "mean-std":
         _x = (_x - _mean) / _std
     if conf.normalize == "min-max":
         _x = (_x - _min) / (_max - _min)
-    
+
     y_fname = x_fname.replace("tiff", "mask")
     y_true = np.load(data_dir / conf.processed_dir / conf.split / y_fname) + 1
     y_true[mask] = 0
-    #plt.imshow(y_true)
-    #plt.savefig("./sailencymap/sailency_y_true.png")
+    # plt.imshow(y_true)
+    # plt.savefig("./sailencymap/sailency_y_true.png")
     y_plot.imshow(y_true)
     y_plot.axis("off")
     y_plot.set_title("Label")
 
     _x = torch.from_numpy(np.expand_dims(_x, axis=0)).float()
-    
+
     _x = _x.permute(0, 3, 1, 2).to(device)
     _x = _x.requires_grad_()
     y = model(_x)
@@ -140,23 +145,23 @@ if __name__ == "__main__":
     y = torch.nn.Softmax(3)(y)
 
     _y = y
-    plt.imshow(_y.detach().cpu().numpy()[0,:,:,1])
+    plt.imshow(_y.detach().cpu().numpy()[0, :, :, 1])
     plt.savefig("./sailencymap/sailency_y_pred.png")
-    y[:,:,:,1].mean().backward()
-    _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
+    y[:, :, :, 1].mean().backward()
+    _x = _x.grad.data.abs().detach().cpu().numpy()[0].transpose(1, 2, 0)
 
     for i in range(_x.shape[2]):
-        #plt.figure()
+        # plt.figure()
         #plt.imshow(_x[:,:,i].clip(0,1), cmap="hot")
         varname = f"b{i}_plot"
-        globals()[varname].imshow(_x[:,:,i], cmap="hot")
+        globals()[varname].imshow(_x[:, :, i], cmap="hot")
         globals()[varname].axis("off")
         globals()[varname].set_title(channels[i])
-        #plt.savefig(f"./sailencymap/channel_{i}.png")
+        # plt.savefig(f"./sailencymap/channel_{i}.png")
         print(f"channel={i}, sum={np.sum(_x[:,:,i])}")
-    
+
     #_x = _x.sum(axis=2)
-    #plt.figure()
+    # plt.figure()
     #plt.imshow(_x, cmap="hot")
     plt.tight_layout()
     #fig.suptitle("Feature-wise saliency for debris glacier segmentation")

@@ -5,9 +5,8 @@ Created on Wed Feb 24 13:26:56 2021
 
 @author: mibook
 """
-import pathlib
 import os
-import shutil
+import pathlib
 
 import geopandas as gpd
 import numpy as np
@@ -122,7 +121,7 @@ def get_mask(tiff, shp, column="Glaciers"):
 
     classes = sorted(list(set(shp[column])))
     # print(f"Classes = {classes}")
-    
+
     shapefile_crs = rasterio.crs.CRS.from_string(str(shp.crs))
 
     if shapefile_crs != tiff.meta["crs"]:
@@ -161,6 +160,7 @@ def add_index(tiff_np, index1, index2):
     tiff_np = np.concatenate((tiff_np, np.expand_dims(rsi, axis=2)), axis=2)
     return tiff_np
 
+
 def compute_dems(dem_np):
     elevation = dem_np[:, :, 0][:, :, None]
     slope = dem_np[:, :, 1][:, :, None]
@@ -168,12 +168,13 @@ def compute_dems(dem_np):
     dem_np = np.concatenate((elevation, slope), axis=2)
     return dem_np
 
+
 def get_tiff_np(tiff_fname, dem_fname=None, physics_res=None, physics_scale=None, add_ndvi=False, add_ndwi=False, add_ndsi=False, add_hsv=False, verbose=False):
     tiff = read_tiff(tiff_fname)
     tiff_np = np.transpose(tiff.read(), (1, 2, 0)).astype(np.float32)
     tiff_np = np.nan_to_num(tiff_np)
 
-    use_dem = not(dem_fname is None or not dem_fname.exists())
+    use_dem = not (dem_fname is None or not dem_fname.exists())
     if use_dem:
         dem = read_tiff(dem_fname)
         dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
@@ -203,6 +204,7 @@ def get_tiff_np(tiff_fname, dem_fname=None, physics_res=None, physics_scale=None
         print(f'use_dem={use_dem}, use_physics={use_physics}')
 
     return tiff_np
+
 
 def save_slices(filenum, fname, labels, savepath, pbar, **conf):
     tiff_fname = pathlib.Path(conf['image_dir']) / fname
@@ -253,7 +255,7 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
         os.makedirs(conf["out_dir"])
 
     pbar.set_postfix_str('Preparing TIFF array')
-    tiff_np = get_tiff_np(tiff_fname, dem_fname, conf['physics_res'], conf['physics_scale'], conf['add_ndvi'], conf['add_ndwi'], conf['add_ndsi'], conf['add_hsv'], verbose=(filenum==0))
+    tiff_np = get_tiff_np(tiff_fname, dem_fname, conf['physics_res'], conf['physics_scale'], conf['add_ndvi'], conf['add_ndwi'], conf['add_ndsi'], conf['add_hsv'], verbose=(filenum == 0))
 
     pbar.set_postfix_str('Slicing')
     slicenum = 0
@@ -279,9 +281,3 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
                     save_slice(final_save_slice, savepath / slice_tiff_fname)
             slicenum += 1
     return np.mean(tiff_np, axis=(0, 1)), np.std(tiff_np, axis=(0, 1)), np.min(tiff_np, axis=(0, 1)), np.max(tiff_np, axis=(0, 1)), df_rows
-
-
-def remove_and_create(dirpath):
-    if os.path.exists(dirpath) and os.path.isdir(dirpath):
-        shutil.rmtree(dirpath)
-    os.makedirs(dirpath)

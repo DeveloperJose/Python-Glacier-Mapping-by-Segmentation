@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-This program takes full TIFF images and feeds the correct slices to a trained model to produce complete predictions.
+This program takes full TIFF images, feeds the slices to a trained model to produce complete predictions, and saves the prediction and true labels as a TIFF file.
 
-@author: Bibek Aryal, Jose G. Perez
+Takes around 10min using 32 CPUs on our server.
 """
+import multiprocessing
 import pathlib
+# TODO: Update code that gives FutureWarning and DeprecationWarning
+import warnings
 from timeit import default_timer as timer
 
 import rasterio
@@ -17,6 +20,9 @@ from tqdm import tqdm
 import segmentation.model.functions as fn
 from segmentation.data.slice import get_mask, get_tiff_np, read_shp, read_tiff
 from segmentation.model.frame import Framework
+from utils import istarmap
+
+warnings.filterwarnings("ignore")
 
 if __name__ == "__main__":
     start_time = timer()
@@ -30,18 +36,18 @@ if __name__ == "__main__":
     gpu_rank: int = conf.gpu_rank
     window_size = conf.window_size
     threshold = conf.threshold
-    tiff_path = pathlib.Path(conf.tiff_dir)
-    dem_path = pathlib.Path(conf.dem_dir) if conf.dem_dir else None
+    tiff_dir = pathlib.Path(conf.tiff_dir)
+    dem_dir = pathlib.Path(conf.dem_dir)
     labels_path = pathlib.Path(conf.labels_path)
 
     output_dir = pathlib.Path(conf.output_dir) / conf.run_name / f't={threshold}'
     if not output_dir.exists():
         output_dir.mkdir()
 
-    assert tiff_path.exists()
+    assert tiff_dir.exists()
     assert labels_path.exists()
-    if dem_path:
-        assert dem_path.exists()
+    if not dem_dir.exists():
+        print(f'dem_dir provided {dem_dir} does not exist, assuming this model does not use DEM')
 
     # % Load checkpoint using the training config
     checkpoint_path = runs_dir / conf.run_name / 'models' / 'model_best.pt'
@@ -50,12 +56,10 @@ if __name__ == "__main__":
     # % Load data stuff
     labels = read_shp(labels_path)
 
-    # % Predictions
-    for idx, fname in enumerate(tqdm(list(tiff_path.glob('*.tif')))):
-        if idx > 0:
-            break
-        tiff_fname = tiff_path / fname
-        dem_fname = dem_path / fname
+    def process(idx, fname):
+        global physics_res, physics_scale, labels, window_size, threshold, tiff_dir, dem_dir
+        tiff_fname = tiff_dir / fname
+        dem_fname = dem_dir / fname
 
         split_df = frame.df[frame.df['Landsat ID'] == fname.name]
         if len(split_df) == 0:
@@ -84,5 +88,12 @@ if __name__ == "__main__":
             with rasterio.open(output_dir / f'{tiff_fname.stem}_{split}.tif', 'w', **profile) as dst:
                 dst.write(y_pred, 1)
                 dst.write(y_true, 2)
+
+    # % Predictions
+    data = list(enumerate(tiff_dir.glob('*.tif')))
+    with tqdm(total=len(data), desc='Running Predictions') as pbar:
+        with multiprocessing.Pool(32) as pool:
+            for result in pool.istarmap(process, data):
+                pbar.update(1)
 
     print(f'Took {timer()-start_time:.2f}s for {conf.run_name}')

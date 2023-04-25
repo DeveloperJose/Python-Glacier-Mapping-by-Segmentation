@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Feb 17 12:59:22 2021
-
-@author: Aryal007
+This program trains a U-Net model on the provided dataset.
 """
 import gc
 import json

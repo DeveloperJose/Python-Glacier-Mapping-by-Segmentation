@@ -14,12 +14,12 @@ import math
 import os
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import torch
+from scipy.ndimage.morphology import binary_fill_holes
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
-from scipy.ndimage.morphology import binary_fill_holes
 
 import segmentation.model.functions as fn
 
@@ -38,9 +38,12 @@ class Framework:
         Set Class Attrributes
         """
         # % Device
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if self.device.type == "cuda":
-            torch.cuda.set_device(device)
+        if isinstance(device, int):
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if self.device.type == "cuda":
+                torch.cuda.set_device(device)
+        else:
+            self.device = torch.device('cpu')
 
         # % Data Loader
         self.loader_opts = loader_opts
@@ -433,6 +436,7 @@ class Framework:
         if use_mask:
             mask = np.sum(slice_arr[:, :, :3], axis=2) < 0.001
             y_pred[mask] = 0
+            return y_pred, mask
         return y_pred
 
     def get_y_true(self, label_mask: np.ndarray, mask=None):

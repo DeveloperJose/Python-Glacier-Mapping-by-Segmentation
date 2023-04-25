@@ -1,4 +1,6 @@
-import os
+"""
+This program is used to generate the metrics (Precision, Recall, IoU) given by predicting all test images of a given trained U-Net model.
+"""
 import pathlib
 
 import numpy as np
@@ -6,12 +8,11 @@ import pandas as pd
 import torch
 import yaml
 from addict import Dict
-from scipy.ndimage.morphology import binary_fill_holes
 from tqdm import tqdm
 
-import segmentation.data.slice as sl
+import utils
 from segmentation.model.frame import Framework
-from segmentation.model.metrics import *
+from segmentation.model.metrics import IoU, precision, recall, tp_fp_fn
 
 
 def get_tp_fp_fn(pred, true):
@@ -19,24 +20,32 @@ def get_tp_fp_fn(pred, true):
     tp, fp, fn = tp_fp_fn(pred, true)
     return tp, fp, fn
 
+
 def get_precision_recall_iou(tp, fp, fn):
     p, r, i = precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn)
     return p, r, i
+
 
 if __name__ == "__main__":
     print('Loading config and preparing')
     conf = Dict(yaml.safe_load(open('./conf/unet_predict.yaml')))
 
-    #% Prediction-specific config
+    # % Prediction-specific config
     runs_dir = pathlib.Path(conf.runs_dir)
-    output_dir = pathlib.Path(conf.output_dir) / conf.run_name
-    sl.remove_and_create(output_dir)
+    run_name: str = conf.run_name
+    threshold = conf.threshold
 
-    #% Load checkpoint using the training config
+    output_dir = pathlib.Path(conf.output_dir) / run_name
+    utils.remove_and_create(output_dir)
+
+    # % Load checkpoint using the training config
     checkpoint_path = runs_dir / conf.run_name / 'models' / 'model_best.pt'
     frame: Framework = Framework.from_checkpoint(checkpoint_path, device=int(conf.gpu_rank), testing=True)
 
-    #% Prepare dataframe
+    # % Extract the useful variables we want from the frame
+    data_dir = pathlib.Path(frame.loader_opts.processed_dir)
+
+    # % Prepare dataframe and metrics arrays
     columns = ["tile_name"]
     for class_name in frame.mask_names:
         columns.append(f'{class_name}_precision')
@@ -44,78 +53,32 @@ if __name__ == "__main__":
         columns.append(f'{class_name}_IoU')
     df = pd.DataFrame(columns=columns)
 
-    #% Extract the useful variables we want from the frame and config
-    data_dir = pathlib.Path(frame.loader_opts.processed_dir)
-    normalize:str = frame.loader_opts.normalize
-    use_channels = frame.loader_opts.use_channels
-    threshold = frame.metrics_opts.threshold
-    binary_class_idx = frame.loader_opts.output_classes[0]
-    total_classes = len(frame.loader_opts.class_names)
-
-    #% Load normalization arrays
-    arr = np.load(data_dir / "normalize_train.npy")
-    if normalize == "mean-std":
-        _mean, _std = arr[0], arr[1]
-    if normalize == "min-max":
-        _min, _max = arr[2], arr[3]
-
-    #% Prepare to iterate over test set
-    files = os.listdir(data_dir / "test")
-    inputs = [x for x in files if "tiff" in x]
-
     tp_sum = np.zeros(frame.num_classes, dtype=np.float32)
     fp_sum = np.zeros(frame.num_classes, dtype=np.float32)
     fn_sum = np.zeros(frame.num_classes, dtype=np.float32)
+
     print('Running predictions')
-    for x_fname in tqdm(inputs):
-        # Load data
-        x = np.load(data_dir / "test" / x_fname)
-        mask = np.sum(x, axis=2) == 0
+    for idx, x_fname in tqdm(list(enumerate((data_dir / "test").glob("tiff*")))):
+        # % Predict
+        x = np.load(x_fname)
+        y_pred, mask = frame.predict_slice(x, threshold)
 
-        x = frame.normalize(x)
-        
-        y_fname = x_fname.replace("tiff", "mask")
-        save_fname = x_fname.replace("tiff", "pred")
-        y_true = np.load(data_dir / "test" / y_fname) + 1
-        if frame.is_binary:
-            y_true_b = y_true.copy()
-            y_true_b[y_true==binary_class_idx+1] = 2
-            y_true_b[y_true!=binary_class_idx+1] = 1
-            y_true = y_true_b
+        # % Load true label
+        y_fname = x_fname.parent / x_fname.name.replace('tiff', 'mask')
+        assert y_fname.exists()
+        y_true = np.load(y_fname)
         y_true[mask] = 0
-        y_true = y_true[~mask]
 
-        # Make prediction
-        _x = torch.from_numpy(np.expand_dims(x[:,:,use_channels], axis=0)).float()
-        pred = frame.infer(_x)
-        pred = torch.nn.Softmax(3)(pred)
-        pred = np.squeeze(pred.cpu())
-        assert pred.shape[2] == frame.num_classes
-
-        # Threshold + fill holes + add mask to prediction
-        y_pred = np.zeros((pred.shape[0], pred.shape[1]))
-        for i in range(frame.num_classes):
-            _class = pred[:, :, i] >= threshold[i]
-            _class = binary_fill_holes(_class)
-            y_pred[_class] = i
-        y_pred += 1
-        y_pred[mask] = 0
-        y_pred = y_pred
-        y_pred = y_pred[~mask]
-
-        # Compute precision, recall, and IoU for all classes in this slice
-        # and keep running totals for all of them
+        # % Compute precision, recall, and IoU
+        save_fname = x_fname.parent / x_fname.name.replace('tiff', 'pred')
         _row = [save_fname]
         for i in range(frame.num_classes):
-            if i == 0 and frame.is_binary:
-                p = (y_pred != binary_class_idx+1).astype(np.uint8)
-                t = (y_true != binary_class_idx).astype(np.uint8)
-            elif frame.is_binary:
-                p = (y_pred == 2).astype(np.uint8)
-                t = (y_true == 2).astype(np.uint8)
-            else:
-                p = (y_pred == i+1).astype(np.uint8)
-                t = (y_true == i).astype(np.uint8)
+            p = np.zeros((x.shape[0], x.shape[1]), dtype=np.uint8)
+            t = np.zeros_like(p)
+
+            p[y_pred == i] = 1
+            t[y_true == i] = 1
+
             tp, fp, fnn = get_tp_fp_fn(p, t)
             prec, rec, iou = get_precision_recall_iou(tp, fp, fnn)
             tp_sum[i] += tp
@@ -132,10 +95,8 @@ if __name__ == "__main__":
         class_fn_sum = fn_sum[i]
         prec, rec, iou = get_precision_recall_iou(class_tp_sum, class_fp_sum, class_fn_sum)
         _row.extend([prec, rec, iou])
-    
+
     # Save and print results
     df = df.append(pd.DataFrame([_row], columns=columns), ignore_index=True)
     df.to_csv(output_dir / "metadata.csv")
-    print(f"{dict(zip(columns, _row))}")
-
-    
+    print(f"{dict(zip(columns, _row))} for conf={conf}")

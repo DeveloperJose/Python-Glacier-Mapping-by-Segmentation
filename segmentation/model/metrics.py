@@ -7,9 +7,7 @@ Created on Fri Sep  4 23:09:33 2020
 
 metrics and regularizations
 """
-import numpy as np
 import torch
-import pdb
 
 
 def precision(tp, fp, fn):

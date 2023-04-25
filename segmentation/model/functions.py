@@ -9,7 +9,6 @@ Training/Validation Functions
 """
 import datetime
 import logging
-import pdb
 
 import matplotlib.pyplot as plt
 import numpy as np
