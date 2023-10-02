@@ -1,7 +1,8 @@
 # Glacier Segmentation
+
 ## _Boundary Aware U-Net for Glacier Segmentation_
 
-Large-scale  study  of  glaciers  improves  our  understanding  of  global  glacier  change  and  is  imperative for monitoring the ecological environment, preventing disasters, and studying the effects of globalclimate  change.  Glaciers  in  the  Hindu  Kush  Himalaya  (HKH)  are  particularly  interesting  as  the HKH  is  one  of  the  world’s  most  sensitive  regionsfor climate change.  In this work, we:  (1) propose amodified version of the U-Net for large-scale, spatially non-overlapping, clean glacial ice, and debris-covered  glacial  ice  segmentation;   (2)  introduce  a  novel  self-learning  boundary-aware  loss  to  improve debris-covered glacial ice segmentation performance;  and (3) propose a feature-wise saliencyscore  to  understand  the  contribution  of  each  feature  in  the  multispectral  Landsat  7  imagery  for  glacier mapping.  Our results show that the debris-covered glacial ice segmentation model trained using self-learning boundary-aware loss outperformedthe model trained using dice loss.  Furthermore, we  conclude  that  red,  shortwave  infrared,  and  near-infrared  bands  have  the  highest  contribution  toward debris-covered glacial ice segmentation from  Landsat 7 images.
+Large-scale study of glaciers improves our understanding of global glacier change and is imperative for monitoring the ecological environment, preventing disasters, and studying the effects of globalclimate change. Glaciers in the Hindu Kush Himalaya (HKH) are particularly interesting as the HKH is one of the world’s most sensitive regionsfor climate change. In this work, we: (1) propose amodified version of the U-Net for large-scale, spatially non-overlapping, clean glacial ice, and debris-covered glacial ice segmentation; (2) introduce a novel self-learning boundary-aware loss to improve debris-covered glacial ice segmentation performance; and (3) propose a feature-wise saliencyscore to understand the contribution of each feature in the multispectral Landsat 7 imagery for glacier mapping. Our results show that the debris-covered glacial ice segmentation model trained using self-learning boundary-aware loss outperformedthe model trained using dice loss. Furthermore, we conclude that red, shortwave infrared, and near-infrared bands have the highest contribution toward debris-covered glacial ice segmentation from Landsat 7 images.
 
 Full Paper available at: https://doi.org/10.7557/18.6789
 
@@ -19,6 +20,7 @@ Full Paper available at: https://doi.org/10.7557/18.6789
 ```
 
 ## Project Structure
+
 ```
 glacier_mapping
 │
@@ -39,8 +41,8 @@ glacier_mapping
 │       │   functions.py
 │       │   losses.py
 │       │   metrics.py
-│       │   unet.py  
-│   
+│       │   unet.py
+│
 │   .gitignore
 |   eval.py
 |   get_roc_curve.py
@@ -55,6 +57,7 @@ glacier_mapping
 ## Steps to duplicate pipeline on a new machine
 
 ### Installing requirements on Ubuntu machine
+
 <pre>
 * sudo apt update                                                   Install python pip, setuptools
 * sudo apt install python3-pip
@@ -70,6 +73,7 @@ glacier_mapping
 </pre>
 
 ### Install requirements on a Windows machine
+
 <pre>
 * Download Anaconda from https://www.anaconda.com/products/individual
 * git clone https://github.com/Aryal007/glacier_mapping.git         Clone Repository
@@ -83,12 +87,14 @@ glacier_mapping
 </pre>
 
 ```
-To install nvidia drivers on compatible Azure virtual machine, 
+To install nvidia drivers on compatible Azure virtual machine,
 https://docs.microsoft.com/en-us/azure/virtual-machines/linux/n-series-driver-setup
 ```
 
 ### Steps for training and evaluation
+
 On a windows machine, use python instead of python3
+
 <pre>
 Required for training
 * python3 slice_and_preprocess.py                                   Create slices, configuration: conf/slice.yaml
@@ -100,6 +106,7 @@ Required for testing
 </pre>
 
 ## Structure for data directory
+
 ```
 HKH
 │
@@ -109,7 +116,8 @@ HKH
     └───runs                          Location to store U-Net training runs. Created during unet_train.py
 ```
 
-## Related Project: 
+## Related Project:
+
 ```
 https://github.com/krisrs1128/glacier_mapping
 ```

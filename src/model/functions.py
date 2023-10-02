@@ -36,8 +36,11 @@ def log(level, message):
         level (int): logging level, best set by using logging.(INFO|DEBUG|WARNING) etc
         message (str): mesage to log
     """
-    message = "{}\t{}\t{}".format(datetime.datetime.now().strftime(
-        '%d-%m-%Y, %H:%M:%S'), logging._levelToName[level], message)
+    message = "{}\t{}\t{}".format(
+        datetime.datetime.now().strftime("%d-%m-%Y, %H:%M:%S"),
+        logging._levelToName[level],
+        message,
+    )
     message = "SystemLog: " + message
     logging.log(level, message)
 
@@ -64,8 +67,16 @@ def train_epoch(epoch, loader, frame):
     n_classes: int = frame.num_classes
     threshold = frame.metrics_opts.threshold
 
-    loss, batch_loss, tp, fp, fn = 0, 0, torch.zeros(n_classes), torch.zeros(n_classes), torch.zeros(n_classes)
-    train_iterator = tqdm(loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
+    loss, batch_loss, tp, fp, fn = (
+        0,
+        0,
+        torch.zeros(n_classes),
+        torch.zeros(n_classes),
+        torch.zeros(n_classes),
+    )
+    train_iterator = tqdm(
+        loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+    )
     for i, (x, y) in enumerate(train_iterator):
         frame.zero_grad()
         y_hat, batch_loss = frame.optimize(x, y)
@@ -73,12 +84,15 @@ def train_epoch(epoch, loader, frame):
         batch_loss = float(batch_loss.detach())
         loss += batch_loss
         y_hat = frame.act(y_hat)
-        mask = (y.sum(axis=3) == 0)
+        mask = y.sum(axis=3) == 0
         _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
         tp += _tp
         fp += _fp
         fn += _fn
-        train_iterator.set_description("Train, Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f " % (epoch, i, batch_loss, loss / (i + 1)))
+        train_iterator.set_description(
+            "Train, Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+            % (epoch, i, batch_loss, loss / (i + 1))
+        )
     metrics = get_metrics(tp, fp, fn, metrics)
     loss_alpha = frame.get_loss_alpha()
 
@@ -107,29 +121,46 @@ def validate(epoch, loader, frame, test=False):
     metrics = frame.metrics_opts.metrics
     n_classes: int = frame.num_classes
     threshold = frame.metrics_opts.threshold
-    loss, batch_loss, tp, fp, fn = 0, 0, torch.zeros(n_classes), torch.zeros(n_classes), torch.zeros(n_classes)
+    loss, batch_loss, tp, fp, fn = (
+        0,
+        0,
+        torch.zeros(n_classes),
+        torch.zeros(n_classes),
+        torch.zeros(n_classes),
+    )
     if test:
-        iterator = tqdm(loader, desc="Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
+        iterator = tqdm(
+            loader, desc="Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+        )
     else:
-        iterator = tqdm(loader, desc="Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
+        iterator = tqdm(
+            loader, desc="Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+        )
 
     def channel_first(x):
         return x.permute(0, 3, 1, 2)
+
     for i, (x, y) in enumerate(iterator):
         y_hat = frame.infer(x)
         batch_loss = frame.calc_loss(channel_first(y_hat), channel_first(y))
         batch_loss = float(batch_loss.detach())
         loss += batch_loss
         y_hat = frame.act(y_hat)
-        mask = (y.sum(axis=3) == 0)
+        mask = y.sum(axis=3) == 0
         _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
         tp += _tp
         fp += _fp
         fn += _fn
         if test:
-            iterator.set_description("Test,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f " % (epoch, i, batch_loss, loss / (i + 1)))
+            iterator.set_description(
+                "Test,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+                % (epoch, i, batch_loss, loss / (i + 1))
+            )
         else:
-            iterator.set_description("Val,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f " % (epoch, i, batch_loss, loss / (i + 1)))
+            iterator.set_description(
+                "Val,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+                % (epoch, i, batch_loss, loss / (i + 1))
+            )
     if not test:
         frame.val_operations(loss / len(loader.dataset))
     metrics = get_metrics(tp, fp, fn, metrics)
@@ -178,20 +209,24 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
         # 3: np.array((165, 42, 42)),
     }
 
-    def pm(x): return x.permute(0, 3, 1, 2)
-    def squash(x): return (x - x.min()) / (x.max() - x.min())
+    def pm(x):
+        return x.permute(0, 3, 1, 2)
+
+    def squash(x):
+        return (x - x.min()) / (x.max() - x.min())
+
     x, y = batch
     y_mask = np.sum(y.cpu().numpy(), axis=3) == 0
     y_hat = frame.act(frame.infer(x))
     y = np.argmax(y.cpu().numpy(), axis=3) + 1
 
-    #_y_hat = np.zeros((y_hat.shape[0], y_hat.shape[1], y_hat.shape[2]))
-    #y_hat = y_hat.cpu().numpy()
+    # _y_hat = np.zeros((y_hat.shape[0], y_hat.shape[1], y_hat.shape[2]))
+    # y_hat = y_hat.cpu().numpy()
     # for i in range(1, 3):
     #    _y_hat[y_hat[:, :, :, i] >= threshold[i - 1]] = i + 1
-    #_y_hat[_y_hat == 0] = 1
-    #_y_hat[y_mask] = 0
-    #y_hat = _y_hat
+    # _y_hat[_y_hat == 0] = 1
+    # _y_hat[y_mask] = 0
+    # y_hat = _y_hat
 
     y_hat = np.argmax(y_hat.cpu().numpy(), axis=3) + 1
 
@@ -220,14 +255,22 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
     else:
         x = torch.clamp(x, 0, 1)
     try:
-        writer.add_image(f"{stage}/x", make_grid(pm(squash(x[:, :, :, [4, 3, 1]]))), epoch)
+        writer.add_image(
+            f"{stage}/x", make_grid(pm(squash(x[:, :, :, [4, 3, 1]]))), epoch
+        )
     except:
         try:
-            writer.add_image(f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0, 1, 2]]))), epoch)
+            writer.add_image(
+                f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0, 1, 2]]))), epoch
+            )
         except:
-            writer.add_image(f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0]]))), epoch)
+            writer.add_image(
+                f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0]]))), epoch
+            )
     writer.add_image(f"{stage}/y", make_grid(pm(squash(torch.tensor(y)))), epoch)
-    writer.add_image(f"{stage}/y_hat", make_grid(pm(squash(torch.tensor(y_hat)))), epoch)
+    writer.add_image(
+        f"{stage}/y_hat", make_grid(pm(squash(torch.tensor(y_hat)))), epoch
+    )
 
 
 def get_loss(outchannels, opts=None):
@@ -244,35 +287,30 @@ def get_loss(outchannels, opts=None):
             outchannels=outchannels,
             label_smoothing=label_smoothing,
             masked=opts.masked,
-            gaussian_blur_sigma=opts.gaussian_blur_sigma)
+            gaussian_blur_sigma=opts.gaussian_blur_sigma,
+        )
     elif opts.name == "boundary":
         loss_fn = boundaryloss()
     elif opts.name == "iou":
         loss_fn = iouloss(
-            act=torch.nn.Softmax(dim=1),
-            outchannels=outchannels,
-            masked=opts.masked)
+            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
+        )
     elif opts.name == "ce":
         loss_fn = celoss(
-            act=torch.nn.Softmax(dim=1),
-            outchannels=outchannels,
-            masked=opts.masked)
+            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
+        )
     elif opts.name == "nll":
         loss_fn = nllloss(
-            act=torch.nn.Softmax(dim=1),
-            outchannels=outchannels,
-            masked=opts.masked)
+            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
+        )
     elif opts.name == "focal":
         loss_fn = focalloss(
-            act=torch.nn.Softmax(dim=1),
-            outchannels=outchannels,
-            masked=opts.masked)
+            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
+        )
     elif opts.name == "custom":
         loss_fn = customloss(
-            act=torch.nn.Softmax(
-                dim=1),
-            outchannels=outchannels,
-            masked=opts.masked)
+            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
+        )
     else:
         raise ValueError("Loss must be defined!")
     return loss_fn

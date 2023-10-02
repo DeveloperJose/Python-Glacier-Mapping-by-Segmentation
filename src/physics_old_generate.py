@@ -35,15 +35,16 @@ rng = np.random.default_rng(41)
 @numba.njit()
 def get_neighbors(im, coords):
     r, c = coords
-    possible = [(r-1, c-1),  # bot-left
-                (r-1, c),  # down
-                (r-1, c+1),  # bot-right
-                (r, c+1),  # right
-                (r+1, c+1),  # top-right
-                (r+1, c),  # up
-                (r+1, c-1),  # top-left
-                (r, c-1)  # left
-                ]
+    possible = [
+        (r - 1, c - 1),  # bot-left
+        (r - 1, c),  # down
+        (r - 1, c + 1),  # bot-right
+        (r, c + 1),  # right
+        (r + 1, c + 1),  # top-right
+        (r + 1, c),  # up
+        (r + 1, c - 1),  # top-left
+        (r, c - 1),  # left
+    ]
 
     real = []
     for tup in possible:
@@ -57,7 +58,7 @@ def get_neighbors(im, coords):
 @numba.njit()
 def get_path(prev, v):
     prev_tuple = prev[v]
-    if prev_tuple.sum() < 0:   # v is the origin
+    if prev_tuple.sum() < 0:  # v is the origin
         # L = numba.typed.List()
         L = []
         L.append(v)
@@ -130,6 +131,7 @@ def breadth_first_search_v1(im, source, use_1path=True):
     # else:
     #     raise Exception('Not implemented')
     # return prev, best_u
+
 
 # @numba.njit(fastmath=True)
 # def get_pairs(im):
@@ -205,7 +207,7 @@ def get_water_im(shape, all_paths):
     std = water_1path.std()
     if std <= 1e-10:
         # print(f'mu={mu}, std={std} for a sample')
-        print('std <= 1e-10 for a sample')
+        print("std <= 1e-10 for a sample")
     else:
         water_1path = (water_1path - mu) / std
 
@@ -222,7 +224,7 @@ def min_max(im):
     return (im - im.min()) / im.max()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     input_path = pathlib.Path("/home/jperez/data/HKH/processed_L07_2005")
     # output_path = pathlib.Path('/home/jperez/programming/glacial_phys_data/cleanice')
     output_path = input_path
@@ -230,7 +232,7 @@ if __name__ == '__main__':
     assert input_path.exists()
     assert output_path.exists()
 
-    for folder in ['train', 'val', 'test']:
+    for folder in ["train", "val", "test"]:
         assert (input_path / folder).exists()
 
     def process(filename: pathlib.Path):
@@ -244,7 +246,13 @@ if __name__ == '__main__':
         # %% pairs
         # pairs = [(u, v) for u in range(im_band.shape[0]) for v in range(im_band.shape[1])]
         pairs = []
-        for p in np.mgrid[0:im_elevation.shape[0]-1:64j, 0:im_elevation.shape[1]-1:64j].reshape(2, -1).T:
+        for p in (
+            np.mgrid[
+                0 : im_elevation.shape[0] - 1 : 64j, 0 : im_elevation.shape[1] - 1 : 64j
+            ]
+            .reshape(2, -1)
+            .T
+        ):
             pairs.append((int(p[0]), int(p[1])))
         # pairs = get_pairs(im_elevation)
         # all_paths = numba.typed.List([(0, 0), (0, 1)])
@@ -266,7 +274,7 @@ if __name__ == '__main__':
         # water_allpath = mean_std(water_allpath)
 
         # %% v3
-        for u, v in tqdm(pairs, desc=f'{filename}', position=2):
+        for u, v in tqdm(pairs, desc=f"{filename}", position=2):
             prev, goal = breadth_first_search_v1(water, (u, v))
             path = get_path(prev, goal)
             contribution = np.linspace(0, 1 / (len(path) / 2), len(path))
@@ -278,7 +286,7 @@ if __name__ == '__main__':
         water_allpath = mean_std(water_allpath)
         # %% output
         folder = filename.parent.name  # [train, val, test]
-        filename = str(filename).replace('tiff', 'physics_v3_w0.01_64')
+        filename = str(filename).replace("tiff", "physics_v3_w0.01_64")
 
         # v1
         # np.save(output_path / folder / filename, water_1path)
@@ -294,13 +302,13 @@ if __name__ == '__main__':
     # test_path = get_path(test_prev, test_u)
     # test_pairs = get_pairs(test)
 
-    print(f'Generating physics images for {input_path}')
+    print(f"Generating physics images for {input_path}")
     start_time = timer()
-    for dataset in ['train', 'val', 'test']:
-        files = (input_path / dataset).glob('*tiff*')
+    for dataset in ["train", "val", "test"]:
+        files = (input_path / dataset).glob("*tiff*")
         files = [pathlib.Path(fname) for fname in files]
 
-        pbar = tqdm(total=len(files), desc=f'Processing dataset {dataset}')
+        pbar = tqdm(total=len(files), desc=f"Processing dataset {dataset}")
 
         # for file in files:
         #     process(file)
@@ -313,7 +321,7 @@ if __name__ == '__main__':
         pbar.close()
 
     duration = timer() - start_time
-    print(f'Whole program finished in {duration:.2f}sec!')
+    print(f"Whole program finished in {duration:.2f}sec!")
     # water = np.ones((im_band.shape[0], im_band.shape[1]))
     # for path in all_paths:
     #     if path is None:

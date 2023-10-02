@@ -33,7 +33,16 @@ class Framework:
 
     """
 
-    def __init__(self, loss_opts=None, loader_opts=None, model_opts=None, optimizer_opts=None, reg_opts=None, metrics_opts=None, device=None):
+    def __init__(
+        self,
+        loss_opts=None,
+        loader_opts=None,
+        model_opts=None,
+        optimizer_opts=None,
+        reg_opts=None,
+        metrics_opts=None,
+        device=None,
+    ):
         """
         Set Class Attrributes
         """
@@ -43,7 +52,7 @@ class Framework:
             if self.device.type == "cuda":
                 torch.cuda.set_device(device)
         else:
-            self.device = torch.device('cpu')
+            self.device = torch.device("cpu")
 
         # % Data Loader
         self.loader_opts = loader_opts
@@ -52,12 +61,12 @@ class Framework:
         output_classes = loader_opts.output_classes
 
         # Dataframe
-        self.df = pd.read_csv(Path(loader_opts.processed_dir) / 'slice_meta.csv')
+        self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
         # Binary Model or Multi-Class Model?
         if len(output_classes) == 1:
             cl_name = loader_opts.class_names[output_classes[0]]
-            self.mask_names = [f'NOT~{cl_name}', cl_name]
+            self.mask_names = [f"NOT~{cl_name}", cl_name]
         else:
             self.mask_names = [loader_opts.class_names[i] for i in output_classes]
 
@@ -70,7 +79,9 @@ class Framework:
         # Normalization
         self.normalization = loader_opts.normalize
         self.norm_arr = np.load(Path(loader_opts.processed_dir) / "normalize_train.npy")
-        assert self.normalization == "mean-std" or self.normalization == "min-max", 'Invalid normalization'
+        assert (
+            self.normalization == "mean-std" or self.normalization == "min-max"
+        ), "Invalid normalization"
 
         # % Model
         self.model_opts = model_opts
@@ -85,8 +96,13 @@ class Framework:
             self.loss_alpha = torch.tensor([loss_opts.alpha]).to(self.device)
         else:
             self.loss_alpha = torch.tensor([0.0]).to(self.device)
-        self.sigma1, self.sigma2 = torch.tensor([1.0]).to(self.device), torch.tensor([1.0]).to(self.device)
-        self.sigma1, self.sigma2 = self.sigma1.requires_grad_(), self.sigma2.requires_grad_()
+        self.sigma1, self.sigma2 = torch.tensor([1.0]).to(self.device), torch.tensor(
+            [1.0]
+        ).to(self.device)
+        self.sigma1, self.sigma2 = (
+            self.sigma1.requires_grad_(),
+            self.sigma2.requires_grad_(),
+        )
         if loss_opts is None:
             self.loss_weights = torch.tensor([1.0, 1.0, 1.0]).to(self.device)
         else:
@@ -96,16 +112,16 @@ class Framework:
         self.optimizer_opts = optimizer_opts
         if optimizer_opts is None:
             optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
-        _optimizer_params = [{'params': self.model.parameters(), **optimizer_opts["args"]},
-                             {'params': self.sigma1, **optimizer_opts["args"]},
-                             {'params': self.sigma2, **optimizer_opts["args"]}]
+        _optimizer_params = [
+            {"params": self.model.parameters(), **optimizer_opts["args"]},
+            {"params": self.sigma1, **optimizer_opts["args"]},
+            {"params": self.sigma2, **optimizer_opts["args"]},
+        ]
         optimizer_def = getattr(torch.optim, optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
-        self.lrscheduler = ReduceLROnPlateau(self.optimizer, "min",
-                                             verbose=True,
-                                             patience=15,
-                                             factor=0.1,
-                                             min_lr=1e-9)
+        self.lrscheduler = ReduceLROnPlateau(
+            self.optimizer, "min", verbose=True, patience=15, factor=0.1, min_lr=1e-9
+        )
 
         # % Regularization
         self.reg_opts = reg_opts
@@ -133,7 +149,7 @@ class Framework:
 
     def get_current_lr(self):
         for param_group in self.optimizer.param_groups:
-            return param_group['lr']
+            return param_group["lr"]
 
     def step(self):
         self.optimizer.step()
@@ -150,17 +166,17 @@ class Framework:
             os.makedirs(out_dir)
 
         state = {
-            'epoch': epoch,
-            'state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'sigma1': self.sigma1,
-            'sigma2': self.sigma2,
-            'loss_opts': self.loss_opts,
-            'loader_opts': self.loader_opts,
-            'model_opts': self.model_opts,
-            'optimizer_opts': self.optimizer_opts,
-            'reg_opts': self.reg_opts,
-            'metrics_opts': self.metrics_opts,
+            "epoch": epoch,
+            "state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "sigma1": self.sigma1,
+            "sigma2": self.sigma2,
+            "loss_opts": self.loss_opts,
+            "loader_opts": self.loader_opts,
+            "model_opts": self.model_opts,
+            "optimizer_opts": self.optimizer_opts,
+            "reg_opts": self.reg_opts,
+            "metrics_opts": self.metrics_opts,
         }
         model_path = Path(out_dir, f"model_{epoch}.pt")
         torch.save(state, model_path)
@@ -169,32 +185,32 @@ class Framework:
     @staticmethod
     def from_checkpoint(checkpoint_path: Path, device=None, testing=False):
         """Load a frame from a checkpoint file"""
-        assert checkpoint_path.exists(), 'checkpoint_path does not exist'
-        if torch.cuda.is_available() and device != 'cpu':
+        assert checkpoint_path.exists(), "checkpoint_path does not exist"
+        if torch.cuda.is_available() and device != "cpu":
             state = torch.load(checkpoint_path)
         else:
-            state = torch.load(checkpoint_path, map_location='cpu')
+            state = torch.load(checkpoint_path, map_location="cpu")
 
         if testing:
-            state['model_opts'].args.dropout = 0.00000001
+            state["model_opts"].args.dropout = 0.00000001
 
         frame = Framework(
-            loss_opts=state['loss_opts'],
-            loader_opts=state['loader_opts'],
-            model_opts=state['model_opts'],
-            optimizer_opts=state['optimizer_opts'],
-            reg_opts=state['reg_opts'],
-            metrics_opts=state['metrics_opts'],
-            device=device
+            loss_opts=state["loss_opts"],
+            loader_opts=state["loader_opts"],
+            model_opts=state["model_opts"],
+            optimizer_opts=state["optimizer_opts"],
+            reg_opts=state["reg_opts"],
+            metrics_opts=state["metrics_opts"],
+            device=device,
         )
-        frame.model.load_state_dict(state['state_dict'])
-        frame.optimizer.load_state_dict(state['optimizer_state_dict'])
-        frame.sigma1 = state['sigma1']
-        frame.sigma2 = state['sigma2']
+        frame.model.load_state_dict(state["state_dict"])
+        frame.optimizer.load_state_dict(state["optimizer_state_dict"])
+        frame.sigma1 = state["sigma1"]
+        frame.sigma2 = state["sigma2"]
         return frame
 
     def infer(self, x):
-        """ Make a prediction for a given x
+        """Make a prediction for a given x
 
         Args:
             x: input x
@@ -209,7 +225,7 @@ class Framework:
         return y.permute(0, 2, 3, 1)
 
     def calc_loss(self, y_hat, y):
-        """ Compute loss given a prediction
+        """Compute loss given a prediction
 
         Args:
             y_hat: Prediction
@@ -221,21 +237,29 @@ class Framework:
         """
         y_hat = y_hat.to(self.device)
         y = y.to(self.device)
-        #loss = self.loss_fn(y_hat, y)
+        # loss = self.loss_fn(y_hat, y)
         diceloss, boundaryloss = self.loss_fn(y_hat, y)
         diceloss = diceloss.sum()
-        #loss = torch.add(torch.mul(diceloss.clone(), self.loss_alpha), torch.mul(boundaryloss.clone(), (1-self.loss_alpha)))
+        # loss = torch.add(torch.mul(diceloss.clone(), self.loss_alpha), torch.mul(boundaryloss.clone(), (1-self.loss_alpha)))
         loss = torch.add(
             torch.add(
-                torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma1))), diceloss.clone()),
-                torch.mul(torch.div(1, torch.mul(2, torch.square(self.sigma2))), boundaryloss.clone())
+                torch.mul(
+                    torch.div(1, torch.mul(2, torch.square(self.sigma1))),
+                    diceloss.clone(),
+                ),
+                torch.mul(
+                    torch.div(1, torch.mul(2, torch.square(self.sigma2))),
+                    boundaryloss.clone(),
+                ),
             ),
-            torch.abs(torch.log(torch.mul(self.sigma1, self.sigma2)))
+            torch.abs(torch.log(torch.mul(self.sigma1, self.sigma2))),
         )
         if self.reg_opts:
             for reg_type in self.reg_opts.keys():
                 reg_fun = globals()[reg_type]
-                penalty = reg_fun(self.model.parameters(), self.reg_opts[reg_type], self.device)
+                penalty = reg_fun(
+                    self.model.parameters(), self.reg_opts[reg_type], self.device
+                )
                 loss += penalty
         return loss.abs()
 
@@ -244,7 +268,7 @@ class Framework:
         return (self.sigma1.item(), self.sigma2.item())
 
     def metrics(self, y_hat, y, mask, threshold):
-        """ Loop over metrics in train.yaml
+        """Loop over metrics in train.yaml
 
         Args:
             y_hat: Predictions
@@ -266,8 +290,11 @@ class Framework:
         y = np.argmax(y.cpu().numpy(), axis=3) + 1
         y[mask] = -1
 
-        tp, fp, fn = torch.zeros(n_classes), torch.zeros(
-            n_classes), torch.zeros(n_classes)
+        tp, fp, fn = (
+            torch.zeros(n_classes),
+            torch.zeros(n_classes),
+            torch.zeros(n_classes),
+        )
         for i in range(0, n_classes):
             _y_hat = (y_hat == i + 1).astype(np.uint8)
             _y = (y == i + 1).astype(np.uint8)
@@ -287,8 +314,7 @@ class Framework:
             or one-hot tensor in case of multi class"""
         if self.multi_class:
             y_hat = torch.argmax(y_hat, axis=3)
-            y_hat = torch.nn.functional.one_hot(
-                y_hat, num_classes=self.num_classes)
+            y_hat = torch.nn.functional.one_hot(y_hat, num_classes=self.num_classes)
         else:
             y_hat = torch.sigmoid(y_hat)
 
@@ -326,8 +352,8 @@ class Framework:
         losses = []
         log_lrs = []
         iterator = tqdm(
-            train_loader,
-            desc="Current lr=XX.XX Steps=XX Loss=XX.XX Best lr=XX.XX ")
+            train_loader, desc="Current lr=XX.XX Steps=XX Loss=XX.XX Best lr=XX.XX "
+        )
         for i, data in enumerate(iterator):
             batch_num += 1
             inputs, labels = data
@@ -347,8 +373,9 @@ class Framework:
             loss.backward()
             self.optimizer.step()
             iterator.set_description(
-                "Current lr=%5.9f Steps=%d Loss=%5.3f Best lr=%5.9f " %
-                (lr, i, loss, best_lr))
+                "Current lr=%5.9f Steps=%d Loss=%5.3f Best lr=%5.9f "
+                % (lr, i, loss, best_lr)
+            )
             # Store the values
             losses.append(loss.detach())
             log_lrs.append(math.log10(lr))
@@ -368,7 +395,7 @@ class Framework:
             _min, _max = self.norm_arr[2], self.norm_arr[3]
             return (np.clip(x, _min, _max) - _min) / (_max - _min)
         else:
-            raise Exception('Invalid normalization')
+            raise Exception("Invalid normalization")
 
     def predict_whole(self, whole_arr, window_size, threshold=None):
         # Reduce to only needed channels to speed up further computations, normalize, and get mask
@@ -381,14 +408,25 @@ class Framework:
         for row in range(0, whole_arr.shape[0], window_size[0]):
             for column in range(0, whole_arr.shape[1], window_size[1]):
                 # Get slice from input array, pad with zeros if needed
-                current_slice = whole_arr[row:row + window_size[0], column:column + window_size[1], :]
-                if current_slice.shape[0] != window_size[0] or current_slice.shape[1] != window_size[1]:
-                    temp = np.zeros((window_size[0], window_size[1], whole_arr.shape[2]))
-                    temp[:current_slice.shape[0], :current_slice.shape[1], :] = current_slice
+                current_slice = whole_arr[
+                    row : row + window_size[0], column : column + window_size[1], :
+                ]
+                if (
+                    current_slice.shape[0] != window_size[0]
+                    or current_slice.shape[1] != window_size[1]
+                ):
+                    temp = np.zeros(
+                        (window_size[0], window_size[1], whole_arr.shape[2])
+                    )
+                    temp[
+                        : current_slice.shape[0], : current_slice.shape[1], :
+                    ] = current_slice
                     current_slice = temp
 
                 # Slice prediction then place slice prediction into whole image prediction
-                pred = self.predict_slice(current_slice, threshold, preprocess=False, use_mask=False)
+                pred = self.predict_slice(
+                    current_slice, threshold, preprocess=False, use_mask=False
+                )
 
                 endrow_dest = row + window_size[0]
                 endrow_source = window_size[0]
@@ -401,7 +439,9 @@ class Framework:
                     endcolumn_source = y_pred.shape[1] - column
                     endcolumn_dest = y_pred.shape[1]
 
-                y_pred[row:endrow_dest, column:endcolumn_dest] = pred[0:endrow_source, 0:endcolumn_source]
+                y_pred[row:endrow_dest, column:endcolumn_dest] = pred[
+                    0:endrow_source, 0:endcolumn_source
+                ]
 
         y_pred[mask] = 0
         return y_pred, mask
@@ -442,9 +482,11 @@ class Framework:
     def get_y_true(self, label_mask: np.ndarray, mask=None):
         y_true = np.zeros((label_mask.shape[0], label_mask.shape[1]), dtype=np.uint8)
         if self.is_binary:
-            assert self.binary_class_idx != 0, 'You are trying to predict BG instead of CI or DCG'
-            y_true[label_mask[:, :, self.binary_class_idx-1] != 1] = 0
-            y_true[label_mask[:, :, self.binary_class_idx-1] == 1] = 1
+            assert (
+                self.binary_class_idx != 0
+            ), "You are trying to predict BG instead of CI or DCG"
+            y_true[label_mask[:, :, self.binary_class_idx - 1] != 1] = 0
+            y_true[label_mask[:, :, self.binary_class_idx - 1] == 1] = 1
         else:
             # Label mask is always just CleanIce and Debris so do +1 to match the prediction labels
             for i in range(label_mask.shape[2]):

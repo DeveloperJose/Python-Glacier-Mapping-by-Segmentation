@@ -59,7 +59,8 @@ def plot_iou_curve(y, scores, glacier_type):
     plt.plot(
         bins,
         ious,
-        label=f"IOU (best = {np.max(ious):2.2f}, threshold = {bins[np.argmax(ious)]:2.2f})")
+        label=f"IOU (best = {np.max(ious):2.2f}, threshold = {bins[np.argmax(ious)]:2.2f})",
+    )
     plt.grid()
     plt.xlim([0.0, 1.0])
     plt.xlabel("Threshold")
@@ -90,7 +91,7 @@ def plot_roc_curve(y, scores, glacier_type):
 
 
 if __name__ == "__main__":
-    conf = Dict(yaml.safe_load(open('./conf/get_roc_curve.yaml')))
+    conf = Dict(yaml.safe_load(open("./conf/get_roc_curve.yaml")))
     val_dir = pathlib.Path(conf.data_dir) / "val"
     class_name = conf.class_name
 
@@ -99,7 +100,7 @@ if __name__ == "__main__":
         loss_fn=loss_fn,
         model_opts=conf.model_opts,
         loss_opts=conf.loss_opts,
-        device=conf.gpu_rank
+        device=conf.gpu_rank,
     )
 
     model_path = f"{conf.data_dir}/runs/{conf.run_name}/models/model_best.pt"
@@ -127,12 +128,8 @@ if __name__ == "__main__":
             X = torch.Tensor(np.expand_dims(X, 0))
             y_pred = frame.act(frame.infer(X))
             y_gt = (
-                np.load(
-                    val_dir /
-                    f.replace(
-                        "tiff",
-                        "mask")) == glacier_index).astype(
-                np.int8)
+                np.load(val_dir / f.replace("tiff", "mask")) == glacier_index
+            ).astype(np.int8)
             pred_arr[i] = np.squeeze(y_pred.cpu())[:, :, glacier_index]
             gt_arr[i] = y_gt
         mask_arr = mask_arr.astype(np.bool)

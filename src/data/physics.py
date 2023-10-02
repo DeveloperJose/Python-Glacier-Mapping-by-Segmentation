@@ -8,15 +8,16 @@ from PIL import Image
 @numba.njit()
 def get_neighbors(im, coords):
     r, c = coords
-    possible = [(r-1, c-1),  # bot-left
-                (r-1, c),  # down
-                (r-1, c+1),  # bot-right
-                (r, c+1),  # right
-                (r+1, c+1),  # top-right
-                (r+1, c),  # up
-                (r+1, c-1),  # top-left
-                (r, c-1)  # left
-                ]
+    possible = [
+        (r - 1, c - 1),  # bot-left
+        (r - 1, c),  # down
+        (r - 1, c + 1),  # bot-right
+        (r, c + 1),  # right
+        (r + 1, c + 1),  # top-right
+        (r + 1, c),  # up
+        (r + 1, c - 1),  # top-left
+        (r, c - 1),  # left
+    ]
 
     real = []
     for tup in possible:
@@ -39,7 +40,7 @@ def get_path(prev, v):
 def manhattan_cost(u, v):
     rr = abs(u[0] - v[0])
     cc = abs(u[1] - v[1])
-    return (rr + cc)
+    return rr + cc
 
 
 def breadth_first_search_v2(im, water_allpath, source):
@@ -78,9 +79,11 @@ def min_max(im):
 
 
 def resize(arr, new_rows, new_cols):
-    arr = min_max(arr)*255
+    arr = min_max(arr) * 255
     arr = arr.astype(np.uint8).reshape(arr.shape[0], arr.shape[1])
-    arr = np.array(Image.fromarray(arr).resize((new_cols, new_rows)))  # , Image.LANCZOS))
+    arr = np.array(
+        Image.fromarray(arr).resize((new_cols, new_rows))
+    )  # , Image.LANCZOS))
     arr = arr.astype(np.float32) / 255.0
     return arr
 
@@ -100,7 +103,11 @@ def compute_phys_v2(elevation, res=64, scale=0.3):
     # Create the pairs that will be explored by BFS
     pairs = []
     step = 1 if res == "full" else complex(0, res)
-    for p in np.mgrid[0:elevation.shape[0]-1:step, 0:elevation.shape[1]-1:step].reshape(2, -1).T:
+    for p in (
+        np.mgrid[0 : elevation.shape[0] - 1 : step, 0 : elevation.shape[1] - 1 : step]
+        .reshape(2, -1)
+        .T
+    ):
         pairs.append((int(p[0]), int(p[1])))
 
     # Perform BFS
@@ -116,10 +123,10 @@ def compute_phys_v2(elevation, res=64, scale=0.3):
     return water_allpath.reshape(original_shape[0], original_shape[1], 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import slice as fn
 
-    dem = fn.read_tiff('/data/baryal/HKH/DEM/image1.tif')
+    dem = fn.read_tiff("/data/baryal/HKH/DEM/image1.tif")
     dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
     dem_np = np.nan_to_num(dem_np)
     elevation = dem_np[:, :, 0][:, :, None]
@@ -128,6 +135,7 @@ if __name__ == '__main__':
     print(phys_output.shape)
 
     import matplotlib.pyplot as plt
+
     plt.figure()
-    plt.imshow(phys_output, cmap='gray')
-    plt.savefig('physics_example.png')
+    plt.imshow(phys_output, cmap="gray")
+    plt.savefig("physics_example.png")

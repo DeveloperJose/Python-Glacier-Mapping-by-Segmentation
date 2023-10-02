@@ -13,3 +13,4 @@ runs/*
 pred_runs/*
 output/*
 *.tif
+/.venv/

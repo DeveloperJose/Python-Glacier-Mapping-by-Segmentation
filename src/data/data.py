@@ -19,34 +19,82 @@ from torchvision import transforms
 
 import segmentation.model.functions as fn
 
-BAND_NAMES = np.array(["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics'])
+BAND_NAMES = np.array(
+    [
+        "B1",
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "B6_VCID1",
+        "B6_VCID2",
+        "B7",
+        "elevation",
+        "slope",
+        "physics",
+    ]
+)
 
 
-def fetch_loaders(processed_dir, batch_size=32, use_channels=[3, 2, 1], output_classes=[1], class_names=['BG', 'CleanIce', 'Debris'], physics_channel=10, normalize=False, train_folder='train', val_folder='val', test_folder='test', shuffle=True):
-    """ Function to fetch dataLoaders for the Training / Validation
+def fetch_loaders(
+    processed_dir,
+    batch_size=32,
+    use_channels=[3, 2, 1],
+    output_classes=[1],
+    class_names=["BG", "CleanIce", "Debris"],
+    physics_channel=10,
+    normalize=False,
+    train_folder="train",
+    val_folder="val",
+    test_folder="test",
+    shuffle=True,
+):
+    """Function to fetch dataLoaders for the Training / Validation
     Args:
         processed_dir(str): Directory with the processed data
         batch_size(int): The size of each batch during training. Defaults to 32.
     Return:
         Returns train and val dataloaders
     """
-    fn.log(logging.INFO, f'fetch_loaders() | Output classes: {[class_names[cl] for cl in output_classes]} | raw={output_classes}')
-    fn.log(logging.INFO, f'fetch_loaders() | Using channels {BAND_NAMES[use_channels]}')
+    fn.log(
+        logging.INFO,
+        f"fetch_loaders() | Output classes: {[class_names[cl] for cl in output_classes]} | raw={output_classes}",
+    )
+    fn.log(logging.INFO, f"fetch_loaders() | Using channels {BAND_NAMES[use_channels]}")
 
     if isinstance(processed_dir, str):
         processed_dir = pathlib.Path(processed_dir)
 
-    train_dataset = GlacierDataset(processed_dir / train_folder, use_channels, output_classes, physics_channel, normalize,
-                                   transforms=transforms.Compose([
-                                       # DropoutChannels(0.5),
-                                       FlipHorizontal(0.15),
-                                       FlipVertical(0.15),
-                                       Rot270(0.15),
-                                       # ElasticDeform(1)
-                                   ])
-                                   )
-    val_dataset = GlacierDataset(processed_dir / val_folder, use_channels, output_classes, physics_channel, normalize)
-    test_dataset = GlacierDataset(processed_dir / test_folder, use_channels, output_classes, physics_channel, normalize)
+    train_dataset = GlacierDataset(
+        processed_dir / train_folder,
+        use_channels,
+        output_classes,
+        physics_channel,
+        normalize,
+        transforms=transforms.Compose(
+            [
+                # DropoutChannels(0.5),
+                FlipHorizontal(0.15),
+                FlipVertical(0.15),
+                Rot270(0.15),
+                # ElasticDeform(1)
+            ]
+        ),
+    )
+    val_dataset = GlacierDataset(
+        processed_dir / val_folder,
+        use_channels,
+        output_classes,
+        physics_channel,
+        normalize,
+    )
+    test_dataset = GlacierDataset(
+        processed_dir / test_folder,
+        use_channels,
+        output_classes,
+        physics_channel,
+        normalize,
+    )
 
     def seed_worker(worker_id):
         worker_seed = torch.initial_seed() % 2**32
@@ -56,15 +104,30 @@ def fetch_loaders(processed_dir, batch_size=32, use_channels=[3, 2, 1], output_c
     g = torch.Generator()
     g.manual_seed(42)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                              worker_init_fn=seed_worker, generator=g,
-                              num_workers=8, shuffle=shuffle)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size,
-                            worker_init_fn=seed_worker, generator=g,
-                            num_workers=8, shuffle=shuffle)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size,
-                             worker_init_fn=seed_worker, generator=g,
-                             num_workers=8, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        worker_init_fn=seed_worker,
+        generator=g,
+        num_workers=8,
+        shuffle=shuffle,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        worker_init_fn=seed_worker,
+        generator=g,
+        num_workers=8,
+        shuffle=shuffle,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        worker_init_fn=seed_worker,
+        generator=g,
+        num_workers=8,
+        shuffle=False,
+    )
     return train_loader, val_loader, test_loader
 
 
@@ -74,7 +137,15 @@ class GlacierDataset(Dataset):
     binary mask
     """
 
-    def __init__(self, folder_path, use_channels, output_classes, physics_channel, normalize, transforms=None):
+    def __init__(
+        self,
+        folder_path,
+        use_channels,
+        output_classes,
+        physics_channel,
+        normalize,
+        transforms=None,
+    ):
         """Initialize dataset."""
         self.folder_path = folder_path
         self.use_channels = use_channels
@@ -86,12 +157,16 @@ class GlacierDataset(Dataset):
         self.use_physics = physics_channel in use_channels
 
         # Sanity checking
-        assert isinstance(output_classes, list), 'output_classes must be a list'
-        assert len(set(output_classes)) == len(output_classes), 'output_classes cannot have duplicates'
-        assert all(self.output_classes >= 0) and all(self.output_classes < 3), 'output_classes must be either 0 (BG), 1 (CleanIce), or 2 (Debris)'
+        assert isinstance(output_classes, list), "output_classes must be a list"
+        assert len(set(output_classes)) == len(
+            output_classes
+        ), "output_classes cannot have duplicates"
+        assert all(self.output_classes >= 0) and all(
+            self.output_classes < 3
+        ), "output_classes must be either 0 (BG), 1 (CleanIce), or 2 (Debris)"
 
         # Get image and mask files from provided folder path
-        self.img_files = glob.glob(os.path.join(folder_path, '*tiff*'))
+        self.img_files = glob.glob(os.path.join(folder_path, "*tiff*"))
         self.mask_files = [s.replace("tiff", "mask") for s in self.img_files]
 
         # Load normalization arrays
@@ -103,7 +178,7 @@ class GlacierDataset(Dataset):
             self.mean, self.std = self.mean[use_channels], self.std[use_channels]
 
     def __getitem__(self, index):
-        """ getitem method to retrieve a single instance of the dataset
+        """getitem method to retrieve a single instance of the dataset
         Args:
             index(int): Index identifier of the data instance
         Return:
@@ -126,10 +201,10 @@ class GlacierDataset(Dataset):
         else:
             raise ValueError("normalize must be min-max or mean-std")
         label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
-        #ones = label == 1
-        #twos = label == 2
-        #zeros = np.invert(ones + twos)
-        #label = np.concatenate((zeros, ones, twos), axis=2)
+        # ones = label == 1
+        # twos = label == 2
+        # zeros = np.invert(ones + twos)
+        # label = np.concatenate((zeros, ones, twos), axis=2)
         # print('DEBUGGING', np.sum(label==0), np.sum(label==1), np.sum(label==2))
 
         # Set labels depending on problem (Binary vs Multi-Class)
@@ -144,21 +219,21 @@ class GlacierDataset(Dataset):
         label[_mask] = 0
 
         if self.transforms:
-            sample = {'image': data, 'mask': label}
+            sample = {"image": data, "mask": label}
             sample = self.transforms(sample)
-            data = torch.from_numpy(sample['image'].copy()).float()
-            label = torch.from_numpy(sample['mask'].copy()).float()
+            data = torch.from_numpy(sample["image"].copy()).float()
+            label = torch.from_numpy(sample["mask"].copy()).float()
         else:
             data = torch.from_numpy(data).float()
             label = torch.from_numpy(label).float()
         return data, label
 
     def __len__(self):
-        """ Function to return the length of the dataset
-            Args:
-                None
-            Return:
-                len(img_files)(int): The length of the dataset (img_files)
+        """Function to return the length of the dataset
+        Args:
+            None
+        Return:
+            len(img_files)(int): The length of the dataset (img_files)
         """
         return len(self.img_files)
 
@@ -176,11 +251,11 @@ class FlipHorizontal(object):
         self.p = p
 
     def __call__(self, sample):
-        data, label = sample['image'], sample['mask']
+        data, label = sample["image"], sample["mask"]
         if torch.rand(1) < self.p:
             data = data[:, ::-1, :]
             label = label[:, ::-1, :]
-        return {'image': data, 'mask': label}
+        return {"image": data, "mask": label}
 
 
 class FlipVertical(object):
@@ -196,11 +271,11 @@ class FlipVertical(object):
         self.p = p
 
     def __call__(self, sample):
-        data, label = sample['image'], sample['mask']
+        data, label = sample["image"], sample["mask"]
         if torch.rand(1) < self.p:
             data = data[::-1, :, :]
             label = label[::-1, :, :]
-        return {'image': data, 'mask': label}
+        return {"image": data, "mask": label}
 
 
 class Rot270(object):
@@ -216,11 +291,11 @@ class Rot270(object):
         self.p = p
 
     def __call__(self, sample):
-        data, label = sample['image'], sample['mask']
+        data, label = sample["image"], sample["mask"]
         if torch.rand(1) < self.p:
             data = data.transpose((1, 0, 2))
             label = label.transpose((1, 0, 2))
-        return {'image': data, 'mask': label}
+        return {"image": data, "mask": label}
 
 
 class DropoutChannels(object):
@@ -234,11 +309,13 @@ class DropoutChannels(object):
         self.p = p
 
     def __call__(self, sample):
-        data, label = sample['image'], sample['mask']
+        data, label = sample["image"], sample["mask"]
         if torch.rand(1) < self.p:
-            rand_channel_index = np.random.randint(low=0, high=data.shape[2], size=int(data.shape[2]/5))
+            rand_channel_index = np.random.randint(
+                low=0, high=data.shape[2], size=int(data.shape[2] / 5)
+            )
             data[:, :, rand_channel_index] = 0
-        return {'image': data, 'mask': label}
+        return {"image": data, "mask": label}
 
 
 class ElasticDeform(object):
@@ -252,9 +329,9 @@ class ElasticDeform(object):
         self.p = p
 
     def __call__(self, sample):
-        data, label = sample['image'], sample['mask']
+        data, label = sample["image"], sample["mask"]
         label = label.astype(np.float32)
         if torch.rand(1) < self.p:
             [data, label] = elasticdeform.deform_random_grid([data, label], axis=(0, 1))
         label = np.round(label).astype(bool)
-        return {'image': data, 'mask': label}
+        return {"image": data, "mask": label}

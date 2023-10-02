@@ -15,21 +15,27 @@ from segmentation.model.frame import Framework
 if __name__ == "__main__":
     channels = ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"]
     # "elevation",
-    #"slope * sin(aspect)", "slope * cos(aspect)", "curvature", "latitude", "longitude",
+    # "slope * sin(aspect)", "slope * cos(aspect)", "curvature", "latitude", "longitude",
     # "NDVI", "NDWI", "NDSI", "Hue", "Saturation", "Value"]
-    conf = Dict(yaml.safe_load(open('./conf/unet_sailency.yaml')))
+    conf = Dict(yaml.safe_load(open("./conf/unet_sailency.yaml")))
     data_dir = pathlib.Path(conf.data_dir)
     sailency_dir = data_dir / conf.processed_dir / "sailency" / conf.run_name
     if not os.path.exists(sailency_dir):
         os.makedirs(sailency_dir)
-    model_path = data_dir / conf.processed_dir / conf.folder_name / \
-        conf.run_name / "models" / "model_best.pt"
+    model_path = (
+        data_dir
+        / conf.processed_dir
+        / conf.folder_name
+        / conf.run_name
+        / "models"
+        / "model_best.pt"
+    )
     loss_fn = fn.get_loss(conf.model_opts.args.outchannels, conf.loss_opts)
     frame = Framework(
         loss_fn=loss_fn,
         model_opts=conf.model_opts,
         optimizer_opts=conf.optim_opts,
-        device=(int(conf.gpu_rank))
+        device=(int(conf.gpu_rank)),
     )
     if torch.cuda.is_available():
         state_dict = torch.load(model_path)
@@ -49,7 +55,9 @@ if __name__ == "__main__":
 
     sums = []
     for x_fname in inputs:
-        _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:, :, conf.use_channels]
+        _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[
+            :, :, conf.use_channels
+        ]
         mask = np.sum(_x[:, :, :7], axis=2) == 0
         if conf.normalize == "mean-std":
             _x = (_x - _mean) / _std
@@ -75,11 +83,11 @@ if __name__ == "__main__":
     print(scores)
     pdb.set_trace()
 
-    #_y = y
+    # _y = y
     # plt.imshow(_y.detach().cpu().numpy()[0,:,:,1])
     # plt.savefig("./sailencymap/sailency_y_pred.png")
     # y[:,:,:,1].mean().backward()
-    #_x = x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
+    # _x = x.grad.data.abs().detach().cpu().numpy()[0].transpose(1,2,0)
 
     inputs_dict = dict(enumerate(inputs))
     pprint(inputs_dict)
@@ -114,8 +122,10 @@ if __name__ == "__main__":
     b18_plot = fig.add_subplot(grid[3, 5])
     b19_plot = fig.add_subplot(grid[3, 6])
 
-    _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[:, :, conf.use_channels]
-    x_plot.imshow(_x[:, :, [4, 2, 1]]/255)
+    _x = np.load(data_dir / conf.processed_dir / conf.split / x_fname)[
+        :, :, conf.use_channels
+    ]
+    x_plot.imshow(_x[:, :, [4, 2, 1]] / 255)
     x_plot.axis("off")
     x_plot.set_title("False color composite (B5, B4, B2)")
     # plt.imshow(x[:,:,[4,2,1]]/255)
@@ -152,7 +162,7 @@ if __name__ == "__main__":
 
     for i in range(_x.shape[2]):
         # plt.figure()
-        #plt.imshow(_x[:,:,i].clip(0,1), cmap="hot")
+        # plt.imshow(_x[:,:,i].clip(0,1), cmap="hot")
         varname = f"b{i}_plot"
         globals()[varname].imshow(_x[:, :, i], cmap="hot")
         globals()[varname].axis("off")
@@ -160,9 +170,9 @@ if __name__ == "__main__":
         # plt.savefig(f"./sailencymap/channel_{i}.png")
         print(f"channel={i}, sum={np.sum(_x[:,:,i])}")
 
-    #_x = _x.sum(axis=2)
+    # _x = _x.sum(axis=2)
     # plt.figure()
-    #plt.imshow(_x, cmap="hot")
+    # plt.imshow(_x, cmap="hot")
     plt.tight_layout()
-    #fig.suptitle("Feature-wise saliency for debris glacier segmentation")
+    # fig.suptitle("Feature-wise saliency for debris glacier segmentation")
     plt.savefig(f"./sailencymap/subplot.png")
