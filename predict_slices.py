@@ -7,8 +7,6 @@ Takes around 10min using 32 CPUs on our server.
 """
 import multiprocessing
 import pathlib
-# TODO: Update code that gives FutureWarning and DeprecationWarning
-import warnings
 from timeit import default_timer as timer
 
 import rasterio
@@ -22,6 +20,8 @@ from segmentation.data.slice import get_mask, get_tiff_np, read_shp, read_tiff
 from segmentation.model.frame import Framework
 from utils import istarmap
 
+# TODO: Update code that gives FutureWarning and DeprecationWarning
+import warnings
 warnings.filterwarnings("ignore")
 
 if __name__ == "__main__":
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     data = list(enumerate(tiff_dir.glob('*.tif')))
     with tqdm(total=len(data), desc='Running Predictions') as pbar:
         with multiprocessing.Pool(32) as pool:
-            for result in pool.istarmap(process, data):
+            for result in istarmap(pool, process, data):
                 pbar.update(1)
 
     print(f'Took {timer()-start_time:.2f}s for {conf.run_name}')

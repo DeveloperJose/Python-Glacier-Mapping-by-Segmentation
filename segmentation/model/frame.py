@@ -170,7 +170,7 @@ class Framework:
     def from_checkpoint(checkpoint_path: Path, device=None, testing=False):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), 'checkpoint_path does not exist'
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and device != 'cpu':
             state = torch.load(checkpoint_path)
         else:
             state = torch.load(checkpoint_path, map_location='cpu')
