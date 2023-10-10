@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-import segmentation.model.functions as fn
+import model.functions as fn
 
 BAND_NAMES = np.array(
     [

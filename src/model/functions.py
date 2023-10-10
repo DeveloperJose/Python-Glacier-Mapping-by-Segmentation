@@ -16,7 +16,7 @@ import torch
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
-from segmentation.model.losses import *
+from model.losses import *
 
 from .metrics import *
 

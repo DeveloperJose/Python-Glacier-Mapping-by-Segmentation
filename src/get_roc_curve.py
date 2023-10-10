@@ -5,9 +5,9 @@ Created on Fri Feb 18 2:39:37 2021
 
 @author: Aryal007
 """
-from segmentation.data.data import fetch_loaders
-from segmentation.model.frame import Framework
-import segmentation.model.functions as fn
+from data.data import fetch_loaders
+from model.frame import Framework
+import model.functions as fn
 
 import yaml
 import pathlib

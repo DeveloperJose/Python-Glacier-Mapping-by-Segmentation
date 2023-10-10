@@ -15,9 +15,9 @@ import yaml
 from addict import Dict
 from tqdm import tqdm
 
-import segmentation.model.functions as fn
-from segmentation.data.slice import get_mask, get_tiff_np, read_shp, read_tiff
-from segmentation.model.frame import Framework
+import model.functions as fn
+from data.slice import get_mask, get_tiff_np, read_shp, read_tiff
+from model.frame import Framework
 from utils import istarmap
 
 # TODO: Update code that gives FutureWarning and DeprecationWarning

@@ -9,8 +9,8 @@ import torch
 import yaml
 from addict import Dict
 
-import segmentation.model.functions as fn
-from segmentation.model.frame import Framework
+import model.functions as fn
+from model.frame import Framework
 
 if __name__ == "__main__":
     channels = ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"]

@@ -19,9 +19,9 @@ import yaml
 from addict import Dict
 from torch.utils.tensorboard import SummaryWriter
 
-import segmentation.model.functions as fn
-from segmentation.data.data import fetch_loaders
-from segmentation.model.frame import Framework
+import model.functions as fn
+from data.data import fetch_loaders
+from model.frame import Framework
 
 random.seed(41)
 np.random.seed(41)

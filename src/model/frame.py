@@ -21,7 +21,7 @@ from scipy.ndimage.morphology import binary_fill_holes
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-import segmentation.model.functions as fn
+import model.functions as fn
 
 from .metrics import *
 from .unet import Unet

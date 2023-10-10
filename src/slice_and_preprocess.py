@@ -15,7 +15,7 @@ import yaml
 from addict import Dict
 from tqdm import tqdm
 
-import segmentation.data.slice as fn
+import data.slice as fn
 import utils
 from utils import istarmap
 

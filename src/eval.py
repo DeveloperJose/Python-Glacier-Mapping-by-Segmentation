@@ -12,7 +12,7 @@ import pathlib
 import pandas as pd
 from addict import Dict
 import yaml
-import coastal_mapping.model.metrics as m
+import model.metrics as m
 
 if __name__ == "__main__":
     conf = Dict(yaml.safe_load(open("./conf/eval.yaml")))

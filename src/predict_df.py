@@ -16,10 +16,10 @@ from scipy.ndimage.morphology import binary_fill_holes
 from skimage.color import rgb2hsv
 from tqdm import tqdm
 
-import segmentation.model.functions as fn
-from segmentation.data.slice import get_mask, get_tiff_np, read_shp, read_tiff
-from segmentation.model.frame import Framework
-from segmentation.model.metrics import *
+import model.functions as fn
+from data.slice import get_mask, get_tiff_np, read_shp, read_tiff
+from model.frame import Framework
+from model.metrics import *
 from utils import istarmap
 
 # TODO: Update code that gives FutureWarning and DeprecationWarning
