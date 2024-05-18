@@ -47,19 +47,8 @@ if __name__ == "__main__":
     idx = np.random.permutation(len(images))
     splits = {
         "test": sorted([images[i] for i in idx[: int(conf.test * len(images))]]),
-        "val": sorted(
-            [
-                images[i]
-                for i in idx[
-                    int(conf.test * len(images)) : int(
-                        (conf.test + conf.val) * len(images)
-                    )
-                ]
-            ]
-        ),
-        "train": sorted(
-            [images[i] for i in idx[int((conf.test + conf.val) * len(images)) :]]
-        ),
+        "val": sorted([images[i] for i in idx[int(conf.test * len(images)) : int((conf.test + conf.val) * len(images))]]),
+        "train": sorted([images[i] for i in idx[int((conf.test + conf.val) * len(images)) :]]),
     }
     labels = fn.read_shp(Path(conf.labels_dir) / "HKH_CIDC_5basins_all.shp")
     utils.remove_and_create(conf.out_dir)
@@ -68,9 +57,7 @@ if __name__ == "__main__":
 
         def process(i, fname):
             global conf, pbar
-            mean, std, _min, _max, df_rows = fn.save_slices(
-                i, fname, labels, savepath, pbar, **conf
-            )
+            mean, std, _min, _max, df_rows = fn.save_slices(i, fname, labels, savepath, pbar, **conf)
             return mean, std, _min, _max, df_rows
 
         for split, meta in splits.items():

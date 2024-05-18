@@ -141,7 +141,7 @@ def get_mask(tiff, shp, column="Glaciers"):
                     poly_from_coord(row["geometry"], tiff.meta["transform"])
                 )
             else:
-                for p in row["geometry"]:
+                for p in row["geometry"].geoms:
                     poly_shp.append(poly_from_coord(p, tiff.meta["transform"]))
         try:
             channel_mask = rasterize(shapes=poly_shp, out_shape=im_size)
