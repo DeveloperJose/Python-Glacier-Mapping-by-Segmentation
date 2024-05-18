@@ -26,6 +26,13 @@ name = "torch"
 url = "https://download.pytorch.org/whl/cu121"
 priority = "supplemental"
 
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.4.4"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+extend-include = []

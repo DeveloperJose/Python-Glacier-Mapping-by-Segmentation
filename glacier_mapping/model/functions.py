@@ -7,6 +7,7 @@ Created on Fri Sep  4 23:18:43 2020
 
 Training/Validation Functions
 """
+
 import datetime
 import logging
 
@@ -16,9 +17,7 @@ import torch
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
-from model.losses import *
-
-from .metrics import *
+import glacier_mapping.model.losses as model_losses
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
@@ -197,9 +196,9 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
     Return:
         Images Logged onto tensorboard
     """
-    threshold = frame.loader_opts.threshold
+    # threshold = frame.loader_opts.threshold
     normalize_name = frame.loader_opts.normalize
-    use_physics = frame.use_physics
+    # use_physics = frame.use_physics
 
     batch = next(iter(batch))
     colors = {
@@ -258,12 +257,12 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
         writer.add_image(
             f"{stage}/x", make_grid(pm(squash(x[:, :, :, [4, 3, 1]]))), epoch
         )
-    except:
+    except Exception:
         try:
             writer.add_image(
                 f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0, 1, 2]]))), epoch
             )
-        except:
+        except Exception:
             writer.add_image(
                 f"{stage}/x", make_grid(pm(squash(x[:, :, :, [0]]))), epoch
             )
@@ -275,14 +274,14 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
 
 def get_loss(outchannels, opts=None):
     if opts is None:
-        return diceloss()
+        return model_losses.diceloss()
     if opts.label_smoothing == "None":
         label_smoothing = 0
     else:
         label_smoothing = opts.label_smoothing
 
     if opts.name == "dice":
-        loss_fn = diceloss(
+        loss_fn = model_losses.diceloss(
             act=torch.nn.Softmax(dim=1),
             outchannels=outchannels,
             label_smoothing=label_smoothing,
@@ -290,25 +289,25 @@ def get_loss(outchannels, opts=None):
             gaussian_blur_sigma=opts.gaussian_blur_sigma,
         )
     elif opts.name == "boundary":
-        loss_fn = boundaryloss()
+        loss_fn = model_losses.boundaryloss()
     elif opts.name == "iou":
-        loss_fn = iouloss(
+        loss_fn = model_losses.iouloss(
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     elif opts.name == "ce":
-        loss_fn = celoss(
+        loss_fn = model_losses.celoss(
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     elif opts.name == "nll":
-        loss_fn = nllloss(
+        loss_fn = model_losses.nllloss(
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     elif opts.name == "focal":
-        loss_fn = focalloss(
+        loss_fn = model_losses.focalloss(
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     elif opts.name == "custom":
-        loss_fn = customloss(
+        loss_fn = model_losses.customloss(
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     else:

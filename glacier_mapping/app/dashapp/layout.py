@@ -1,7 +1,4 @@
-from dash import html, dcc, Input, Output, dash_table
-import dash_bootstrap_components as dbc
-import json
-import plotly.express as px
+from dash import html, dcc, dash_table
 
 
 def get_card(text1, id, type="primary"):

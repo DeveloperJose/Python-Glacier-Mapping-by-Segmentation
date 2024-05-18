@@ -5,6 +5,7 @@ This program takes full TIFF images, feeds the slices to a trained model to prod
 
 Takes around 10min using 32 CPUs on our server.
 """
+
 import multiprocessing
 import pathlib
 from timeit import default_timer as timer
@@ -15,7 +16,6 @@ import yaml
 from addict import Dict
 from tqdm import tqdm
 
-import model.functions as fn
 from data.slice import get_mask, get_tiff_np, read_shp, read_tiff
 from model.frame import Framework
 from utils import istarmap
@@ -62,7 +62,14 @@ if __name__ == "__main__":
     labels = read_shp(labels_path)
 
     def process(idx, fname):
-        global physics_res, physics_scale, labels, window_size, threshold, tiff_dir, dem_dir
+        global \
+            physics_res, \
+            physics_scale, \
+            labels, \
+            window_size, \
+            threshold, \
+            tiff_dir, \
+            dem_dir
         tiff_fname = tiff_dir / fname
         dem_fname = dem_dir / fname
 

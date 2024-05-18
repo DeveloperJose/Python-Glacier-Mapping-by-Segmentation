@@ -5,9 +5,9 @@ Created on Wed Feb 17 12:59:22 2021
 
 @author: Aryal007
 """
+
 import numpy as np
 import os
-import sys
 import pathlib
 import pandas as pd
 from addict import Dict

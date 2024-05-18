@@ -11,11 +11,7 @@ if st.button("Click me"):
     with st.status("Loading..") as status:
         for i in range(1_000_000):
             print(i)
-    
-    
-    with st.chat_message(f"user"):
+
+    with st.chat_message("user"):
         st.write(f"The number is {x} and its type is {type(x)}")
         st.line_chart(np.random.randn(30, 3))
-
-
-    

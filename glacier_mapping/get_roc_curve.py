@@ -5,7 +5,7 @@ Created on Fri Feb 18 2:39:37 2021
 
 @author: Aryal007
 """
-from data.data import fetch_loaders
+
 from model.frame import Framework
 import model.functions as fn
 
@@ -13,13 +13,11 @@ import yaml
 import pathlib
 import warnings
 import torch
-import matplotlib
 import os
 import matplotlib.pyplot as plt
 from addict import Dict
 import numpy as np
-import pdb
-from sklearn.metrics import roc_curve, auc, roc_auc_score
+from sklearn.metrics import roc_curve, auc
 
 warnings.filterwarnings("ignore")
 

@@ -1,21 +1,13 @@
 import pathlib
 import multiprocessing
-import glob
-import os
 import collections
 
-import cv2
 import numpy as np
-import matplotlib.patches as pt
-import matplotlib.pyplot as plt
-from PIL import Image
-from scipy import ndimage
 from tqdm import tqdm
 from timeit import default_timer as timer
 
 import numba
 
-from data import fetch_loaders
 
 rng = np.random.default_rng(41)
 

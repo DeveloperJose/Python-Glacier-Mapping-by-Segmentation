@@ -175,4 +175,4 @@ if __name__ == "__main__":
     # plt.imshow(_x, cmap="hot")
     plt.tight_layout()
     # fig.suptitle("Feature-wise saliency for debris glacier segmentation")
-    plt.savefig(f"./sailencymap/subplot.png")
+    plt.savefig("./sailencymap/subplot.png")

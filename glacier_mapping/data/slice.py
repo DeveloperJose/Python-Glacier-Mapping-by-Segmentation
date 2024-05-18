@@ -5,6 +5,7 @@ Created on Wed Feb 24 13:26:56 2021
 
 @author: mibook
 """
+
 import os
 import pathlib
 
@@ -146,7 +147,7 @@ def get_mask(tiff, shp, column="Glaciers"):
         try:
             channel_mask = rasterize(shapes=poly_shp, out_shape=im_size)
             mask[:, :, key] = channel_mask
-        except Exception as e:
+        except Exception:
             pass
             # Already 0 if no mask
 
@@ -310,12 +311,9 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
                 final_save_slice = np.copy(tiff_slice)
 
                 if filter_percentage(final_save_slice, conf["filter"], type="image"):
-                    mask_fname, slice_tiff_fname = "mask_" + str(
-                        filenum
-                    ) + "_slice_" + str(slicenum), "tiff_" + str(
-                        filenum
-                    ) + "_slice_" + str(
-                        slicenum
+                    mask_fname, slice_tiff_fname = (
+                        "mask_" + str(filenum) + "_slice_" + str(slicenum),
+                        "tiff_" + str(filenum) + "_slice_" + str(slicenum),
                     )
                     bg, ci, deb, mas = get_pixel_count(final_save_slice, mask_slice)
                     _tot = bg + ci + deb + mas

@@ -3,13 +3,12 @@
 """
 This program trains a U-Net model on the provided dataset.
 """
+
 import gc
 import json
 import logging
 import pathlib
-import pdb
 import random
-import typing
 import warnings
 from timeit import default_timer as timer
 
@@ -61,7 +60,7 @@ if __name__ == "__main__":
     )
 
     if conf.training_opts.fine_tune:
-        fn.log(logging.INFO, f"Finetuning the model")
+        fn.log(logging.INFO, "Finetuning the model")
         run_name += "_finetuned"
         final_model_path = output_dir / "models" / "model_final.pt"
         frame = Framework.from_checkpoint(

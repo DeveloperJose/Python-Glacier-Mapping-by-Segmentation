@@ -10,6 +10,7 @@ Frame to Combine Model with Optimizer
 This wraps the model and optimizer objects needed in training, so that each
 training step can be concisely called with a single method.
 """
+
 import math
 import os
 from pathlib import Path
@@ -23,8 +24,8 @@ from tqdm import tqdm
 
 import model.functions as fn
 
-from .metrics import *
-from .unet import Unet
+from glacier_mapping.model.metrics import tp_fp_fn
+from glacier_mapping.model.unet import Unet
 
 
 class Framework:
@@ -96,9 +97,10 @@ class Framework:
             self.loss_alpha = torch.tensor([loss_opts.alpha]).to(self.device)
         else:
             self.loss_alpha = torch.tensor([0.0]).to(self.device)
-        self.sigma1, self.sigma2 = torch.tensor([1.0]).to(self.device), torch.tensor(
-            [1.0]
-        ).to(self.device)
+        self.sigma1, self.sigma2 = (
+            torch.tensor([1.0]).to(self.device),
+            torch.tensor([1.0]).to(self.device),
+        )
         self.sigma1, self.sigma2 = (
             self.sigma1.requires_grad_(),
             self.sigma2.requires_grad_(),
@@ -418,9 +420,9 @@ class Framework:
                     temp = np.zeros(
                         (window_size[0], window_size[1], whole_arr.shape[2])
                     )
-                    temp[
-                        : current_slice.shape[0], : current_slice.shape[1], :
-                    ] = current_slice
+                    temp[: current_slice.shape[0], : current_slice.shape[1], :] = (
+                        current_slice
+                    )
                     current_slice = temp
 
                 # Slice prediction then place slice prediction into whole image prediction

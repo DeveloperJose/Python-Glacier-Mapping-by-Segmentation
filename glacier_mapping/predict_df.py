@@ -1,26 +1,17 @@
 import multiprocessing
 import pathlib
-import pdb
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import rasterio
-import rasterio.plot
-import seaborn_image as isns
 import torch
 import yaml
 from addict import Dict
-from PIL import Image
-from scipy.ndimage.morphology import binary_fill_holes
-from skimage.color import rgb2hsv
 from tqdm import tqdm
 
-import model.functions as fn
-from data.slice import get_mask, get_tiff_np, read_shp, read_tiff
-from model.frame import Framework
-from model.metrics import *
-from utils import istarmap
+from data.slice import get_mask, read_shp, read_tiff
+from glacier_mapping.model.frame import Framework
+import glacier_mapping.model.metrics as model_metrics
+from glacier_mapping.utils import istarmap
 
 # TODO: Update code that gives FutureWarning and DeprecationWarning
 import warnings
@@ -30,12 +21,12 @@ warnings.filterwarnings("ignore")
 
 def get_tp_fp_fn(pred, true):
     pred, true = torch.from_numpy(pred), torch.from_numpy(true)
-    tp, fp, fn = tp_fp_fn(pred, true)
+    tp, fp, fn = model_metrics.tp_fp_fn(pred, true)
     return tp, fp, fn
 
 
 def get_precision_recall_iou(tp, fp, fn):
-    p, r, i = precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn)
+    p, r, i = model_metrics.precision(tp, fp, fn), model_metrics.recall(tp, fp, fn), model_metrics.IoU(tp, fp, fn)
     return p, r, i
 
 

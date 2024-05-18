@@ -7,7 +7,7 @@ Created on Thurs Sep 30 21:42:33 2021
 
 metrics
 """
-import pdb
+
 
 import numpy as np
 import torch
@@ -221,12 +221,12 @@ class nllloss(torch.nn.Module):
         self.masked = masked
 
     def forward(self, pred, target):
-        if self.masked:
-            mask = torch.sum(target, dim=1) == 1
-        else:
-            mask = torch.ones(
-                (target.size()[0], target.size()[2], target.size()[3]), dtype=torch.bool
-            )
+        # if self.masked:
+        #     mask = torch.sum(target, dim=1) == 1
+        # else:
+        #     mask = torch.ones(
+        #         (target.size()[0], target.size()[2], target.size()[3]), dtype=torch.bool
+        #     )
         target = (
             target * (1 - self.label_smoothing)
             + self.label_smoothing / self.outchannels

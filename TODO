@@ -3,3 +3,5 @@ Explain poetry installation (curl -sSL https://install.python-poetry.org | pytho
 export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 
 poetry run python -m streamlit run debugging.py
+
+poetry run ruff check glacier_mapping/ --fix
