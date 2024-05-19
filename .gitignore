@@ -1,6 +1,7 @@
 output/
 pred_runs/
 runs/
+debug/
 .python-version
 .vscode
 

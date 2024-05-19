@@ -17,7 +17,7 @@ from shapely.geometry import Polygon, box
 from shapely.ops import cascaded_union
 from skimage.color import rgb2hsv
 
-from . import physics
+from glacier_mapping.data import physics
 
 
 def read_shp(filename):
@@ -196,6 +196,7 @@ def get_tiff_np(
 
     use_physics = (
         isinstance(physics_res, (float, str, int))
+        and physics_res != "None"
         and isinstance(physics_scale, (float, int))
         and use_dem
     )
@@ -222,16 +223,17 @@ def get_tiff_np(
     return tiff_np
 
 
-def save_slices(filenum, fname, labels, savepath, pbar, **conf):
+def save_slices(filenum, fname, labels, savepath, **conf):
     tiff_fname = pathlib.Path(conf["image_dir"]) / fname
     dem_fname = pathlib.Path(conf["dem_dir"]) / fname
     mask = get_mask(tiff_fname, labels)
 
-    pbar.set_postfix_str("Loading mask")
     _mask = np.zeros((mask.shape[0], mask.shape[1]))
     for i in range(mask.shape[2]):
         _mask[mask[:, :, i] == 1] = i + 1
     mask = _mask.astype(np.uint8)
+
+    # breakpoint()
 
     def verify_slice_size(slice, conf):
         if (
@@ -254,7 +256,8 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
             labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
             percentage = 0.5
         else:
-            labelled_pixels = np.sum(slice != 0)
+            # labelled_pixels = np.sum(slice != 0)
+            labelled_pixels = np.count_nonzero(slice)
         total_pixels = slice.shape[0] * slice.shape[1]
 
         if labelled_pixels / total_pixels < percentage:
@@ -275,7 +278,6 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
     if not os.path.exists(conf["out_dir"]):
         os.makedirs(conf["out_dir"])
 
-    pbar.set_postfix_str("Preparing TIFF array")
     tiff_np = get_tiff_np(
         tiff_fname,
         dem_fname,
@@ -288,9 +290,10 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
         verbose=(filenum == 0),
     )
 
-    pbar.set_postfix_str("Slicing")
     slicenum = 0
     df_rows = []
+    # breakpoint()
+    print(np.unique(mask, True))
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
         for column in range(
             0, tiff_np.shape[0], conf["window_size"][1] - conf["overlap"]
@@ -300,6 +303,8 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
                 column : column + conf["window_size"][1],
             ]
             mask_slice = verify_slice_size(mask_slice, conf)
+
+            print(fname, mask_slice.shape, np.unique(mask_slice, return_counts=True), np.sum(mask_slice != 0), np.count_nonzero(mask_slice), filter_percentage(mask_slice, 0.00001))
 
             if filter_percentage(mask_slice, conf["filter"]):
                 tiff_slice = tiff_np[
@@ -338,6 +343,7 @@ def save_slices(filenum, fname, labels, savepath, pbar, **conf):
                     ] = 0
                     save_slice(final_save_slice, savepath / slice_tiff_fname)
             slicenum += 1
+    # breakpoint()
     return (
         np.mean(tiff_np, axis=(0, 1)),
         np.std(tiff_np, axis=(0, 1)),

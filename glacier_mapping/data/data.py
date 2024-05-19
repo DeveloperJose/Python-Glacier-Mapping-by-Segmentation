@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-import model.functions as fn
+import glacier_mapping.model.functions as fn
 
 BAND_NAMES = np.array(
     [
@@ -158,6 +158,8 @@ class GlacierDataset(Dataset):
         self.use_physics = physics_channel in use_channels
 
         # Sanity checking
+        if isinstance(self.folder_path, str):
+            self.folder_path = pathlib.Path(self.folder_path)
         assert isinstance(output_classes, list), "output_classes must be a list"
         assert len(set(output_classes)) == len(
             output_classes
@@ -171,7 +173,7 @@ class GlacierDataset(Dataset):
         self.mask_files = [s.replace("tiff", "mask") for s in self.img_files]
 
         # Load normalization arrays
-        arr = np.load(folder_path.parent / "normalize_train.npy")
+        arr = np.load(folder_path.parent / "normalize_all.npy")
         if self.normalize == "min-max":
             self.min, self.max = arr[2][use_channels], arr[3][use_channels]
         if self.normalize == "mean-std":
@@ -202,6 +204,7 @@ class GlacierDataset(Dataset):
         else:
             raise ValueError("normalize must be min-max or mean-std")
         label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
+        label[_mask] = 0
         # ones = label == 1
         # twos = label == 2
         # zeros = np.invert(ones + twos)
@@ -210,14 +213,16 @@ class GlacierDataset(Dataset):
 
         # Set labels depending on problem (Binary vs Multi-Class)
         # fn.log(logging.INFO, f'label has unique={np.unique(label)}')
+        # Label 0 = BG
+        # Label 1 = CleanIce
+        # Label 2 = DebrisIce
         if len(self.output_classes) == 1:
             binary_class = self.output_classes[0]
-            # label = np.concatenate((label != binary_class, label == binary_class), axis=2)
-            label = np.concatenate((label == 0, label == binary_class), axis=2)
+            label = np.concatenate((label != binary_class, label == binary_class), axis=2)
+            # label = np.concatenate((label == 0, label == binary_class), axis=2)
         else:
             # label = np.concatenate((label == 0, label == 1, label==2), axis=2)
             label = np.concatenate([label == x for x in self.output_classes], axis=2)
-        label[_mask] = 0
 
         if self.transforms:
             sample = {"image": data, "mask": label}

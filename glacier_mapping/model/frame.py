@@ -22,7 +22,7 @@ from scipy.ndimage.morphology import binary_fill_holes
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-import model.functions as fn
+import glacier_mapping.model.functions as fn
 
 from glacier_mapping.model.metrics import tp_fp_fn
 from glacier_mapping.model.unet import Unet
@@ -62,7 +62,7 @@ class Framework:
         output_classes = loader_opts.output_classes
 
         # Dataframe
-        self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
+        # self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
         # Binary Model or Multi-Class Model?
         if len(output_classes) == 1:
@@ -185,7 +185,7 @@ class Framework:
         print(f"Saved model {epoch}")
 
     @staticmethod
-    def from_checkpoint(checkpoint_path: Path, device=None, testing=False):
+    def from_checkpoint(checkpoint_path: Path, device=None, testing=False, override={}):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), "checkpoint_path does not exist"
         if torch.cuda.is_available() and device != "cpu":
@@ -195,6 +195,8 @@ class Framework:
 
         if testing:
             state["model_opts"].args.dropout = 0.00000001
+        if len(override) > 0:
+            state.update(override)
 
         frame = Framework(
             loss_opts=state["loss_opts"],

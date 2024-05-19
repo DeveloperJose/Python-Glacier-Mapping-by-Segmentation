@@ -18,6 +18,7 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 import glacier_mapping.model.losses as model_losses
+import glacier_mapping.model.metrics as model_metrics
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
@@ -322,9 +323,9 @@ def get_metrics(tp, fp, fn, metric_names):
         metrics (dict(troch.Tensor)): the matrix to get mean of
     """
     metrics = dict.fromkeys(metric_names, 0)
-    for metric, arr in metrics.items():
-        metric_fun = globals()[metric]
-        metrics[metric] = metric_fun(tp, fp, fn)
+    for metric_name, arr in metrics.items():
+        metric_fun = getattr(model_metrics, metric_name)
+        metrics[metric_name] = metric_fun(tp, fp, fn)
     return metrics
 
 
