@@ -4,4 +4,9 @@ export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 
 poetry run python -m streamlit run debugging.py
 
+https://eodatascience.com/Newsroom/Technical-blog-Managing-Google-Earth-Engine-repos
 poetry run ruff check glacier_mapping/ --fix
+
+https://earthaccess.readthedocs.io/en/latest/howto/authenticate/
+
+https://search.earthdata.nasa.gov/search/granules/collection-details?p=C2341384722-NSIDC_ECS&pg[0][v]=f&pg[0][gsk]=-start_date&q=NSIDC-0775%20V001&tl=1716098916.26!3!!

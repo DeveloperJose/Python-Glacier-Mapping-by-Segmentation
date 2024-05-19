@@ -173,7 +173,7 @@ class GlacierDataset(Dataset):
         self.mask_files = [s.replace("tiff", "mask") for s in self.img_files]
 
         # Load normalization arrays
-        arr = np.load(folder_path.parent / "normalize_all.npy")
+        arr = np.load(folder_path.parent / "normalize_train.npy")
         if self.normalize == "min-max":
             self.min, self.max = arr[2][use_channels], arr[3][use_channels]
         if self.normalize == "mean-std":

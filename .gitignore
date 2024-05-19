@@ -2,10 +2,13 @@ output/
 pred_runs/
 runs/
 debug/
+newruns/
 .python-version
 .vscode
 
 *.png
+*.tif
+*.nc
 
 ############### https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore
 # Byte-compiled / optimized / DLL files

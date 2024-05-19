@@ -1,6 +1,7 @@
 """
 This program is used to generate the metrics (Precision, Recall, IoU) given by predicting all test images of a given trained U-Net model.
 """
+
 import pathlib
 
 import numpy as np
@@ -87,7 +88,7 @@ if __name__ == "__main__":
             fp_sum[i] += fp
             fn_sum[i] += fnn
             _row.extend([prec, rec, iou])
-        df = df.append(pd.DataFrame([_row], columns=columns), ignore_index=True)
+        df = pd.concat([df, pd.DataFrame([_row], columns=columns)], ignore_index=True)
 
     # Compute precision, recall, and IoU for all running totals for all classes
     _row = ["Total"]
@@ -101,6 +102,6 @@ if __name__ == "__main__":
         _row.extend([prec, rec, iou])
 
     # Save and print results
-    df = df.append(pd.DataFrame([_row], columns=columns), ignore_index=True)
+    df = pd.concat([df, pd.DataFrame([_row], columns=columns)], ignore_index=True)
     df.to_csv(output_dir / "metadata.csv")
     print(f"{dict(zip(columns, _row))} for conf={conf}")

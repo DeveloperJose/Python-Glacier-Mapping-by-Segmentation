@@ -71,6 +71,40 @@ def check_crs(crs_a, crs_b, verbose=False):
         raise ValueError("Coordinate reference systems do not agree")
 
 
+# Clip shapefile
+def clip_shapefile(img_bounds, img_meta, shp):
+    """
+    Clip Shapefile Extents to Image Bounding Box
+    :param img_bounds: The rectangular lat/long bounding box associated with a
+        raster tiff.
+    :param img_meta: The metadata field associated with a geotiff. Expected to
+        contain transform (coordinate system), height, and width fields.
+    :param shps: A list of K geopandas shapefiles, used to build the mask.
+        Assumed to be in the same coordinate system as img_data.
+    :return result: The same shapefiles as shps, but with polygons that don't
+        overlap the img bounding box removed.
+    """
+    bbox = box(*img_bounds)
+    bbox_poly = gpd.GeoDataFrame(
+        {"geometry": bbox}, index=[0], crs=img_meta["crs"].data
+    )
+    return shp.loc[shp.intersects(bbox_poly["geometry"][0])]
+
+
+# Generate polygon
+def poly_from_coord(polygon, transform):
+    """
+    Get a transformed polygon
+    https://lpsmlgeo.github.io/2019-09-22-binary_mask/
+    """
+    poly_pts = []
+    poly = cascaded_union(polygon)
+    for i in np.array(poly.exterior.coords):
+        # in case polygonz format
+        poly_pts.append(~transform * tuple(i)[:2])
+    return Polygon(poly_pts)
+
+
 def get_mask(tiff, shp, column="Glaciers"):
     """
     This function reads the tiff filename and associated
@@ -85,38 +119,6 @@ def get_mask(tiff, shp, column="Glaciers"):
     numpy array of shape (channels * width * height)
 
     """
-
-    # Generate polygon
-    def poly_from_coord(polygon, transform):
-        """
-        Get a transformed polygon
-        https://lpsmlgeo.github.io/2019-09-22-binary_mask/
-        """
-        poly_pts = []
-        poly = cascaded_union(polygon)
-        for i in np.array(poly.exterior.coords):
-            # in case polygonz format
-            poly_pts.append(~transform * tuple(i)[:2])
-        return Polygon(poly_pts)
-
-    # Clip shapefile
-    def clip_shapefile(img_bounds, img_meta, shp):
-        """
-        Clip Shapefile Extents to Image Bounding Box
-        :param img_bounds: The rectangular lat/long bounding box associated with a
-            raster tiff.
-        :param img_meta: The metadata field associated with a geotiff. Expected to
-            contain transform (coordinate system), height, and width fields.
-        :param shps: A list of K geopandas shapefiles, used to build the mask.
-            Assumed to be in the same coordinate system as img_data.
-        :return result: The same shapefiles as shps, but with polygons that don't
-            overlap the img bounding box removed.
-        """
-        bbox = box(*img_bounds)
-        bbox_poly = gpd.GeoDataFrame(
-            {"geometry": bbox}, index=[0], crs=img_meta["crs"].data
-        )
-        return shp.loc[shp.intersects(bbox_poly["geometry"][0])]
 
     if isinstance(tiff, (str, pathlib.Path)):
         tiff = read_tiff(tiff)
@@ -304,7 +306,14 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             ]
             mask_slice = verify_slice_size(mask_slice, conf)
 
-            print(fname, mask_slice.shape, np.unique(mask_slice, return_counts=True), np.sum(mask_slice != 0), np.count_nonzero(mask_slice), filter_percentage(mask_slice, 0.00001))
+            print(
+                fname,
+                mask_slice.shape,
+                np.unique(mask_slice, return_counts=True),
+                np.sum(mask_slice != 0),
+                np.count_nonzero(mask_slice),
+                filter_percentage(mask_slice, 0.00001),
+            )
 
             if filter_percentage(mask_slice, conf["filter"]):
                 tiff_slice = tiff_np[
