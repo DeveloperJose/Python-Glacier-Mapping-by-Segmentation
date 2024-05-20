@@ -38,6 +38,7 @@ if __name__ == "__main__":
     run_name: str = conf.training_opts.run_name
     output_dir = pathlib.Path(conf.training_opts.output_dir) / run_name
     model_output_dir = output_dir / "models"
+    early_stopping: int = conf.training_opts.early_stopping
 
     if (
         "phys" in run_name
@@ -105,6 +106,7 @@ if __name__ == "__main__":
 
     # % Training Body
     loss_val = np.inf
+    epochs_without_improvement = 0
     start_time = timer()
     for epoch in range(1, conf.training_opts.epochs + 1):
         # train loop
@@ -129,6 +131,9 @@ if __name__ == "__main__":
         if new_loss_val < loss_val:
             frame.save(model_output_dir, "best")
             loss_val = float(new_loss_val)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
         lr = fn.get_current_lr(frame)
         writer.add_scalar("loss_train", loss_train, epoch)
@@ -143,6 +148,13 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         writer.flush()
         gc.collect()
+
+        if epochs_without_improvement >= early_stopping:
+            fn.log(
+                logging.INFO,
+                f"Early stopping at epoch {epoch} | Best Val Loss = {loss_val}",
+            )
+            break
 
     frame.save(model_output_dir, "final")
     writer.close()

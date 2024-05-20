@@ -35,12 +35,13 @@ if __name__ == "__main__":
     runs_dir = pathlib.Path(conf.runs_dir)
     run_name: str = conf.run_name
     threshold = conf.threshold
+    model_type: str = conf.model_type
 
     output_dir = pathlib.Path(conf.output_dir) / run_name
     utils.remove_and_create(output_dir)
 
     # % Load checkpoint using the training config
-    checkpoint_path = runs_dir / conf.run_name / "models" / "model_best.pt"
+    checkpoint_path = runs_dir / conf.run_name / "models" / f"model_{model_type}.pt"
     frame: Framework = Framework.from_checkpoint(
         checkpoint_path, device=int(conf.gpu_rank), testing=True
     )
@@ -54,7 +55,8 @@ if __name__ == "__main__":
         columns.append(f"{class_name}_precision")
         columns.append(f"{class_name}_recall")
         columns.append(f"{class_name}_IoU")
-    df = pd.DataFrame(columns=columns)
+    # df = pd.DataFrame(columns=columns)
+    df = None
 
     tp_sum = np.zeros(frame.num_classes, dtype=np.float32)
     fp_sum = np.zeros(frame.num_classes, dtype=np.float32)
@@ -69,18 +71,22 @@ if __name__ == "__main__":
         # % Load true label
         y_fname = x_fname.parent / x_fname.name.replace("tiff", "mask")
         assert y_fname.exists()
-        y_true = np.load(y_fname)
+        y_true = np.load(y_fname) + 1
         y_true[mask] = 0
+
+        # Don't consider the mask pixels
+        y_true = y_true[~mask]
+        y_pred = y_pred[~mask]
 
         # % Compute precision, recall, and IoU
         save_fname = x_fname.parent / x_fname.name.replace("tiff", "pred")
         _row = [save_fname]
         for i in range(frame.num_classes):
-            p = np.zeros((x.shape[0], x.shape[1]), dtype=np.uint8)
+            p = np.zeros_like(y_pred, dtype=np.uint8)
             t = np.zeros_like(p)
 
-            p[y_pred == i] = 1
-            t[y_true == i] = 1
+            p[y_pred == i + 1] = 1
+            t[y_true == i + 1] = 1
 
             tp, fp, fnn = get_tp_fp_fn(p, t)
             prec, rec, iou = get_precision_recall_iou(tp, fp, fnn)
@@ -88,7 +94,14 @@ if __name__ == "__main__":
             fp_sum[i] += fp
             fn_sum[i] += fnn
             _row.extend([prec, rec, iou])
-        df = pd.concat([df, pd.DataFrame([_row], columns=columns)], ignore_index=True)
+
+        # Save results to DataFrame
+        if df is None:
+            df = pd.DataFrame([_row], columns=columns)
+        else:
+            df = pd.concat(
+                [df, pd.DataFrame([_row], columns=columns)], ignore_index=True
+            )
 
     # Compute precision, recall, and IoU for all running totals for all classes
     _row = ["Total"]

@@ -170,7 +170,7 @@ class DATACUBETOOLS:
                 # now reproject this point to lat lon and look for new feature
                 if "data_epsg" in cubefeature["properties"]:
                     epsg_source = cubefeature["properties"]["data_epsg"]
-                elif "projection" in cubefeaturea["properties"]:
+                elif "projection" in cubefeature["properties"]:
                     epsg_source = cubefeature["properties"]["projection"]
                 else:
                     epsg_source = None

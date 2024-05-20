@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 from scipy.ndimage.morphology import binary_fill_holes
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -458,6 +457,8 @@ class Framework:
             threshold = [threshold] * self.num_classes
         assert isinstance(threshold, list) and len(threshold) == self.num_classes
 
+        _mask = np.sum(slice_arr, axis=2) == 0
+
         # Reduce to only needed channels to speed up further computations, normalize, and get mask
         if preprocess:
             slice_arr = slice_arr[:, :, self.use_channels]
@@ -475,12 +476,11 @@ class Framework:
         for i in range(self.num_classes):
             _class = _y[:, :, i] >= threshold[i]
             _class = binary_fill_holes(_class)
-            y_pred[_class] = i
-
+            y_pred[_class] = i+1
+                
         if use_mask:
-            mask = np.sum(slice_arr[:, :, :3], axis=2) < 0.001
-            y_pred[mask] = 0
-            return y_pred, mask
+            y_pred[_mask] = 0
+            return y_pred, _mask
         return y_pred
 
     def get_y_true(self, label_mask: np.ndarray, mask=None):

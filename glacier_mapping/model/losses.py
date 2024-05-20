@@ -329,5 +329,7 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         # Only used masked dice loss when doing binary models
         if self.outchannels == 2:
             diceloss = diceloss * torch.tensor([0.0, 1.0]).to(diceloss.device)
+        elif self.outchannels == 3:
+            diceloss = diceloss * torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
 
         return diceloss, boundaryloss

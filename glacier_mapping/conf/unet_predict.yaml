@@ -3,3 +3,4 @@ run_name: "baseline_phys64_multi"
 output_dir: "pred_runs/"
 gpu_rank: 1
 threshold: 0.5
+model_type: "best" # "best" or "final"
