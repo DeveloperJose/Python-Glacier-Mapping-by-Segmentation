@@ -96,7 +96,8 @@ if __name__ == "__main__":
                         saved_df.loc[len(saved_df.index)] = row
                     pbar.update(1)
                     np.save(
-                        Path(conf["out_dir"]) / f"normalize_{split}", np.asarray((mu, s, mi, ma))
+                        Path(conf["out_dir"]) / f"normalize_{split}",
+                        np.asarray((mu, s, mi, ma)),
                     )
 
     means = np.mean(np.asarray(means), axis=0)

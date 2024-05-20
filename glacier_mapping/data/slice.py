@@ -295,7 +295,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
     slicenum = 0
     df_rows = []
     # breakpoint()
-    print(np.unique(mask, True))
+    # print(np.unique(mask, True))
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
         for column in range(
             0, tiff_np.shape[0], conf["window_size"][1] - conf["overlap"]
@@ -306,14 +306,14 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             ]
             mask_slice = verify_slice_size(mask_slice, conf)
 
-            print(
-                fname,
-                mask_slice.shape,
-                np.unique(mask_slice, return_counts=True),
-                np.sum(mask_slice != 0),
-                np.count_nonzero(mask_slice),
-                filter_percentage(mask_slice, 0.00001),
-            )
+            # print(
+            #     fname,
+            #     mask_slice.shape,
+            #     np.unique(mask_slice, return_counts=True),
+            #     np.sum(mask_slice != 0),
+            #     np.count_nonzero(mask_slice),
+            #     filter_percentage(mask_slice, 0.00001),
+            # )
 
             if filter_percentage(mask_slice, conf["filter"]):
                 tiff_slice = tiff_np[

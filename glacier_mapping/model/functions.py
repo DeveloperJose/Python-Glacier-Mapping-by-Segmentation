@@ -22,10 +22,10 @@ import glacier_mapping.model.metrics as model_metrics
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
-HANDLER = logging.StreamHandler()
-HANDLER.setLevel(logging.INFO)
+# HANDLER = logging.StreamHandler()
+# HANDLER.setLevel(logging.INFO)
+# LOGGER.addHandler(HANDLER)
 FORMATTER = logging.Formatter("%(message)s")
-LOGGER.addHandler(HANDLER)
 
 
 def log(level, message):

@@ -15,6 +15,8 @@ import math
 import os
 from pathlib import Path
 
+import segmentation_models_pytorch as smp
+import pandas as pd
 import numpy as np
 import torch
 from scipy.ndimage.morphology import binary_fill_holes
@@ -22,7 +24,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 import glacier_mapping.model.functions as fn
-
 from glacier_mapping.model.metrics import tp_fp_fn
 from glacier_mapping.model.unet import Unet
 
@@ -48,9 +49,12 @@ class Framework:
         """
         # % Device
         if isinstance(device, int):
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = torch.device(
+                f"cuda:{device}" if torch.cuda.is_available() else "cpu"
+            )
             if self.device.type == "cuda":
-                torch.cuda.set_device(device)
+                torch.cuda.set_device(self.device)
+                print(f"Using GPU {self.device}")
         else:
             self.device = torch.device("cpu")
 
@@ -61,7 +65,7 @@ class Framework:
         output_classes = loader_opts.output_classes
 
         # Dataframe
-        # self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
+        self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
         # Binary Model or Multi-Class Model?
         if len(output_classes) == 1:
@@ -78,16 +82,23 @@ class Framework:
 
         # Normalization
         self.normalization = loader_opts.normalize
-        self.norm_arr = np.load(Path(loader_opts.processed_dir) / "normalize_train.npy")
+        self.norm_arr_full = np.load(Path(loader_opts.processed_dir) / "normalize_train.npy")
         assert (
             self.normalization == "mean-std" or self.normalization == "min-max"
         ), "Invalid normalization"
+        self.norm_arr = self.norm_arr_full[:, self.use_channels]
 
         # % Model
         self.model_opts = model_opts
         self.model_opts.args.inchannels = len(loader_opts.use_channels)
         self.model_opts.args.outchannels = self.num_classes
         self.model = Unet(**model_opts.args).to(self.device)
+        # self.model = smp.MAnet(
+        #     encoder_name="resnet34",
+        #     in_channels=len(loader_opts.use_channels),
+        #     classes=self.num_classes,
+        #     activation="sigmoid",
+        # ).to(self.device)
 
         # % Loss
         self.loss_opts = loss_opts
@@ -224,8 +235,8 @@ class Framework:
         """
         x = x.permute(0, 3, 1, 2).to(self.device)
         with torch.no_grad():
-            y = self.model(x)
-        return y.permute(0, 2, 3, 1)
+            y = self.model.to(self.device)(x)
+        return y.permute(0, 2, 3, 1).to(self.device)
 
     def calc_loss(self, y_hat, y):
         """Compute loss given a prediction
@@ -404,7 +415,7 @@ class Framework:
         # Reduce to only needed channels to speed up further computations, normalize, and get mask
         whole_arr = whole_arr[:, :, self.use_channels]
         whole_arr = self.normalize(whole_arr)
-        mask = np.sum(whole_arr[:, :, :3], axis=2) < 0.001
+        mask = np.sum(whole_arr, axis=2) == 0
 
         # Perform sliding window prediction
         y_pred = np.zeros((whole_arr.shape[0], whole_arr.shape[1]), dtype=np.uint8)
@@ -465,8 +476,8 @@ class Framework:
             slice_arr = self.normalize(slice_arr)
 
         # Send array to torch and then get prediction
-        _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float()
-        _y = self.infer(_x)
+        _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float().to(self.device)
+        _y = self.infer(_x).to(self.device)
         _y = torch.nn.Softmax(3)(_y)
         _y = np.squeeze(_y.cpu())
         assert _y.shape[2] == self.num_classes
@@ -476,8 +487,8 @@ class Framework:
         for i in range(self.num_classes):
             _class = _y[:, :, i] >= threshold[i]
             _class = binary_fill_holes(_class)
-            y_pred[_class] = i+1
-                
+            y_pred[_class] = i + 1
+
         if use_mask:
             y_pred[_mask] = 0
             return y_pred, _mask
