@@ -1,13 +1,13 @@
 training_opts:
   output_dir: "/data/jperez/programming/glacier_mapping/newruns/"
-  run_name: "baseline128_s0.5"
+  run_name: "baseline_unified_boundary"
   gpu_rank: 0
   epochs: 251
   fine_tune: False
   find_lr: False
-  early_stopping: 20 # Epochs to wait for improvement
+  early_stopping: 1000 # Epochs to wait for improvement
 loader_opts:
-  processed_dir: "/data/jperez/datasets/HKH/phys128_s0.5/"
+  processed_dir: "/data/jperez/datasets/HKH/baseline/"
   batch_size: 8 # 14 # 8
   use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics']
   output_classes: [0, 1, 2] # 0=BG, 1=CI, 2=Debris

@@ -30,15 +30,20 @@ earthengine-api = "^0.1.403"
 zarr = "^2.18.1"
 s3fs = "^2024.5.0"
 segmentation-models-pytorch = "^0.3.3"
+opencv-python = "^4.9.0.80"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.4"
 ipykernel = "^6.29.4"
+poethepoet = "^0.26.1"
 
-[[tool.poetry.source]]
-name = "torch"
-url = "https://download.pytorch.org/whl/cu121"
-priority = "supplemental"
+# [[tool.poetry.source]]
+# name = "torch"
+# url = "https://download.pytorch.org/whl/cu121"
+# priority = "supplemental"
+
+# [tool.poe.tasks]
+# install-nnmorpho = "pip install nnmorpho"
 
 [build-system]
 requires = ["poetry-core"]

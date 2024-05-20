@@ -3,6 +3,7 @@ pred_runs/
 runs/
 debug/
 newruns/
+.ruff_cache/
 .python-version
 .vscode
 

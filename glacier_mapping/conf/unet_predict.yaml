@@ -1,5 +1,5 @@
 runs_dir: "/data/jperez/programming/glacier_mapping/newruns/"
-run_name: "phys128_s0.5"
+run_name: "phys128"
 output_dir: "pred_runs/"
 gpu_rank: 1
 threshold: 0.5
