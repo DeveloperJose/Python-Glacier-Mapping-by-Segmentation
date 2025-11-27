@@ -251,9 +251,18 @@ class focalloss(torch.nn.modules.loss._WeightedLoss):
         )
         return focal_loss
 
+
 class customloss(nn.Module):
-    def __init__(self, act=nn.Softmax(dim=1), smooth=1.0, label_smoothing=0.0, masked=True,
-                 theta0=3, theta=5, foreground_classes=[1]):
+    def __init__(
+        self,
+        act=nn.Softmax(dim=1),
+        smooth=1.0,
+        label_smoothing=0.0,
+        masked=True,
+        theta0=3,
+        theta=5,
+        foreground_classes=[1],
+    ):
         """
         act: activation function (Softmax for multi-class, Sigmoid for binary)
         smooth: Dice smoothing
@@ -301,8 +310,10 @@ class customloss(nn.Module):
         target_perm = target.permute(0, 2, 3, 1)
 
         # Dice per class
-        dice_per_class = 1 - ((2 * (pred_perm * target_perm)[mask].sum(dim=0) + self.smooth) /
-                              (pred_perm[mask].sum(dim=0) + target_perm[mask].sum(dim=0) + self.smooth))
+        dice_per_class = 1 - (
+            (2 * (pred_perm * target_perm)[mask].sum(dim=0) + self.smooth)
+            / (pred_perm[mask].sum(dim=0) + target_perm[mask].sum(dim=0) + self.smooth)
+        )
 
         # Select only foreground classes for Dice
         dice_loss = dice_per_class[self.foreground_classes].mean()
@@ -311,12 +322,23 @@ class customloss(nn.Module):
         # Boundary Loss
         # -----------------------------
         # Compute boundaries for all classes
-        gt_b = F.max_pool2d(1 - target, kernel_size=self.theta0, stride=1, padding=(self.theta0 - 1)//2) - (1 - target)
-        pred_b = F.max_pool2d(1 - pred, kernel_size=self.theta0, stride=1, padding=(self.theta0 - 1)//2) - (1 - pred)
+        gt_b = F.max_pool2d(
+            1 - target,
+            kernel_size=self.theta0,
+            stride=1,
+            padding=(self.theta0 - 1) // 2,
+        ) - (1 - target)
+        pred_b = F.max_pool2d(
+            1 - pred, kernel_size=self.theta0, stride=1, padding=(self.theta0 - 1) // 2
+        ) - (1 - pred)
 
         # Extended boundaries
-        gt_b_ext = F.max_pool2d(gt_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1)//2)
-        pred_b_ext = F.max_pool2d(pred_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1)//2)
+        gt_b_ext = F.max_pool2d(
+            gt_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
+        )
+        pred_b_ext = F.max_pool2d(
+            pred_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
+        )
 
         # Flatten for precision/recall
         gt_b = gt_b.view(n, c, -1)
@@ -330,6 +352,7 @@ class customloss(nn.Module):
         boundary_loss = torch.mean(1 - BF1)
 
         return dice_loss, boundary_loss
+
 
 # class customloss(torch.nn.modules.loss._WeightedLoss):
 #     def __init__(

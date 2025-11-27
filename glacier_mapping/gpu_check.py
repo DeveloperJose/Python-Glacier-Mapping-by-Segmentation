@@ -22,4 +22,3 @@ torch.cuda.synchronize()  # Ensure the GPU finishes before measuring
 
 print("✔ GPU compute succeeded. Result tensor shape:", z.shape)
 print("Done.")
-

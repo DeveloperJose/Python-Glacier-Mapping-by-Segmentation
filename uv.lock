@@ -1185,6 +1185,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "addict" },
@@ -1216,6 +1221,9 @@ requires-dist = [
     { name = "zarr" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.14.6" }]
 
 [[package]]
 name = "google-api-core"

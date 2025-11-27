@@ -85,9 +85,9 @@ class Framework:
         self.norm_arr_full = np.load(
             Path(loader_opts.processed_dir) / "normalize_train.npy"
         )
-        assert (
-            self.normalization == "mean-std" or self.normalization == "min-max"
-        ), "Invalid normalization"
+        assert self.normalization == "mean-std" or self.normalization == "min-max", (
+            "Invalid normalization"
+        )
         self.norm_arr = self.norm_arr_full[:, self.use_channels]
 
         # % Model
@@ -197,7 +197,13 @@ class Framework:
         print(f"Saved model {epoch}")
 
     @staticmethod
-    def from_checkpoint(checkpoint_path: Path, device=None, new_data_path=None, testing=False, override={}):
+    def from_checkpoint(
+        checkpoint_path: Path,
+        device=None,
+        new_data_path=None,
+        testing=False,
+        override={},
+    ):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), "checkpoint_path does not exist"
         with torch.serialization.safe_globals([Dict]):
@@ -227,12 +233,12 @@ class Framework:
             device=device,
         )
         frame.model.load_state_dict(state["state_dict"])
-        
+
         frame.optimizer.load_state_dict(state["optimizer_state_dict"])
-        
+
         # TODO: Compatibility
         if "sigma1" in state.keys():
-            frame.sigma_list = [ state["sigma1"], state["sigma2"] ]
+            frame.sigma_list = [state["sigma1"], state["sigma2"]]
         else:
             frame.sigma_list = state["sigma_list"]
         return frame
@@ -270,7 +276,10 @@ class Framework:
         total_loss = None
         sigma_mult = torch.Tensor([1]).to(self.device)
         for _loss, sig in zip(losses, self.sigma_list):
-            weighted_loss = torch.div(1, len(self.sigma_list) * torch.square(sig)) * _loss.detach().clone()
+            weighted_loss = (
+                torch.div(1, len(self.sigma_list) * torch.square(sig))
+                * _loss.detach().clone()
+            )
 
             if total_loss is None:
                 total_loss = weighted_loss
@@ -511,13 +520,12 @@ class Framework:
             return y_pred, _mask
         return y_pred
 
-
     def get_y_true(self, label_mask: np.ndarray, mask=None):
         y_true = np.zeros((label_mask.shape[0], label_mask.shape[1]), dtype=np.uint8)
         if self.is_binary:
-            assert (
-                self.binary_class_idx != 0
-            ), "You are trying to predict BG instead of CI or DCG"
+            assert self.binary_class_idx != 0, (
+                "You are trying to predict BG instead of CI or DCG"
+            )
             y_true[label_mask[:, :, self.binary_class_idx - 1] != 1] = 0
             y_true[label_mask[:, :, self.binary_class_idx - 1] == 1] = 1
         else:

@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
         writer.add_scalar("lr", lr, epoch)
         for idx, sigma in enumerate(loss_alpha):
-            writer.add_scalar(f"sigma/{idx+1}", sigma, epoch)
+            writer.add_scalar(f"sigma/{idx + 1}", sigma, epoch)
 
         fn.print_metrics(frame, train_metric, val_metric, test_metric)
         torch.cuda.empty_cache()
@@ -161,5 +161,5 @@ if __name__ == "__main__":
 
     fn.log(
         logging.INFO,
-        f"Finished training {run_name} | Training took {timer()-start_time:.2f}sec",
+        f"Finished training {run_name} | Training took {timer() - start_time:.2f}sec",
     )

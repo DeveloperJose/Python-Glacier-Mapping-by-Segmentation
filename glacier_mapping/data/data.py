@@ -161,12 +161,12 @@ class GlacierDataset(Dataset):
         if isinstance(self.folder_path, str):
             self.folder_path = pathlib.Path(self.folder_path)
         assert isinstance(output_classes, list), "output_classes must be a list"
-        assert len(set(output_classes)) == len(
-            output_classes
-        ), "output_classes cannot have duplicates"
-        assert all(self.output_classes >= 0) and all(
-            self.output_classes < 3
-        ), "output_classes must be either 0 (BG), 1 (CleanIce), or 2 (Debris)"
+        assert len(set(output_classes)) == len(output_classes), (
+            "output_classes cannot have duplicates"
+        )
+        assert all(self.output_classes >= 0) and all(self.output_classes < 3), (
+            "output_classes must be either 0 (BG), 1 (CleanIce), or 2 (Debris)"
+        )
 
         # Get image and mask files from provided folder path
         self.img_files = glob.glob(os.path.join(folder_path, "*tiff*"))
@@ -219,7 +219,9 @@ class GlacierDataset(Dataset):
         # Label 2 = DebrisIce
         if len(self.output_classes) == 1:
             binary_class = self.output_classes[0]
-            label = np.concatenate((label != binary_class, label == binary_class), axis=2)
+            label = np.concatenate(
+                (label != binary_class, label == binary_class), axis=2
+            )
             # label = np.concatenate((label == 0, label == binary_class), axis=2)
         else:
             # label = np.concatenate((label == 0, label == 1, label==2), axis=2)

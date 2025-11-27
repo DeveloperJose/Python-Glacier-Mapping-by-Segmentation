@@ -168,7 +168,7 @@ if __name__ == "__main__":
         globals()[varname].axis("off")
         globals()[varname].set_title(channels[i])
         # plt.savefig(f"./sailencymap/channel_{i}.png")
-        print(f"channel={i}, sum={np.sum(_x[:,:,i])}")
+        print(f"channel={i}, sum={np.sum(_x[:, :, i])}")
 
     # _x = _x.sum(axis=2)
     # plt.figure()

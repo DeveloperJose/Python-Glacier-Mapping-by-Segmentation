@@ -26,7 +26,11 @@ def get_tp_fp_fn(pred, true):
 
 
 def get_precision_recall_iou(tp, fp, fn):
-    p, r, i = model_metrics.precision(tp, fp, fn), model_metrics.recall(tp, fp, fn), model_metrics.IoU(tp, fp, fn)
+    p, r, i = (
+        model_metrics.precision(tp, fp, fn),
+        model_metrics.recall(tp, fp, fn),
+        model_metrics.IoU(tp, fp, fn),
+    )
     return p, r, i
 
 

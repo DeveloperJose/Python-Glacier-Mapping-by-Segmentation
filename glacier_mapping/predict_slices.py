@@ -140,4 +140,4 @@ if __name__ == "__main__":
         for _ in tqdm(pool.imap_unordered(process_fn, data), total=len(data)):
             pass
 
-    print(f"Took {timer()-start_time:.2f}s for {conf.run_name}")
+    print(f"Took {timer() - start_time:.2f}s for {conf.run_name}")
