@@ -19,6 +19,43 @@ from skimage.color import rgb2hsv
 
 from glacier_mapping.data import physics
 
+IGNORE_LABEL = 255
+
+def plot_image_and_mask(rgb, mask, title, out_path):
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    # Discrete colormap for mask values 0,1,2
+    cmap = mcolors.ListedColormap(["black", "cyan", "yellow"])
+    bounds = [0, 1, 2, 3]
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+
+    # --- LEFT: RGB IMAGE ---
+    rgb = rgb.astype(np.float32) / np.max(rgb)
+    axs[0].imshow(rgb)
+    axs[0].set_title("RGB Image")
+    axs[0].axis("off")
+
+    # --- RIGHT: MASK IMAGE ---
+    im = axs[1].imshow(mask, cmap=cmap, norm=norm)
+    axs[1].set_title(title)
+    axs[1].axis("off")
+
+    # --- COLORBAR WITH CUSTOM LABELS ---
+    cbar = fig.colorbar(
+        im,
+        ax=axs[1],
+        ticks=[0.5, 1.5, 2.5],
+        boundaries=bounds,
+        fraction=0.046,
+        pad=0.04
+    )
+    cbar.ax.set_yticklabels(["0 = BG", "1 = CI", "2 = DCI"])
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
 def read_shp(filename):
     """
@@ -152,8 +189,9 @@ def get_mask(tiff, shp, column="Glaciers"):
         try:
             channel_mask = rasterize(shapes=poly_shp, out_shape=im_size)
             mask[:, :, key] = channel_mask
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Rasterization failed for class={key}: {e}")
+            continue
             # Already 0 if no mask
 
     return mask
@@ -238,8 +276,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         _mask[mask[:, :, i] == 1] = i + 1
     mask = _mask.astype(np.uint8)
 
-    # breakpoint()
-
     def verify_slice_size(slice, conf):
         if (
             slice.shape[0] != conf["window_size"][0]
@@ -256,35 +292,69 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             slice = temp
         return slice
 
+    def filter_percentage(slice, percentage, type="mask", name="noname", image=None):
+        if type == "image":
+            labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
+            percentage = 0.5
+        else:
+            # labelled_pixels = np.sum(slice != 0)
+            labelled_pixels = np.count_nonzero(slice)
+
+        # Don't consider slices with no labels
+        if labelled_pixels == 0:
+            return False
+
+        total_pixels = slice.shape[0] * slice.shape[1]
+        if labelled_pixels / total_pixels < percentage:
+            # Check how much under the threshold these are
+            if type == "mask":
+                print("Skipping", name)
+                # 0 = BG, 1 = CI, 2 = DCI
+                per = labelled_pixels / total_pixels
+                title = f"Labeled {labelled_pixels}, CI = {np.sum(slice==1)}, DCI = {np.sum(slice==2)}, Percent: {per:.4f}"
+                out_path = f"/home/devj/local-debian/datasets/skipped_slices/{name}.png"
+                plot_image_and_mask(image, slice, title, out_path)
+            return False
+        return True
     # def filter_percentage(slice, percentage, type="mask"):
     #     if type == "image":
+    #         # Consider image valid if any pixel is non-zero in any channel
     #         labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
     #         percentage = 0.5
+    #         total_pixels = slice.shape[0] * slice.shape[1]
+    #         if labelled_pixels / total_pixels < percentage:
+    #             return False
+    #         return True
     #     else:
-    #         # labelled_pixels = np.sum(slice != 0)
     #         labelled_pixels = np.count_nonzero(slice)
-    #     total_pixels = slice.shape[0] * slice.shape[1]
-    #
-    #     if labelled_pixels / total_pixels < percentage:
-    #         return False
-    #     return True
-    def filter_percentage(slice, percentage, type="mask"):
-        if type == "image":
-            # Consider image valid if any pixel is non-zero in any channel
-            labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
-        else:
-            labelled_pixels = np.count_nonzero(slice)
-        return labelled_pixels > 0
+    #         total_pixels = slice.shape[0] * slice.shape[1]
+    #         if labelled_pixels > 0 and labelled_pixels < total_pixels * percentage:
+    #             print("Few pixels", labelled_pixels)
+    #     return labelled_pixels > 0
 
     def save_slice(arr, filename):
         np.save(filename, arr)
 
     def get_pixel_count(tiff_slice, mask_slice):
-        mas = np.sum(tiff_slice, axis=2) == 0
-        mask_slice[mas] = 0
-        deb, ci = np.sum(mask_slice == 2), np.sum(mask_slice == 1)
-        mas = np.sum(mas)
-        bg = mask_slice.shape[0] * mask_slice.shape[1] - (ci + deb + mas)
+        """
+        Return counts of BG, CI, DCI, and IGNORE pixels for this slice.
+
+        BG  = 0
+        CI  = 1
+        DCI = 2
+        IGNORE = 255
+        """
+        # Identify invalid/no-data image pixels (all channels zero)
+        invalid = np.sum(tiff_slice, axis=2) == 0
+
+        # Mark those pixels as IGNORE in the mask
+        mask_slice[invalid] = IGNORE_LABEL
+
+        ci = np.sum(mask_slice == 1)
+        deb = np.sum(mask_slice == 2)
+        mas = np.sum(mask_slice == IGNORE_LABEL)
+        bg = np.sum(mask_slice == 0)
+
         return bg, ci, deb, mas
 
     if not os.path.exists(conf["out_dir"]):
@@ -325,7 +395,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             #     filter_percentage(mask_slice, 0.00001),
             # )
 
-            if filter_percentage(mask_slice, conf["filter"]):
+            if filter_percentage(mask_slice, conf["filter"], type="mask", name="discarded_" + str(filenum) + "_slice_" + str(slicenum), image=tiff_np[row : row + conf["window_size"][0],column : column + conf["window_size"][1],[2, 1, 0],]):
                 tiff_slice = tiff_np[
                     row : row + conf["window_size"][0],
                     column : column + conf["window_size"][1],
@@ -339,7 +409,9 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                         "mask_" + str(filenum) + "_slice_" + str(slicenum),
                         "tiff_" + str(filenum) + "_slice_" + str(slicenum),
                     )
-                    bg, ci, deb, mas = get_pixel_count(final_save_slice, mask_slice)
+                    # Make get_pixel_count also set IGNORE_LABEL in mask_slice
+                    modified_mask = mask_slice.copy()
+                    bg, ci, deb, mas = get_pixel_count(final_save_slice, modified_mask)
                     _tot = bg + ci + deb + mas
                     _row = [
                         tiff_fname.name,
@@ -356,11 +428,41 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                         os.path.basename(savepath),
                     ]
                     df_rows.append(_row)
-                    save_slice(mask_slice, savepath / mask_fname)
-                    final_save_slice[
-                        np.sum(final_save_slice[:, :, :7], axis=2) == 0
-                    ] = 0
+
+                    # Save mask with IGNORE_LABEL already applied
+                    save_slice(modified_mask, savepath / mask_fname)
+
+                    # Optional: zero-out bands in the image where there is no data
+                    pixel_invalid = (np.sum(final_save_slice, axis=2) == 0)
+                    final_save_slice[pixel_invalid] = 0
+
+                    # final_save_slice[
+                    #     np.sum(final_save_slice[:, :, :7], axis=2) == 0
+                    # ] = 0
                     save_slice(final_save_slice, savepath / slice_tiff_fname)
+
+                    # bg, ci, deb, mas = get_pixel_count(final_save_slice, mask_slice)
+                    # _tot = bg + ci + deb + mas
+                    # _row = [
+                    #     tiff_fname.name,
+                    #     filenum,
+                    #     slicenum,
+                    #     bg,
+                    #     ci,
+                    #     deb,
+                    #     mas,
+                    #     bg / _tot,
+                    #     ci / _tot,
+                    #     deb / _tot,
+                    #     mas / _tot,
+                    #     os.path.basename(savepath),
+                    # ]
+                    # df_rows.append(_row)
+                    # save_slice(mask_slice, savepath / mask_fname)
+                    # final_save_slice[
+                    #     np.sum(final_save_slice[:, :, :7], axis=2) == 0
+                    # ] = 0
+                    # save_slice(final_save_slice, savepath / slice_tiff_fname)
             slicenum += 1
     # breakpoint()
     return (

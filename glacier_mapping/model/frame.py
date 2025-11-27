@@ -157,27 +157,68 @@ class Framework:
         self.reg_opts = reg_opts
         self.metrics_opts = metrics_opts
 
-    def optimize(self, x, y):
+    def optimize(self, x, y_onehot, y_int):
         """
         Do forward + backward only. No stepping.
+
+        Args:
+            x:        (N, H, W, C) image batch
+            y_onehot: (N, H, W, C_out) one-hot mask
+            y_int:    (N, H, W) integer mask (0,1,2,255)
         """
         self.optimizer.zero_grad(set_to_none=True)
 
+        # Move inputs to device
         x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
-        y = y.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+        y_onehot = y_onehot.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+        y_int = y_int.squeeze(-1).to(self.device, non_blocking=True)  # (N,H,W)
 
+        # Forward pass with AMP
         with autocast(enabled=True):
             y_hat = self.model(x)
-            loss = self.calc_loss(y_hat, y)
+            loss = self.calc_loss(y_hat, y_onehot, y_int)
 
-        # backward pass with AMP scaling
+        # Backprop with scaling
         self.scaler.scale(loss).backward()
 
-        # unscale before clipping
+        # Unscale before clipping
         self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
         return y_hat.permute(0, 2, 3, 1), loss
+
+
+    # def optimize(self, x, y_onehot, y_int):
+    #     x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+    #     y_onehot = y_onehot.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+    #     y_int = y_int.squeeze(-1).to(self.device, non_blocking=True)
+    #
+    #     with autocast(enabled=True):
+    #         y_hat = self.model(x)
+    #         loss = self.calc_loss(y_hat, y_onehot, y_int)
+    #     return y_hat.permute(0, 2, 3, 1), loss
+
+    # def optimize(self, x, y):
+    #     """
+    #     Do forward + backward only. No stepping.
+    #     """
+    #     self.optimizer.zero_grad(set_to_none=True)
+    #
+    #     x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+    #     y = y.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+    #
+    #     with autocast(enabled=True):
+    #         y_hat = self.model(x)
+    #         loss = self.calc_loss(y_hat, y)
+    #
+    #     # backward pass with AMP scaling
+    #     self.scaler.scale(loss).backward()
+    #
+    #     # unscale before clipping
+    #     self.scaler.unscale_(self.optimizer)
+    #     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+    #
+    #     return y_hat.permute(0, 2, 3, 1), loss
 
     def zero_grad(self):
         self.optimizer.zero_grad()
@@ -291,40 +332,42 @@ class Framework:
         self.model.train(training)
         return y.permute(0, 2, 3, 1)
 
-    def calc_loss(self, y_hat, y):
+    def calc_loss(self, y_hat, y_onehot, y_int):
         """
-        Compute total loss including sigma weighting for custom losses and optional regularization.
+        Compute total loss including sigma weighting.
 
         Args:
-            y_hat: model outputs (N,C,H,W)
-            y: labels (N,C,H,W)
-
-        Returns:
-            total_loss: scalar tensor
+            y_hat:    (N,C,H,W) logits from model
+            y_onehot: (N,C,H,W) one-hot ground truth
+            y_int:    (N,H,W)    integer labels (0,1,2,255)
         """
         y_hat = y_hat.to(self.device)
-        y = y.to(self.device)
+        y_onehot = y_onehot.to(self.device)
+        y_int = y_int.to(self.device)
 
-        losses = self.loss_fn(y_hat, y)  # list of per-sigma losses
+        # loss_fn returns a tuple: (dice_loss, boundary_loss)
+        losses = self.loss_fn(y_hat, y_onehot, y_int)
+
         total_loss = torch.zeros(1, device=self.device)
         sigma_mult = torch.ones(1, device=self.device)
 
         for _loss, sig in zip(losses, self.sigma_list):
-            # Use sig squared as weight
+            # Weight loss by sigma (uncertainty weighting)
             weighted_loss = _loss / (len(self.sigma_list) * sig**2)
             total_loss += weighted_loss
             sigma_mult *= sig
 
-        # Log-sigma regularization
+        # Add regularization term on sigma
         total_loss += torch.abs(torch.log(sigma_mult))
 
-        # Optional regularization
+        # Optional model regularization
         if self.reg_opts:
             for reg_type, coeff in self.reg_opts.items():
                 reg_fn = globals()[reg_type]
                 total_loss += reg_fn(self.model.parameters(), coeff, self.device)
 
         return total_loss
+
 
     def get_loss_alpha(self):
         return [sigma.item() for sigma in self.sigma_list]

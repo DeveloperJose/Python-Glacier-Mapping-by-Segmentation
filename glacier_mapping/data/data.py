@@ -190,22 +190,37 @@ class GlacierDataset(Dataset):
         file_data = np.load(self.img_files[index])
         data = file_data[:, :, self.use_channels]
 
-        _mask = np.sum(data, axis=2) == 0
         if self.normalize == "min-max":
             data = np.clip(data, self.min, self.max)
             data = (data - self.min) / (self.max - self.min)
         elif self.normalize == "mean-std":
-            # mean-std all channels except physics
-            # if self.use_physics:
-            #     data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
-            #     data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
-            # else:
             data = (data - self.mean) / self.std
         else:
             raise ValueError("normalize must be min-max or mean-std")
-        # label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
-        label = np.expand_dims(np.load(self.mask_files[index]).astype(np.uint8), axis=2)
-        label[_mask] = 0
+
+        # Load integer mask with 0=BG, 1=CI, 2=DCI, 255=IGNORE
+        label_int = np.load(self.mask_files[index]).astype(np.uint8)
+        label_int = np.expand_dims(label_int, axis=2)
+
+        # file_data = np.load(self.img_files[index])
+        # data = file_data[:, :, self.use_channels]
+        #
+        # _mask = np.sum(data, axis=2) == 0
+        # if self.normalize == "min-max":
+        #     data = np.clip(data, self.min, self.max)
+        #     data = (data - self.min) / (self.max - self.min)
+        # elif self.normalize == "mean-std":
+        #     # mean-std all channels except physics
+        #     # if self.use_physics:
+        #     #     data[:, :, :-1] = (data[:, :, :-1] - self.mean[:-1]) / self.std[:-1]
+        #     #     data[:, :, -1] = (data[:, :, -1] - data[:, :, -1].mean()) / data[:, :, -1].std()
+        #     # else:
+        #     data = (data - self.mean) / self.std
+        # else:
+        #     raise ValueError("normalize must be min-max or mean-std")
+        # # label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
+        # label = np.expand_dims(np.load(self.mask_files[index]).astype(np.uint8), axis=2)
+        # label[_mask] = 0
         # ones = label == 1
         # twos = label == 2
         # zeros = np.invert(ones + twos)
@@ -219,13 +234,22 @@ class GlacierDataset(Dataset):
         # Label 2 = DebrisIce
         if len(self.output_classes) == 1:
             binary_class = self.output_classes[0]
+            # (H,W,1) -> boolean maps; ignore (255) becomes all False
             label = np.concatenate(
-                (label != binary_class, label == binary_class), axis=2
+                (label_int != binary_class, label_int == binary_class), axis=2
             )
-            # label = np.concatenate((label == 0, label == binary_class), axis=2)
+            # binary_class = self.output_classes[0]
+            # label = np.concatenate(
+            #     (label != binary_class, label == binary_class), axis=2
+            # )
+            # # label = np.concatenate((label == 0, label == binary_class), axis=2)
         else:
+            #  One-hot for requested classes; ignore=255 will be all False
+            label = np.concatenate(
+                [label_int == x for x in self.output_classes], axis=2
+            )
             # label = np.concatenate((label == 0, label == 1, label==2), axis=2)
-            label = np.concatenate([label == x for x in self.output_classes], axis=2)
+            # label = np.concatenate([label == x for x in self.output_classes], axis=2)
 
         if self.transforms:
             sample = {"image": data, "mask": label}
@@ -235,7 +259,7 @@ class GlacierDataset(Dataset):
         else:
             data = torch.from_numpy(data).float()
             label = torch.from_numpy(label).float()
-        return data, label
+        return data, label, torch.from_numpy(label_int).long()
 
     def __len__(self):
         """Function to return the length of the dataset

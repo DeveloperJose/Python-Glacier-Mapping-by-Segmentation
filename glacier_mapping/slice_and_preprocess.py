@@ -20,6 +20,9 @@ from tqdm import tqdm
 import glacier_mapping.data.slice as fn
 import glacier_mapping.utils as utils
 
+import matplotlib
+matplotlib.use("Agg")   # ensures no GUI backend is used
+
 if __name__ == "__main__":
     random.seed(42)
     np.random.seed(42)

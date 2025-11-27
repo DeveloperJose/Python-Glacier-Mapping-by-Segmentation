@@ -64,39 +64,81 @@ def train_epoch(epoch, loader, frame):
       and the metrics on the training set.
     """
     metrics = frame.metrics_opts.metrics
-    n_classes: int = frame.num_classes
+    n_classes = frame.num_classes
     threshold = frame.metrics_opts.threshold
 
-    loss, batch_loss, tp, fp, fn = (
-        0,
-        0,
-        torch.zeros(n_classes),
-        torch.zeros(n_classes),
-        torch.zeros(n_classes),
-    )
-    train_iterator = tqdm(
-        loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
-    )
-    for i, (x, y) in enumerate(train_iterator):
+    loss, batch_loss = 0, 0
+    tp = torch.zeros(n_classes)
+    fp = torch.zeros(n_classes)
+    fn = torch.zeros(n_classes)
+
+    train_iterator = tqdm(loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)")
+    i = 0
+
+    for i, (x, y_onehot, y_int) in enumerate(train_iterator):
         frame.zero_grad()
-        y_hat, batch_loss = frame.optimize(x, y)
+
+        # Forward + backward
+        y_hat, batch_loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
         frame.step()
+
         batch_loss = float(batch_loss.detach())
         loss += batch_loss
+
+        # Final activation
         y_hat = frame.act(y_hat)
-        mask = y.sum(axis=3) == 0
-        _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
+
+        # Mask = ignored pixels
+        # mask = (y_int == 255).cpu().numpy()
+        mask = (y_int.squeeze(-1) == 255).cpu().numpy()
+
+        _tp, _fp, _fn = frame.metrics(y_hat, y_onehot, mask, threshold)
         tp += _tp
         fp += _fp
         fn += _fn
+
         train_iterator.set_description(
-            "Train, Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
-            % (epoch, i, batch_loss, loss / (i + 1))
+            f"Train, Epoch={epoch} Steps={i} Loss={batch_loss:.3f} Avg_Loss={loss/(i+1):.3f}"
         )
+
     metrics = get_metrics(tp, fp, fn, metrics)
     loss_alpha = frame.get_loss_alpha()
 
     return loss / (i + 1), metrics, loss_alpha
+    # metrics = frame.metrics_opts.metrics
+    # n_classes: int = frame.num_classes
+    # threshold = frame.metrics_opts.threshold
+    #
+    # loss, batch_loss, tp, fp, fn = (
+    #     0,
+    #     0,
+    #     torch.zeros(n_classes),
+    #     torch.zeros(n_classes),
+    #     torch.zeros(n_classes),
+    # )
+    # train_iterator = tqdm(
+    #     loader, desc="Train Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+    # )
+    # for i, (x, y) in enumerate(train_iterator):
+    #     frame.zero_grad()
+    #     y_hat, batch_loss = frame.optimize(x, y)
+    #     frame.step()
+    #     batch_loss = float(batch_loss.detach())
+    #     loss += batch_loss
+    #     y_hat = frame.act(y_hat)
+    #     mask = y.sum(axis=3) == 0
+    #     _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
+    #     tp += _tp
+    #     fp += _fp
+    #     fn += _fn
+    #     train_iterator.set_description(
+    #         "Train, Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+    #         % (epoch, i, batch_loss, loss / (i + 1))
+    #     )
+    # metrics = get_metrics(tp, fp, fn, metrics)
+    # loss_alpha = frame.get_loss_alpha()
+    #
+    # return loss / (i + 1), metrics, loss_alpha
 
 
 def validate(epoch, loader, frame, test=False):
@@ -119,53 +161,100 @@ def validate(epoch, loader, frame, test=False):
       and the metrics on the validation set.
     """
     metrics = frame.metrics_opts.metrics
-    n_classes: int = frame.num_classes
+    n_classes = frame.num_classes
     threshold = frame.metrics_opts.threshold
-    loss, batch_loss, tp, fp, fn = (
-        0,
-        0,
-        torch.zeros(n_classes),
-        torch.zeros(n_classes),
-        torch.zeros(n_classes),
-    )
-    if test:
-        iterator = tqdm(
-            loader, desc="Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
-        )
-    else:
-        iterator = tqdm(
-            loader, desc="Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
-        )
+
+    loss, batch_loss = 0, 0
+    tp = torch.zeros(n_classes)
+    fp = torch.zeros(n_classes)
+    fn = torch.zeros(n_classes)
+
+    desc = "Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)" if test \
+           else "Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+    iterator = tqdm(loader, desc=desc)
 
     def channel_first(x):
         return x.permute(0, 3, 1, 2)
 
-    for i, (x, y) in enumerate(iterator):
+    i = 0
+    for i, (x, y_onehot, y_int) in enumerate(iterator):
         y_hat = frame.infer(x)
-        batch_loss = frame.calc_loss(channel_first(y_hat), channel_first(y))
+
+        # batch_loss = frame.calc_loss(
+        #     channel_first(y_hat), channel_first(y_onehot), y_int
+        # )
+        batch_loss = frame.calc_loss(channel_first(y_hat), channel_first(y_onehot), y_int.squeeze(-1))
+
         batch_loss = float(batch_loss.detach())
         loss += batch_loss
+
         y_hat = frame.act(y_hat)
-        mask = y.sum(axis=3) == 0
-        _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
+
+        # mask = (y_int == 255).cpu().numpy()
+        mask = (y_int.squeeze(-1) == 255).cpu().numpy()
+        _tp, _fp, _fn = frame.metrics(y_hat, y_onehot, mask, threshold)
         tp += _tp
         fp += _fp
         fn += _fn
-        if test:
-            iterator.set_description(
-                "Test,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
-                % (epoch, i, batch_loss, loss / (i + 1))
-            )
-        else:
-            iterator.set_description(
-                "Val,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
-                % (epoch, i, batch_loss, loss / (i + 1))
-            )
+
+        iterator.set_description(
+            f"{'Test' if test else 'Val'}, Epoch={epoch} Steps={i} "
+            f"Loss={batch_loss:.3f} Avg_Loss={loss/(i+1):.3f} "
+        )
+
     if not test:
         frame.val_operations(loss / len(loader.dataset))
-    metrics = get_metrics(tp, fp, fn, metrics)
 
+    metrics = get_metrics(tp, fp, fn, metrics)
     return loss / (i + 1), metrics
+    # metrics = frame.metrics_opts.metrics
+    # n_classes: int = frame.num_classes
+    # threshold = frame.metrics_opts.threshold
+    # loss, batch_loss, tp, fp, fn = (
+    #     0,
+    #     0,
+    #     torch.zeros(n_classes),
+    #     torch.zeros(n_classes),
+    #     torch.zeros(n_classes),
+    # )
+    # if test:
+    #     iterator = tqdm(
+    #         loader, desc="Test Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+    #     )
+    # else:
+    #     iterator = tqdm(
+    #         loader, desc="Val Iter (Epoch=X Steps=X loss=X.XXX lr=X.XXXXXXX)"
+    #     )
+    #
+    # def channel_first(x):
+    #     return x.permute(0, 3, 1, 2)
+    #
+    # for i, (x, y) in enumerate(iterator):
+    #     y_hat = frame.infer(x)
+    #     batch_loss = frame.calc_loss(channel_first(y_hat), channel_first(y))
+    #     batch_loss = float(batch_loss.detach())
+    #     loss += batch_loss
+    #     y_hat = frame.act(y_hat)
+    #     mask = y.sum(axis=3) == 0
+    #     _tp, _fp, _fn = frame.metrics(y_hat, y, mask, threshold)
+    #     tp += _tp
+    #     fp += _fp
+    #     fn += _fn
+    #     if test:
+    #         iterator.set_description(
+    #             "Test,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+    #             % (epoch, i, batch_loss, loss / (i + 1))
+    #         )
+    #     else:
+    #         iterator.set_description(
+    #             "Val,   Epoch=%d Steps=%d Loss=%5.3f Avg_Loss=%5.3f "
+    #             % (epoch, i, batch_loss, loss / (i + 1))
+    #         )
+    # if not test:
+    #     frame.val_operations(loss / len(loader.dataset))
+    # metrics = get_metrics(tp, fp, fn, metrics)
+    #
+    # return loss / (i + 1), metrics
 
 
 def log_metrics(writer, frame, metrics, epoch, stage):
@@ -215,10 +304,22 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
     def squash(x):
         return (x - x.min()) / (x.max() - x.min())
 
-    x, y = batch
-    y_mask = np.sum(y.cpu().numpy(), axis=3) == 0
+    x, y_onehot, y_int = batch
     y_hat = frame.act(frame.infer(x))
-    y = np.argmax(y.cpu().numpy(), axis=3) + 1
+
+    # convert one-hot -> class index
+    y = np.argmax(y_onehot.cpu().numpy(), axis=3) + 1
+
+    # unlabeled pixels
+    y_mask = (y_int.cpu().numpy() == 255)
+    y[y_mask] = 0
+    y_hat = np.argmax(y_hat.cpu().numpy(), axis=3) + 1
+    y_hat[y_mask] = 0
+
+    # x, y = batch
+    # y_mask = np.sum(y.cpu().numpy(), axis=3) == 0
+    # y_hat = frame.act(frame.infer(x))
+    # y = np.argmax(y.cpu().numpy(), axis=3) + 1
 
     # _y_hat = np.zeros((y_hat.shape[0], y_hat.shape[1], y_hat.shape[2]))
     # y_hat = y_hat.cpu().numpy()
@@ -228,10 +329,10 @@ def log_images(writer, frame, batch, epoch, stage, normalize):
     # _y_hat[y_mask] = 0
     # y_hat = _y_hat
 
-    y_hat = np.argmax(y_hat.cpu().numpy(), axis=3) + 1
-
-    y[y_mask] = 0
-    y_hat[y_mask] = 0
+    # y_hat = np.argmax(y_hat.cpu().numpy(), axis=3) + 1
+    #
+    # y[y_mask] = 0
+    # y_hat[y_mask] = 0
     _y = np.zeros((y.shape[0], y.shape[1], y.shape[2], 3))
     _y_hat = np.zeros((y_hat.shape[0], y_hat.shape[1], y_hat.shape[2], 3))
 
@@ -308,12 +409,15 @@ def get_loss(outchannels, opts=None):
             act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked
         )
     elif opts.name == "custom":
-        loss_fn = model_losses.customloss(
-            # act=torch.nn.Softmax(dim=1),
-            # outchannels=outchannels,
-            masked=opts.masked,
-            label_smoothing=label_smoothing,
-        )
+       loss_fn = model_losses.customloss(
+        act=torch.nn.Softmax(dim=1),
+        smooth=1.0,
+        label_smoothing=label_smoothing,
+        masked=opts.masked,
+        foreground_classes=[1, 2],   # CleanIce + Debris
+        alpha=opts.alpha             # from YAML
+    )
+ 
     else:
         raise ValueError("Loss must be defined!")
     return loss_fn

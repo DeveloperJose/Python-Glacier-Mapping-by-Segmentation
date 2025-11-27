@@ -251,7 +251,6 @@ class focalloss(torch.nn.modules.loss._WeightedLoss):
         )
         return focal_loss
 
-
 class customloss(nn.Module):
     def __init__(
         self,
@@ -261,16 +260,9 @@ class customloss(nn.Module):
         masked=True,
         theta0=3,
         theta=5,
-        foreground_classes=[1],
+        foreground_classes=[1, 2],
+        alpha=0.9,   # dice weight
     ):
-        """
-        act: activation function (Softmax for multi-class, Sigmoid for binary)
-        smooth: Dice smoothing
-        label_smoothing: optional label smoothing
-        masked: whether to mask Dice to foreground only
-        theta0, theta: boundary loss kernel sizes
-        foreground_classes: indices of classes to compute Dice for
-        """
         super().__init__()
         self.act = act
         self.smooth = smooth
@@ -279,79 +271,205 @@ class customloss(nn.Module):
         self.theta0 = theta0
         self.theta = theta
         self.foreground_classes = foreground_classes
-        self.n_sigma = 2
-        #         self.n_sigma = 3 if self.use_unified else 2
+        self.alpha = alpha
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, target_int):
         """
-        pred: (N, C, H, W) logits
-        target: (N, C, H, W) one-hot labels
-        Returns: (dice_loss, boundary_loss)
+        pred:       (N,C,H,W) logits
+        target:     (N,C,H,W) one-hot labels
+        target_int: (N,H,W)   int labels, where 255=ignore
         """
         n, c, h, w = pred.shape
         device = pred.device
 
-        # Apply activation
         pred = self.act(pred)
+        target = target.detach()
 
-        # Optional label smoothing
+        # ----------------------------------------------------------
+        # IGNORE mask
+        # ----------------------------------------------------------
+        IGNORE = 255
+        ignore_mask = (target_int != IGNORE)       # (N,H,W), bool
+        ignore_mask_exp = ignore_mask.unsqueeze(1).float()
+
+        # ----------------------------------------------------------
+        # Label smoothing
+        # ----------------------------------------------------------
         if self.label_smoothing > 0:
             target = target * (1 - self.label_smoothing) + self.label_smoothing / c
 
-        # -----------------------------
-        # Dice Loss
-        # -----------------------------
-        if self.masked:
-            mask = torch.sum(target, dim=1) > 0  # foreground mask (N, H, W)
+        # ----------------------------------------------------------
+        # DICE LOSS (multi-class)
+        # ----------------------------------------------------------
+        dice_mask = ignore_mask  # ignore pixels removed for dice
+
+        pred_p = pred.permute(0, 2, 3, 1)    # (N,H,W,C)
+        targ_p = target.permute(0, 2, 3, 1)
+
+        # select only unignored pixels
+        pred_sel = pred_p[dice_mask]         # (M,C)
+        targ_sel = targ_p[dice_mask]         # (M,C)
+
+        # handle slices with no valid labels
+        class_exists = targ_sel.sum(dim=0) > 0
+
+        numerator   = 2 * (pred_sel * targ_sel).sum(dim=0) + self.smooth
+        denominator = pred_sel.sum(dim=0) + targ_sel.sum(dim=0) + self.smooth
+
+        dice_per_class = 1 - numerator / denominator
+
+        # only compute dice for classes that appear
+        fg_mask = torch.zeros(c, dtype=torch.bool, device=device)
+        fg_mask[self.foreground_classes] = True
+
+        valid = fg_mask & class_exists
+        if valid.sum() == 0:
+            dice_loss = torch.tensor(0.0, device=device)
         else:
-            mask = torch.ones((n, h, w), dtype=torch.bool, device=device)
+            dice_loss = dice_per_class[valid].mean()
 
-        pred_perm = pred.permute(0, 2, 3, 1)  # (N, H, W, C)
-        target_perm = target.permute(0, 2, 3, 1)
+        # ----------------------------------------------------------
+        # BOUNDARY LOSS (BF1)
+        # note: NOT 1-target (binary style)
+        #       instead: per-class boundary maps
+        # ----------------------------------------------------------
+        # detect boundaries per class
+        gt_b = F.max_pool2d(target, kernel_size=self.theta0,
+                            stride=1, padding=(self.theta0-1)//2) - target
+        pred_b = F.max_pool2d(pred, kernel_size=self.theta0,
+                              stride=1, padding=(self.theta0-1)//2) - pred
 
-        # Dice per class
-        dice_per_class = 1 - (
-            (2 * (pred_perm * target_perm)[mask].sum(dim=0) + self.smooth)
-            / (pred_perm[mask].sum(dim=0) + target_perm[mask].sum(dim=0) + self.smooth)
-        )
+        # boundary dilation
+        gt_b_ext = F.max_pool2d(gt_b, kernel_size=self.theta,
+                                stride=1, padding=(self.theta-1)//2)
+        pred_b_ext = F.max_pool2d(pred_b, kernel_size=self.theta,
+                                  stride=1, padding=(self.theta-1)//2)
 
-        # Select only foreground classes for Dice
-        dice_loss = dice_per_class[self.foreground_classes].mean()
+        # apply ignore mask
+        gt_b      = (gt_b      * ignore_mask_exp).view(n, c, -1)
+        pred_b    = (pred_b    * ignore_mask_exp).view(n, c, -1)
+        gt_b_ext  = (gt_b_ext  * ignore_mask_exp).view(n, c, -1)
+        pred_b_ext= (pred_b_ext* ignore_mask_exp).view(n, c, -1)
 
-        # -----------------------------
-        # Boundary Loss
-        # -----------------------------
-        # Compute boundaries for all classes
-        gt_b = F.max_pool2d(
-            1 - target,
-            kernel_size=self.theta0,
-            stride=1,
-            padding=(self.theta0 - 1) // 2,
-        ) - (1 - target)
-        pred_b = F.max_pool2d(
-            1 - pred, kernel_size=self.theta0, stride=1, padding=(self.theta0 - 1) // 2
-        ) - (1 - pred)
+        # class must exist in boundaries
+        class_exists_boundary = (gt_b.sum(dim=2) > 0)
 
-        # Extended boundaries
-        gt_b_ext = F.max_pool2d(
-            gt_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
-        )
-        pred_b_ext = F.max_pool2d(
-            pred_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
-        )
+        P = torch.sum(pred_b * gt_b_ext, dim=2) / (pred_b.sum(dim=2) + 1e-7)
+        R = torch.sum(pred_b_ext * gt_b, dim=2) / (gt_b.sum(dim=2) + 1e-7)
 
-        # Flatten for precision/recall
-        gt_b = gt_b.view(n, c, -1)
-        pred_b = pred_b.view(n, c, -1)
-        gt_b_ext = gt_b_ext.view(n, c, -1)
-        pred_b_ext = pred_b_ext.view(n, c, -1)
+        # mask invalid classes
+        P = torch.where(class_exists_boundary, P, torch.zeros_like(P))
+        R = torch.where(class_exists_boundary, R, torch.zeros_like(R))
 
-        P = torch.sum(pred_b * gt_b_ext, dim=2) / (torch.sum(pred_b, dim=2) + 1e-7)
-        R = torch.sum(pred_b_ext * gt_b, dim=2) / (torch.sum(gt_b, dim=2) + 1e-7)
         BF1 = 2 * P * R / (P + R + 1e-7)
         boundary_loss = torch.mean(1 - BF1)
 
-        return dice_loss, boundary_loss
+        # ----------------------------------------------------------
+        # final combined loss
+        # ----------------------------------------------------------
+        total = self.alpha * dice_loss + (1 - self.alpha) * boundary_loss
+        return total
+
+# class customloss(nn.Module):
+#     def __init__(
+#         self,
+#         act=nn.Softmax(dim=1),
+#         smooth=1.0,
+#         label_smoothing=0.0,
+#         masked=True,
+#         theta0=3,
+#         theta=5,
+#         foreground_classes=[1],
+#     ):
+#         """
+#         act: activation function (Softmax for multi-class, Sigmoid for binary)
+#         smooth: Dice smoothing
+#         label_smoothing: optional label smoothing
+#         masked: whether to mask Dice to foreground only
+#         theta0, theta: boundary loss kernel sizes
+#         foreground_classes: indices of classes to compute Dice for
+#         """
+#         super().__init__()
+#         self.act = act
+#         self.smooth = smooth
+#         self.label_smoothing = label_smoothing
+#         self.masked = masked
+#         self.theta0 = theta0
+#         self.theta = theta
+#         self.foreground_classes = foreground_classes
+#         self.n_sigma = 2
+#         #         self.n_sigma = 3 if self.use_unified else 2
+#
+#     def forward(self, pred, target):
+#         """
+#         pred: (N, C, H, W) logits
+#         target: (N, C, H, W) one-hot labels
+#         Returns: (dice_loss, boundary_loss)
+#         """
+#         n, c, h, w = pred.shape
+#         device = pred.device
+#
+#         # Apply activation
+#         pred = self.act(pred)
+#
+#         # Optional label smoothing
+#         if self.label_smoothing > 0:
+#             target = target * (1 - self.label_smoothing) + self.label_smoothing / c
+#
+#         # -----------------------------
+#         # Dice Loss
+#         # -----------------------------
+#         if self.masked:
+#             mask = torch.sum(target, dim=1) > 0  # foreground mask (N, H, W)
+#         else:
+#             mask = torch.ones((n, h, w), dtype=torch.bool, device=device)
+#
+#         pred_perm = pred.permute(0, 2, 3, 1)  # (N, H, W, C)
+#         target_perm = target.permute(0, 2, 3, 1)
+#
+#         # Dice per class
+#         dice_per_class = 1 - (
+#             (2 * (pred_perm * target_perm)[mask].sum(dim=0) + self.smooth)
+#             / (pred_perm[mask].sum(dim=0) + target_perm[mask].sum(dim=0) + self.smooth)
+#         )
+#
+#         # Select only foreground classes for Dice
+#         dice_loss = dice_per_class[self.foreground_classes].mean()
+#
+#         # -----------------------------
+#         # Boundary Loss
+#         # -----------------------------
+#         # Compute boundaries for all classes
+#         gt_b = F.max_pool2d(
+#             1 - target,
+#             kernel_size=self.theta0,
+#             stride=1,
+#             padding=(self.theta0 - 1) // 2,
+#         ) - (1 - target)
+#         pred_b = F.max_pool2d(
+#             1 - pred, kernel_size=self.theta0, stride=1, padding=(self.theta0 - 1) // 2
+#         ) - (1 - pred)
+#
+#         # Extended boundaries
+#         gt_b_ext = F.max_pool2d(
+#             gt_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
+#         )
+#         pred_b_ext = F.max_pool2d(
+#             pred_b, kernel_size=self.theta, stride=1, padding=(self.theta - 1) // 2
+#         )
+#
+#         # Flatten for precision/recall
+#         gt_b = gt_b.view(n, c, -1)
+#         pred_b = pred_b.view(n, c, -1)
+#         gt_b_ext = gt_b_ext.view(n, c, -1)
+#         pred_b_ext = pred_b_ext.view(n, c, -1)
+#
+#         P = torch.sum(pred_b * gt_b_ext, dim=2) / (torch.sum(pred_b, dim=2) + 1e-7)
+#         R = torch.sum(pred_b_ext * gt_b, dim=2) / (torch.sum(gt_b, dim=2) + 1e-7)
+#         BF1 = 2 * P * R / (P + R + 1e-7)
+#         boundary_loss = torch.mean(1 - BF1)
+#
+#         return dice_loss, boundary_loss
 
 
 # class customloss(torch.nn.modules.loss._WeightedLoss):
