@@ -10,6 +10,7 @@ import logging
 import pathlib
 import random
 import warnings
+import subprocess
 from timeit import default_timer as timer
 
 import numpy as np
@@ -57,6 +58,7 @@ if __name__ == "__main__":
         optimizer_opts=conf.optim_opts,
         reg_opts=conf.reg_opts,
         metrics_opts=conf.metrics_opts,
+        training_opts=conf.training_opts,
         device=int(conf.training_opts.gpu_rank),
     )
 
@@ -163,3 +165,5 @@ if __name__ == "__main__":
         logging.INFO,
         f"Finished training {run_name} | Training took {timer() - start_time:.2f}sec",
     )
+
+    subprocess.run(["notify-send", "Training Done", "The model has finished training."])

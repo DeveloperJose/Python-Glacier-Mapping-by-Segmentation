@@ -18,10 +18,10 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch
-from scipy.ndimage.morphology import binary_fill_holes
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 from addict import Dict
+from torch.optim.lr_scheduler import OneCycleLR
 
 import glacier_mapping.model.functions as fn
 from glacier_mapping.model.metrics import tp_fp_fn
@@ -31,7 +31,6 @@ from glacier_mapping.model.unet import Unet
 class Framework:
     """
     Class to Wrap all the Training Steps
-
     """
 
     def __init__(
@@ -42,11 +41,13 @@ class Framework:
         optimizer_opts=None,
         reg_opts=None,
         metrics_opts=None,
+        training_opts=None,
         device=None,
     ):
         """
-        Set Class Attrributes
+        Set Class Attributes
         """
+        self.scaler = GradScaler()
         # % Device
         if isinstance(device, int):
             self.device = torch.device(
@@ -67,7 +68,7 @@ class Framework:
         # Dataframe
         self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
-        # Binary Model or Multi-Class Model?
+        # Binary or Multi-Class
         if len(output_classes) == 1:
             cl_name = loader_opts.class_names[output_classes[0]]
             self.mask_names = [f"NOT~{cl_name}", cl_name]
@@ -85,9 +86,7 @@ class Framework:
         self.norm_arr_full = np.load(
             Path(loader_opts.processed_dir) / "normalize_train.npy"
         )
-        assert self.normalization == "mean-std" or self.normalization == "min-max", (
-            "Invalid normalization"
-        )
+        assert self.normalization in ["mean-std", "min-max"], "Invalid normalization"
         self.norm_arr = self.norm_arr_full[:, self.use_channels]
 
         # % Model
@@ -95,68 +94,89 @@ class Framework:
         self.model_opts.args.inchannels = len(loader_opts.use_channels)
         self.model_opts.args.outchannels = self.num_classes
         self.model = Unet(**model_opts.args).to(self.device)
-        # self.model = smp.MAnet(
-        #     encoder_name="resnet34",
-        #     in_channels=len(loader_opts.use_channels),
-        #     classes=self.num_classes,
-        #     activation="sigmoid",
-        # ).to(self.device)
 
         # % Loss
         self.loss_opts = loss_opts
         self.loss_fn = fn.get_loss(self.num_classes, loss_opts).to(self.device)
-        if loss_opts is not None:
-            self.loss_alpha = torch.tensor([loss_opts.alpha]).to(self.device)
-        else:
-            self.loss_alpha = torch.tensor([0.0]).to(self.device)
-
-        if loss_opts is None:
-            self.loss_weights = torch.tensor([1.0, 1.0, 1.0]).to(self.device)
-        else:
-            self.loss_weights = torch.tensor(loss_opts.weights).to(self.device)
+        self.loss_alpha = (
+            torch.tensor([loss_opts.alpha]).to(self.device)
+            if loss_opts
+            else torch.tensor([0.0]).to(self.device)
+        )
+        self.loss_weights = (
+            torch.tensor(loss_opts.weights).to(self.device)
+            if loss_opts
+            else torch.tensor([1.0, 1.0, 1.0]).to(self.device)
+        )
 
         # % Optimizer
         self.optimizer_opts = optimizer_opts
         if optimizer_opts is None:
             optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
-        _optimizer_params = [
-            {"params": self.model.parameters(), **optimizer_opts["args"]},
-        ]
+        opt_args = optimizer_opts["args"]
+        if "lr" in opt_args:
+            opt_args["lr"] = float(opt_args["lr"])
+        if "weight_decay" in opt_args:
+            opt_args["weight_decay"] = float(opt_args["weight_decay"])
+
+        _optimizer_params = [{"params": self.model.parameters(), **opt_args}]
 
         # % CustomLoss Sigma
         self.sigma_list = []
         for _ in range(self.loss_fn.n_sigma):
-            sigma = torch.tensor([1.0]).to(self.device)
-            sigma = sigma.requires_grad_()
+            sigma = torch.tensor([1.0], requires_grad=True, device=self.device)
             self.sigma_list.append(sigma)
             _optimizer_params.append({"params": sigma, **optimizer_opts["args"]})
-        # self.sigma_list = torch.Tensor(self.sigma_list).to(self.device)
 
         optimizer_def = getattr(torch.optim, optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
-        self.lrscheduler = ReduceLROnPlateau(
-            self.optimizer, "min", patience=15, factor=0.1, min_lr=1e-9
-        )
 
-        # % Regularization
+        # % Scheduler
+        self.training_opts = training_opts
+        if training_opts is not None and hasattr(training_opts, "epochs"):
+            print("Using scheduler")
+            num_samples = len(self.df)  # total samples in the CSV
+            batch_size = self.loader_opts.batch_size
+            steps_per_epoch = math.ceil(num_samples / batch_size)
+
+            self.lrscheduler = OneCycleLR(
+                self.optimizer,
+                # **opt_args,
+                max_lr=2e-4,
+                steps_per_epoch=steps_per_epoch,
+                epochs=training_opts.epochs,
+                pct_start=0.2,
+                anneal_strategy="cos",
+                div_factor=20,
+                final_div_factor=1e3,
+            )
+        else:
+            self.lrscheduler = None
+
+        # % Regularization & Metrics
         self.reg_opts = reg_opts
         self.metrics_opts = metrics_opts
 
     def optimize(self, x, y):
         """
-        Take a single gradient step
-
-        Args:
-            X: raw training data
-            y: labels
-        Return:
-            optimization
+        Do forward + backward only. No stepping.
         """
-        x = x.permute(0, 3, 1, 2).to(self.device)
-        y = y.permute(0, 3, 1, 2).to(self.device)
-        y_hat = self.model(x)
-        loss = self.calc_loss(y_hat, y)
-        loss.backward()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+        y = y.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+
+        with autocast(enabled=True):
+            y_hat = self.model(x)
+            loss = self.calc_loss(y_hat, y)
+
+        # backward pass with AMP scaling
+        self.scaler.scale(loss).backward()
+
+        # unscale before clipping
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
         return y_hat.permute(0, 2, 3, 1), loss
 
     def zero_grad(self):
@@ -167,13 +187,21 @@ class Framework:
             return param_group["lr"]
 
     def step(self):
-        self.optimizer.step()
+        # Optimizer update
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        # Scheduler update (OneCycleLR is per-batch)
+        if self.lrscheduler is not None:
+            self.lrscheduler.step()
 
     def val_operations(self, val_loss):
         """
         Update the LR Scheduler
         """
-        self.lrscheduler.step(val_loss)
+        pass
+        # Not used for OneCycleLR
+        # self.lrscheduler.step(val_loss)
 
     def save(self, out_dir, epoch):
         """Save frame as a checkpoint file"""
@@ -191,6 +219,7 @@ class Framework:
             "optimizer_opts": self.optimizer_opts,
             "reg_opts": self.reg_opts,
             "metrics_opts": self.metrics_opts,
+            "training_opts": self.training_opts,
         }
         model_path = Path(out_dir, f"model_{epoch}.pt")
         torch.save(state, model_path)
@@ -230,6 +259,7 @@ class Framework:
             optimizer_opts=state["optimizer_opts"],
             reg_opts=state["reg_opts"],
             metrics_opts=state["metrics_opts"],
+            training_opts=state["training_opts"],
             device=device,
         )
         frame.model.load_state_dict(state["state_dict"])
@@ -244,60 +274,57 @@ class Framework:
         return frame
 
     def infer(self, x):
-        """Make a prediction for a given x
+        """
+        Make predictions for input batch with no grad (inference).
 
         Args:
-            x: input x
+            x: input batch (N,H,W,C)
 
-        Return:
-            Prediction
-
+        Returns:
+            y_hat: predictions (N,H,W,C)
         """
-        x = x.permute(0, 3, 1, 2).to(self.device)
+        training = self.model.training
+        x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
+        self.model.eval()
         with torch.no_grad():
-            y = self.model.to(self.device)(x)
-        return y.permute(0, 2, 3, 1).to(self.device)
+            y = self.model(x)
+        self.model.train(training)
+        return y.permute(0, 2, 3, 1)
 
     def calc_loss(self, y_hat, y):
-        """Compute loss given a prediction
+        """
+        Compute total loss including sigma weighting for custom losses and optional regularization.
 
         Args:
-            y_hat: Prediction
-            y: Label
+            y_hat: model outputs (N,C,H,W)
+            y: labels (N,C,H,W)
 
-        Return:
-            Loss values
-
+        Returns:
+            total_loss: scalar tensor
         """
         y_hat = y_hat.to(self.device)
         y = y.to(self.device)
 
-        losses = list(self.loss_fn(y_hat, y))
-        total_loss = None
-        sigma_mult = torch.Tensor([1]).to(self.device)
+        losses = self.loss_fn(y_hat, y)  # list of per-sigma losses
+        total_loss = torch.zeros(1, device=self.device)
+        sigma_mult = torch.ones(1, device=self.device)
+
         for _loss, sig in zip(losses, self.sigma_list):
-            weighted_loss = (
-                torch.div(1, len(self.sigma_list) * torch.square(sig))
-                * _loss.detach().clone()
-            )
+            # Use sig squared as weight
+            weighted_loss = _loss / (len(self.sigma_list) * sig**2)
+            total_loss += weighted_loss
+            sigma_mult *= sig
 
-            if total_loss is None:
-                total_loss = weighted_loss
-            else:
-                total_loss += weighted_loss
-
-            sigma_mult = torch.mul(sigma_mult, sig)
-
+        # Log-sigma regularization
         total_loss += torch.abs(torch.log(sigma_mult))
 
+        # Optional regularization
         if self.reg_opts:
-            for reg_type in self.reg_opts.keys():
-                reg_fun = globals()[reg_type]
-                penalty = reg_fun(
-                    self.model.parameters(), self.reg_opts[reg_type], self.device
-                )
-                total_loss += penalty
-        return total_loss.abs()
+            for reg_type, coeff in self.reg_opts.items():
+                reg_fn = globals()[reg_type]
+                total_loss += reg_fn(self.model.parameters(), coeff, self.device)
+
+        return total_loss
 
     def get_loss_alpha(self):
         return [sigma.item() for sigma in self.sigma_list]
@@ -465,7 +492,7 @@ class Framework:
 
                 endrow_dest = row + window_size[0]
                 endrow_source = window_size[0]
-                endcolumn_dest = column + window_size[0]
+                endcolumn_dest = column + window_size[1]
                 endcolumn_source = window_size[1]
                 if endrow_dest > y_pred.shape[0]:
                     endrow_source = y_pred.shape[0] - row
@@ -501,19 +528,34 @@ class Framework:
         _y = self.infer(_x).to(self.device)
 
         if self.multi_class:
-            _y = torch.nn.Softmax(dim=3)(_y)
-            _y = np.squeeze(_y.cpu())
-            y_pred = np.zeros((_y.shape[0], _y.shape[1]), dtype=np.uint8)
-            for i in range(self.num_classes):
-                _class = _y[:, :, i] >= threshold[i]
-                _class = binary_fill_holes(_class)
-                y_pred[_class] = i + 1  # 1..N
+            # softmax → argmax → one hot
+            _y = torch.nn.functional.softmax(_y, dim=2)
+            _y = torch.squeeze(
+                _y, dim=0
+            )  # remove batch dim, shape C,H,W or H,W,C depending on model
+
+            _y = _y.cpu().numpy()  # convert to NumPy
+            cls = np.argmax(_y, axis=2)  # H,W
+            y_pred = cls.astype(np.uint8) + 1  # convert 0..C-1 → 1..C
+            # _y = torch.nn.Softmax(dim=3)(_y)
+            # _y = np.squeeze(_y.cpu())
+            # y_pred = np.zeros((_y.shape[0], _y.shape[1]), dtype=np.uint8)
+            # for i in range(self.num_classes):
+            #     _class = _y[:, :, i] >= threshold[i]
+            #     _class = binary_fill_holes(_class)
+            #     y_pred[_class] = i + 1  # 1..N
         else:
             _y = torch.sigmoid(_y)
             _y = np.squeeze(_y.cpu())  # shape H x W
+
             y_pred = np.zeros(_y.shape, dtype=np.uint8)
-            # Use only the foreground channel (binary_class_idx assumed to be 1 here)
-            y_pred[_y[:, :, 0] >= threshold[0]] = 1  # 0 = background, 1 = foreground
+            y_pred[_y >= threshold[0]] = 1
+
+            # _y = torch.sigmoid(_y)
+            # _y = np.squeeze(_y.cpu())  # shape H x W
+            # y_pred = np.zeros(_y.shape, dtype=np.uint8)
+            # # Use only the foreground channel (binary_class_idx assumed to be 1 here)
+            # y_pred[_y[:, :, 0] >= threshold[0]] = 1  # 0 = background, 1 = foreground
 
         if use_mask:
             y_pred[_mask] = 0

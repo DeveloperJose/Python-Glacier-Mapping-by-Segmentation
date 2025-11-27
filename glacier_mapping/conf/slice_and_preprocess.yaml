@@ -1,10 +1,10 @@
 image_dir: "/home/devj/local-debian/datasets/HKH_raw/Landsat7_2005"
 dem_dir: "/home/devj/local-debian/datasets/HKH_raw/DEM" # or None
 labels_dir: "/home/devj/local-debian/datasets/HKH_raw/labels_fixed/"
-out_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline"
+out_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline_nofilter"
 window_size: [512, 512]
 overlap: 64
-filter: 0.1 # 0.1
+filter: 0 # 0.1
 test: 0.2
 val: 0.1
 add_ndvi: False

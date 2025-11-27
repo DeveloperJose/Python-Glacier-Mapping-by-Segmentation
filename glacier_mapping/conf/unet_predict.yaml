@@ -1,5 +1,5 @@
 runs_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-run_name: "baseline_cleanice"
+run_name: "baseline_cleanice_v5"
 output_dir: "/home/devj/local-debian/glacier_mapping/debian-pred-runs/"
 gpu_rank: 0
 threshold: 0.5

@@ -256,18 +256,25 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             slice = temp
         return slice
 
+    # def filter_percentage(slice, percentage, type="mask"):
+    #     if type == "image":
+    #         labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
+    #         percentage = 0.5
+    #     else:
+    #         # labelled_pixels = np.sum(slice != 0)
+    #         labelled_pixels = np.count_nonzero(slice)
+    #     total_pixels = slice.shape[0] * slice.shape[1]
+    #
+    #     if labelled_pixels / total_pixels < percentage:
+    #         return False
+    #     return True
     def filter_percentage(slice, percentage, type="mask"):
         if type == "image":
+            # Consider image valid if any pixel is non-zero in any channel
             labelled_pixels = np.sum(np.sum(slice, axis=2) != 0)
-            percentage = 0.5
         else:
-            # labelled_pixels = np.sum(slice != 0)
             labelled_pixels = np.count_nonzero(slice)
-        total_pixels = slice.shape[0] * slice.shape[1]
-
-        if labelled_pixels / total_pixels < percentage:
-            return False
-        return True
+        return labelled_pixels > 0
 
     def save_slice(arr, filename):
         np.save(filename, arr)
