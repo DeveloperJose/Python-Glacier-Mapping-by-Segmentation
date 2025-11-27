@@ -309,7 +309,10 @@ def get_loss(outchannels, opts=None):
         )
     elif opts.name == "custom":
         loss_fn = model_losses.customloss(
-            act=torch.nn.Softmax(dim=1), outchannels=outchannels, masked=opts.masked, use_unified=True,#=opts.use_unified,
+            # act=torch.nn.Softmax(dim=1),
+            # outchannels=outchannels, 
+            masked=opts.masked,
+            label_smoothing = label_smoothing
         )
     else:
         raise ValueError("Loss must be defined!")

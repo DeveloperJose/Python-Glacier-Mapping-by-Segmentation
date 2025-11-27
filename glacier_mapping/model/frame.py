@@ -15,13 +15,13 @@ import math
 import os
 from pathlib import Path
 
-import segmentation_models_pytorch as smp
 import pandas as pd
 import numpy as np
 import torch
 from scipy.ndimage.morphology import binary_fill_holes
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
+from addict import Dict
 
 import glacier_mapping.model.functions as fn
 from glacier_mapping.model.metrics import tp_fp_fn
@@ -135,7 +135,7 @@ class Framework:
         optimizer_def = getattr(torch.optim, optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
         self.lrscheduler = ReduceLROnPlateau(
-            self.optimizer, "min", verbose=True, patience=15, factor=0.1, min_lr=1e-9
+            self.optimizer, "min", patience=15, factor=0.1, min_lr=1e-9
         )
 
         # % Regularization
@@ -200,10 +200,11 @@ class Framework:
     def from_checkpoint(checkpoint_path: Path, device=None, new_data_path=None, testing=False, override={}):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), "checkpoint_path does not exist"
-        if torch.cuda.is_available() and device != "cpu":
-            state = torch.load(checkpoint_path)
-        else:
-            state = torch.load(checkpoint_path, map_location="cpu")
+        with torch.serialization.safe_globals([Dict]):
+            if torch.cuda.is_available() and device != "cpu":
+                state = torch.load(checkpoint_path)
+            else:
+                state = torch.load(checkpoint_path, map_location="cpu")
 
         if testing:
             state["model_opts"].args.dropout = 0.00000001
@@ -472,7 +473,7 @@ class Framework:
         return y_pred, mask
 
     def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
-        # Process threshold parameter
+        # Set default threshold
         if threshold is None:
             threshold = [0.5] * self.num_classes
         elif isinstance(threshold, (int, float)):
@@ -481,29 +482,35 @@ class Framework:
 
         _mask = np.sum(slice_arr, axis=2) == 0
 
-        # Reduce to only needed channels to speed up further computations, normalize, and get mask
+        # Reduce to needed channels and normalize
         if preprocess:
             slice_arr = slice_arr[:, :, self.use_channels]
             slice_arr = self.normalize(slice_arr)
 
-        # Send array to torch and then get prediction
+        # Convert to torch and predict
         _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float().to(self.device)
         _y = self.infer(_x).to(self.device)
-        _y = torch.nn.Softmax(3)(_y)
-        _y = np.squeeze(_y.cpu())
-        assert _y.shape[2] == self.num_classes
 
-        # Threshold + fill holes + add mask to prediction
-        y_pred = np.zeros((_y.shape[0], _y.shape[1]), dtype=np.uint8)
-        for i in range(self.num_classes):
-            _class = _y[:, :, i] >= threshold[i]
-            _class = binary_fill_holes(_class)
-            y_pred[_class] = i + 1
+        if self.multi_class:
+            _y = torch.nn.Softmax(dim=3)(_y)
+            _y = np.squeeze(_y.cpu())
+            y_pred = np.zeros((_y.shape[0], _y.shape[1]), dtype=np.uint8)
+            for i in range(self.num_classes):
+                _class = _y[:, :, i] >= threshold[i]
+                _class = binary_fill_holes(_class)
+                y_pred[_class] = i + 1  # 1..N
+        else:
+            _y = torch.sigmoid(_y)
+            _y = np.squeeze(_y.cpu())  # shape H x W
+            y_pred = np.zeros(_y.shape, dtype=np.uint8)
+            # Use only the foreground channel (binary_class_idx assumed to be 1 here)
+            y_pred[_y[:, :, 0] >= threshold[0]] = 1  # 0 = background, 1 = foreground
 
         if use_mask:
             y_pred[_mask] = 0
             return y_pred, _mask
         return y_pred
+
 
     def get_y_true(self, label_mask: np.ndarray, mask=None):
         y_true = np.zeros((label_mask.shape[0], label_mask.shape[1]), dtype=np.uint8)

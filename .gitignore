@@ -1,6 +1,6 @@
-output/
-pred_runs/
-runs/
+**output/
+**pred_runs/
+**runs/
 debug/
 newruns/
 .ruff_cache/

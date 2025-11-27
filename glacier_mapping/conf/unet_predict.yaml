@@ -1,6 +1,6 @@
-runs_dir: "/data/jperez/programming/glacier_mapping/newruns/"
-run_name: "baseline_unified_sigma3"
-output_dir: "pred_runs/"
-gpu_rank: 1
+runs_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
+run_name: "baseline_cleanice"
+output_dir: "/home/devj/local-debian/glacier_mapping/debian-pred-runs/"
+gpu_rank: 0
 threshold: 0.5
 model_type: "best" # "best" or "final"

@@ -119,7 +119,7 @@ def fetch_loaders(
         worker_init_fn=seed_worker,
         generator=g,
         num_workers=8,
-        shuffle=shuffle,
+        shuffle=False,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -203,7 +203,8 @@ class GlacierDataset(Dataset):
             data = (data - self.mean) / self.std
         else:
             raise ValueError("normalize must be min-max or mean-std")
-        label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
+        # label = np.expand_dims(np.load(self.mask_files[index]), axis=2)
+        label = np.expand_dims(np.load(self.mask_files[index]).astype(np.uint8), axis=2)
         label[_mask] = 0
         # ones = label == 1
         # twos = label == 2

@@ -14,7 +14,7 @@ import numpy as np
 import rasterio
 from rasterio.features import rasterize
 from shapely.geometry import Polygon, box
-from shapely.ops import cascaded_union
+from shapely.ops import unary_union
 from skimage.color import rgb2hsv
 
 from glacier_mapping.data import physics
@@ -33,6 +33,9 @@ def read_shp(filename):
 
     """
     shapefile = gpd.read_file(filename)
+
+    # Fix invalid geometries
+    # shapefile["geometry"] = shapefile["geometry"].apply(make_valid)
 
     return shapefile
 
@@ -98,7 +101,7 @@ def poly_from_coord(polygon, transform):
     https://lpsmlgeo.github.io/2019-09-22-binary_mask/
     """
     poly_pts = []
-    poly = cascaded_union(polygon)
+    poly = unary_union(polygon)
     for i in np.array(poly.exterior.coords):
         # in case polygonz format
         poly_pts.append(~transform * tuple(i)[:2])
@@ -298,7 +301,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
     # print(np.unique(mask, True))
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
         for column in range(
-            0, tiff_np.shape[0], conf["window_size"][1] - conf["overlap"]
+            0, tiff_np.shape[1], conf["window_size"][1] - conf["overlap"]
         ):
             mask_slice = mask[
                 row : row + conf["window_size"][0],

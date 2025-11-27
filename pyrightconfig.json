@@ -1,0 +1,6 @@
+{
+  "venvPath": "", // parent directory of the venv
+  "venv": ".venv", // name of the venv directory inside .uv
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Linux"
+}

@@ -85,7 +85,7 @@ if __name__ == "__main__":
 
             pbar.set_description(f"Processing dataset {split}")
             pbar.reset(len(meta))
-            with multiprocessing.Pool(32) as pool:
+            with multiprocessing.Pool(10) as pool:
                 for result in utils.istarmap(pool, fn_process, enumerate(meta)):
                     mu, s, mi, ma, df_rows = result
                     means.append(mu)
