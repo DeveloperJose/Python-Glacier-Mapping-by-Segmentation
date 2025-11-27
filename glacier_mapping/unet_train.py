@@ -141,8 +141,8 @@ if __name__ == "__main__":
         writer.add_scalar("loss_test", loss_test, epoch)
 
         writer.add_scalar("lr", lr, epoch)
-        writer.add_scalar("sigma/1", loss_alpha[0], epoch)
-        writer.add_scalar("sigma/2", loss_alpha[1], epoch)
+        for idx, sigma in enumerate(loss_alpha):
+            writer.add_scalar(f"sigma/{idx+1}", sigma, epoch)
 
         fn.print_metrics(frame, train_metric, val_metric, test_metric)
         torch.cuda.empty_cache()

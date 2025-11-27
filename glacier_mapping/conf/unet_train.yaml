@@ -1,11 +1,11 @@
 training_opts:
   output_dir: "/data/jperez/programming/glacier_mapping/newruns/"
-  run_name: "baseline_unified_boundary"
-  gpu_rank: 0
-  epochs: 251
+  run_name: "baseline_unified_sigma3_0.5"
+  gpu_rank: 1
+  epochs: 500
   fine_tune: False
   find_lr: False
-  early_stopping: 1000 # Epochs to wait for improvement
+  early_stopping: 50 # Epochs to wait for improvement
 loader_opts:
   processed_dir: "/data/jperez/datasets/HKH/baseline/"
   batch_size: 8 # 14 # 8
@@ -24,6 +24,7 @@ loss_opts:
   gaussian_blur_sigma: None
   label_smoothing: 0.1
   alpha: 0.9
+  use_unified: True
 model_opts:
   args:
     net_depth: 4

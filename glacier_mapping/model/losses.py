@@ -264,6 +264,7 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         masked=True,
         theta0=3,
         theta=5,
+        use_unified=False,
     ):
         super().__init__()
         self.act = act
@@ -273,16 +274,21 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
         self.masked = masked
         self.theta0 = theta0
         self.theta = theta
-        self.unified = unifiedloss(
+        self.use_unified = use_unified
+        self.unified_loss_fn = unifiedloss(
             act=act, label_smoothing=label_smoothing, outchannels=outchannels
         )
 
         if self.outchannels == 2:
             print("customloss using masked dice")
 
+        self.n_sigma = 3 if self.use_unified else 2
+        #self.n_sigma = 2
+
     def forward(self, pred, target):
-        # TODO:
-        diceloss = self.unified(pred, target)
+        if self.use_unified:
+            asymmetric_ftl, asymmetric_fl = self.unified_loss_fn(pred.detach().clone(), target.detach().clone())
+
         if self.masked:
             mask = torch.sum(target, dim=1) == 1
         else:
@@ -330,18 +336,20 @@ class customloss(torch.nn.modules.loss._WeightedLoss):
 
         pred = pred.permute(0, 2, 3, 1)
         target = target.permute(0, 2, 3, 1)
-        # diceloss = 1 - (
-        #     (2.0 * (pred * target)[mask].sum(dim=0) + self.smooth)
-        #     / (pred[mask].sum(dim=0) + target[mask].sum(dim=0) + self.smooth)
-        # )
+        diceloss = 1 - (
+            (2.0 * (pred * target)[mask].sum(dim=0) + self.smooth)
+            / (pred[mask].sum(dim=0) + target[mask].sum(dim=0) + self.smooth)
+        )
+        # Only used masked dice loss when doing binary models
+        if self.outchannels == 2:
+            diceloss = diceloss * torch.tensor([0.0, 1.0]).to(diceloss.device)
+        elif self.outchannels == 3:
+            diceloss = diceloss * torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
 
-        # # Only used masked dice loss when doing binary models
-        # if self.outchannels == 2:
-        #     diceloss = diceloss * torch.tensor([0.0, 1.0]).to(diceloss.device)
-        # elif self.outchannels == 3:
-        #     diceloss = diceloss * torch.tensor([0.0, 1.0, 1.0]).to(diceloss.device)
-
-        return diceloss, boundaryloss
+        if self.use_unified:
+            return [asymmetric_fl, asymmetric_ftl, boundaryloss]
+        else:
+            return [diceloss.sum(), boundaryloss]
 
 
 # https://github.com/mlyg/boundary-uncertainty/blob/main/loss_functions.py
@@ -495,10 +503,11 @@ class unifiedloss(torch.nn.Module):
 
         # print(asymmetric_ftl, asymmetric_fl)
 
-        if self.weight is not None:
-            return (self.weight * asymmetric_ftl) + ((1 - self.weight) * asymmetric_fl)
-        else:
-            return asymmetric_ftl + asymmetric_fl
+        # if self.weight is not None:
+        #     return (self.weight * asymmetric_ftl) + ((1 - self.weight) * asymmetric_fl)
+        # else:
+        #     return asymmetric_ftl + asymmetric_fl
+        return asymmetric_ftl, asymmetric_fl
 
     def asymmetric_focal_tversky_loss(self, y_pred: torch.Tensor, y_true: torch.Tensor):
         if len(y_pred) == 0 or len(y_true) == 0:

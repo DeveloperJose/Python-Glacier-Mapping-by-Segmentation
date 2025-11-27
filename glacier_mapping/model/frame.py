@@ -82,7 +82,9 @@ class Framework:
 
         # Normalization
         self.normalization = loader_opts.normalize
-        self.norm_arr_full = np.load(Path(loader_opts.processed_dir) / "normalize_train.npy")
+        self.norm_arr_full = np.load(
+            Path(loader_opts.processed_dir) / "normalize_train.npy"
+        )
         assert (
             self.normalization == "mean-std" or self.normalization == "min-max"
         ), "Invalid normalization"
@@ -107,14 +109,7 @@ class Framework:
             self.loss_alpha = torch.tensor([loss_opts.alpha]).to(self.device)
         else:
             self.loss_alpha = torch.tensor([0.0]).to(self.device)
-        self.sigma1, self.sigma2 = (
-            torch.tensor([1.0]).to(self.device),
-            torch.tensor([1.0]).to(self.device),
-        )
-        self.sigma1, self.sigma2 = (
-            self.sigma1.requires_grad_(),
-            self.sigma2.requires_grad_(),
-        )
+
         if loss_opts is None:
             self.loss_weights = torch.tensor([1.0, 1.0, 1.0]).to(self.device)
         else:
@@ -126,9 +121,17 @@ class Framework:
             optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
         _optimizer_params = [
             {"params": self.model.parameters(), **optimizer_opts["args"]},
-            {"params": self.sigma1, **optimizer_opts["args"]},
-            {"params": self.sigma2, **optimizer_opts["args"]},
         ]
+
+        # % CustomLoss Sigma
+        self.sigma_list = []
+        for _ in range(self.loss_fn.n_sigma):
+            sigma = torch.tensor([1.0]).to(self.device)
+            sigma = sigma.requires_grad_()
+            self.sigma_list.append(sigma)
+            _optimizer_params.append({"params": sigma, **optimizer_opts["args"]})
+        # self.sigma_list = torch.Tensor(self.sigma_list).to(self.device)
+
         optimizer_def = getattr(torch.optim, optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
         self.lrscheduler = ReduceLROnPlateau(
@@ -181,8 +184,7 @@ class Framework:
             "epoch": epoch,
             "state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "sigma1": self.sigma1,
-            "sigma2": self.sigma2,
+            "sigma_list": self.sigma_list,
             "loss_opts": self.loss_opts,
             "loader_opts": self.loader_opts,
             "model_opts": self.model_opts,
@@ -195,7 +197,7 @@ class Framework:
         print(f"Saved model {epoch}")
 
     @staticmethod
-    def from_checkpoint(checkpoint_path: Path, device=None, testing=False, override={}):
+    def from_checkpoint(checkpoint_path: Path, device=None, new_data_path=None, testing=False, override={}):
         """Load a frame from a checkpoint file"""
         assert checkpoint_path.exists(), "checkpoint_path does not exist"
         if torch.cuda.is_available() and device != "cpu":
@@ -205,8 +207,14 @@ class Framework:
 
         if testing:
             state["model_opts"].args.dropout = 0.00000001
+
         if len(override) > 0:
             state.update(override)
+
+        if new_data_path is not None:
+            if isinstance(new_data_path, str):
+                new_data_path = Path(new_data_path)
+            state["loader_opts"].processed_dir = new_data_path
 
         frame = Framework(
             loss_opts=state["loss_opts"],
@@ -218,9 +226,14 @@ class Framework:
             device=device,
         )
         frame.model.load_state_dict(state["state_dict"])
+        
         frame.optimizer.load_state_dict(state["optimizer_state_dict"])
-        frame.sigma1 = state["sigma1"]
-        frame.sigma2 = state["sigma2"]
+        
+        # TODO: Compatibility
+        if "sigma1" in state.keys():
+            frame.sigma_list = [ state["sigma1"], state["sigma2"] ]
+        else:
+            frame.sigma_list = state["sigma_list"]
         return frame
 
     def infer(self, x):
@@ -251,35 +264,33 @@ class Framework:
         """
         y_hat = y_hat.to(self.device)
         y = y.to(self.device)
-        # loss = self.loss_fn(y_hat, y)
-        diceloss, boundaryloss = self.loss_fn(y_hat, y)
-        diceloss = diceloss.sum()
-        # loss = torch.add(torch.mul(diceloss.clone(), self.loss_alpha), torch.mul(boundaryloss.clone(), (1-self.loss_alpha)))
-        loss = torch.add(
-            torch.add(
-                torch.mul(
-                    torch.div(1, torch.mul(2, torch.square(self.sigma1))),
-                    diceloss.clone(),
-                ),
-                torch.mul(
-                    torch.div(1, torch.mul(2, torch.square(self.sigma2))),
-                    boundaryloss.clone(),
-                ),
-            ),
-            torch.abs(torch.log(torch.mul(self.sigma1, self.sigma2))),
-        )
+
+        losses = list(self.loss_fn(y_hat, y))
+        total_loss = None
+        sigma_mult = torch.Tensor([1]).to(self.device)
+        for _loss, sig in zip(losses, self.sigma_list):
+            weighted_loss = torch.div(1, len(self.sigma_list) * torch.square(sig)) * _loss.detach().clone()
+
+            if total_loss is None:
+                total_loss = weighted_loss
+            else:
+                total_loss += weighted_loss
+
+            sigma_mult = torch.mul(sigma_mult, sig)
+
+        total_loss += torch.abs(torch.log(sigma_mult))
+
         if self.reg_opts:
             for reg_type in self.reg_opts.keys():
                 reg_fun = globals()[reg_type]
                 penalty = reg_fun(
                     self.model.parameters(), self.reg_opts[reg_type], self.device
                 )
-                loss += penalty
-        return loss.abs()
+                total_loss += penalty
+        return total_loss.abs()
 
     def get_loss_alpha(self):
-        # return self.loss_alpha.item()
-        return (self.sigma1.item(), self.sigma2.item())
+        return [sigma.item() for sigma in self.sigma_list]
 
     def metrics(self, y_hat, y, mask, threshold):
         """Loop over metrics in train.yaml
