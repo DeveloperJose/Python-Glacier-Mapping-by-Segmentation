@@ -1,14 +1,14 @@
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "baseline_multi_nofiltv2"
+  run_name: "baseline_multi"
   gpu_rank: 0
   epochs: 500
   fine_tune: False
   find_lr: False
   early_stopping: 15 # Epochs to wait for improvement
 loader_opts:
-  processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline_nofilterv2/"
-  batch_size: 11
+  processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline/"
+  batch_size: 12
   use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics'] # 10 = physics augmented
   output_classes: [0, 1, 2] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
@@ -20,10 +20,10 @@ metrics_opts:
 loss_opts:
   name: "custom"
   masked: False #True
-  weights: [1.0]
+  # weights: [1.0]
   gaussian_blur_sigma: None
   label_smoothing: 0
-  alpha: 0.9
+  # alpha: 0.9
   use_unified: False
 model_opts:
   args:

@@ -261,7 +261,7 @@ class customloss(nn.Module):
         theta0=3,
         theta=5,
         foreground_classes=[1, 2],
-        alpha=0.9,   # dice weight
+        # alpha=0.9,   # dice weight
     ):
         super().__init__()
         self.act = act
@@ -271,7 +271,7 @@ class customloss(nn.Module):
         self.theta0 = theta0
         self.theta = theta
         self.foreground_classes = foreground_classes
-        self.alpha = alpha
+        # self.alpha = alpha
 
     def forward(self, pred, target, target_int):
         """
@@ -291,6 +291,10 @@ class customloss(nn.Module):
         IGNORE = 255
         ignore_mask = (target_int != IGNORE)       # (N,H,W), bool
         ignore_mask_exp = ignore_mask.unsqueeze(1).float()
+
+        # zero-out ignore regions in both pred + target
+        pred = pred * ignore_mask_exp
+        target = target * ignore_mask_exp
 
         # ----------------------------------------------------------
         # Label smoothing
@@ -351,24 +355,13 @@ class customloss(nn.Module):
         gt_b_ext  = (gt_b_ext  * ignore_mask_exp).view(n, c, -1)
         pred_b_ext= (pred_b_ext* ignore_mask_exp).view(n, c, -1)
 
-        # class must exist in boundaries
-        class_exists_boundary = (gt_b.sum(dim=2) > 0)
-
-        P = torch.sum(pred_b * gt_b_ext, dim=2) / (pred_b.sum(dim=2) + 1e-7)
-        R = torch.sum(pred_b_ext * gt_b, dim=2) / (gt_b.sum(dim=2) + 1e-7)
-
-        # mask invalid classes
-        P = torch.where(class_exists_boundary, P, torch.zeros_like(P))
-        R = torch.where(class_exists_boundary, R, torch.zeros_like(R))
-
+        # no class-exists masking!
+        P = torch.sum(pred_b * gt_b_ext, dim=2) / (torch.sum(pred_b, dim=2) + 1e-7)
+        R = torch.sum(pred_b_ext * gt_b, dim=2) / (torch.sum(gt_b, dim=2) + 1e-7)
         BF1 = 2 * P * R / (P + R + 1e-7)
         boundary_loss = torch.mean(1 - BF1)
 
-        # ----------------------------------------------------------
-        # final combined loss
-        # ----------------------------------------------------------
-        total = self.alpha * dice_loss + (1 - self.alpha) * boundary_loss
-        return total
+        return [dice_loss, boundary_loss]
 
 # class customloss(nn.Module):
 #     def __init__(
@@ -518,7 +511,6 @@ class customloss(nn.Module):
 #
 #         # print(pred.shape, target.shape, 'shapes')
 #         n, c, _, _ = pred.shape
-#         # softmax so that predicted map can be distributed in [0, 1]
 #         pred = self.act(pred)
 #         # boundary map
 #         gt_b = F.max_pool2d(
