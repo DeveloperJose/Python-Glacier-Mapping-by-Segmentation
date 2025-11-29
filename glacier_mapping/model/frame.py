@@ -867,23 +867,31 @@ class Framework:
 
         # Ignore mask
         ignore_mask = (y_int.cpu().numpy()[0] == 255).squeeze()
-        y_gt[ignore_mask] = 255
-        y_pred[ignore_mask] = 255
-
+        
         # ------------------------------------
         # 2. Categorical styling
         # ------------------------------------
-        num_classes = self.num_classes
         is_binary = self.is_binary
-        classname = self.mask_names[-1] if is_binary else None
 
+        # For binary models, ensure proper label mapping for visualization
+        if is_binary:
+            # Binary: 0=NOT~class (brown), 1=class (blue/red), 255=mask (black)
+            y_gt_vis = y_gt.copy()
+            y_pred_vis = y_pred.copy()
+            y_gt_vis[ignore_mask] = 255
+            y_pred_vis[ignore_mask] = 255
+        else:
+            # Multi-class: 0=BG (brown), 1=CI (blue), 2=DCI (red), 255=mask (black)
+            y_gt_vis = y_gt.copy()
+            y_pred_vis = y_pred.copy()
+            y_gt_vis[ignore_mask] = 255
+            y_pred_vis[ignore_mask] = 255
 
-        # cmap = build_cmap(num_classes, is_binary, classname)
         cmap = build_cmap_from_mask_names(self.mask_names)
 
         x_rgb = make_rgb_preview(x_np)
-        gt_rgb = label_to_color(y_gt, cmap)
-        pr_rgb = label_to_color(y_pred, cmap)
+        gt_rgb = label_to_color(y_gt_vis, cmap)
+        pr_rgb = label_to_color(y_pred_vis, cmap)
 
         # ------------------------------------
         # 3. Confidence & entropy maps
@@ -899,9 +907,10 @@ class Framework:
         # ------------------------------------
         # 4. TP / FP / FN
         # ------------------------------------
-        tp_mask = (y_pred == y_gt) & (~ignore_mask) & (y_gt != 0)
-        fp_mask = (y_pred != y_gt) & (~ignore_mask) & (y_pred != 0)
-        fn_mask = (y_pred != y_gt) & (~ignore_mask) & (y_gt != 0)
+        # Use the visualization labels for consistency
+        tp_mask = (y_pred_vis == y_gt_vis) & (~ignore_mask) & (y_gt_vis != 0) & (y_gt_vis != 255)
+        fp_mask = (y_pred_vis != y_gt_vis) & (~ignore_mask) & (y_pred_vis != 0) & (y_pred_vis != 255)
+        fn_mask = (y_pred_vis != y_gt_vis) & (~ignore_mask) & (y_gt_vis != 0) & (y_gt_vis != 255)
 
         tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
@@ -913,18 +922,18 @@ class Framework:
         metric_string_parts = []
 
         for ci, cname in enumerate(self.mask_names):
-            pred_c = (y_pred == ci).astype(np.uint8)
-            true_c = (y_gt == ci).astype(np.uint8)
+            pred_c = (y_pred_vis == ci).astype(np.uint8)
+            true_c = (y_gt_vis == ci).astype(np.uint8)
 
             tp, fp, fn = model_metrics.tp_fp_fn(
                 torch.from_numpy(pred_c),
                 torch.from_numpy(true_c),
             )
-            P = model_metrics.precision(tp, fp, fn)
-            R = model_metrics.recall(tp, fp, fn)
-            I = model_metrics.IoU(tp, fp, fn)
+            P_val = model_metrics.precision(tp, fp, fn)
+            R_val = model_metrics.recall(tp, fp, fn)
+            I_val = model_metrics.IoU(tp, fp, fn)
 
-            metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
+            metric_string_parts.append(f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}")
 
         metrics_text = " | ".join(metric_string_parts)
 
@@ -1175,10 +1184,24 @@ class Framework:
             if invalid_mask is not None:
                 ignore |= invalid_mask
 
-            # GT/PRED for visualization
+            # GT/PRED for visualization - ensure proper labeling
             y_gt_vis = y_true_raw.copy()
-            y_gt_vis[ignore] = 255
             y_pred_vis = y_pred.copy()
+            
+            # For binary models, ensure proper 0/1 labeling before masking
+            if self.is_binary:
+                # Binary models should have 0=NOT~class, 1=class, 255=mask
+                # y_true_raw uses original encoding: 0=BG, 1/2=class, 255=mask
+                # Convert to binary labeling
+                class_idx = self.binary_class_idx  # 1 for CI, 2 for Debris
+                y_gt_vis_binary = np.zeros_like(y_true_raw)
+                y_gt_vis_binary[y_true_raw == class_idx] = 1
+                y_gt_vis_binary[y_true_raw == 255] = 255
+                y_gt_vis = y_gt_vis_binary
+            else:
+                # Multi-class: 0=BG, 1=CI, 2=DCI, 255=mask
+                y_gt_vis[ignore] = 255
+                
             y_pred_vis[ignore] = 255
 
             # ----------- Correct RGB visualization -----------
@@ -1213,27 +1236,33 @@ class Framework:
             conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
             entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
 
-            # TP / FP / FN masks
-            tp_mask = (y_pred == y_true_raw) & (~ignore) & (y_true_raw != 0)
-            fp_mask = (y_pred != y_true_raw) & (~ignore) & (y_pred != 0)
-            fn_mask = (y_pred != y_true_raw) & (~ignore) & (y_true_raw != 0)
+            # TP / FP / FN masks - use visualization labels for consistency
+            tp_mask = (y_pred_vis == y_gt_vis) & (~ignore) & (y_gt_vis != 0) & (y_gt_vis != 255)
+            fp_mask = (y_pred_vis != y_gt_vis) & (~ignore) & (y_pred_vis != 0) & (y_pred_vis != 255)
+            fn_mask = (y_pred_vis != y_gt_vis) & (~ignore) & (y_gt_vis != 0) & (y_gt_vis != 255)
 
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
             # Per-class metrics string
             metric_string_parts = []
             for ci, cname in enumerate(self.mask_names):
-                pred_c = (y_pred == ci + 1).astype(np.uint8)
-                true_c = (y_true_raw == ci + 1).astype(np.uint8)
+                if self.is_binary:
+                    # For binary, use the visualization labels directly
+                    pred_c = (y_pred_vis == ci).astype(np.uint8)
+                    true_c = (y_gt_vis == ci).astype(np.uint8)
+                else:
+                    # For multi-class, use the original labels shifted by +1
+                    pred_c = (y_pred == ci + 1).astype(np.uint8)
+                    true_c = (y_true_raw == ci + 1).astype(np.uint8)
 
                 tp_, fp_, fn_ = tp_fp_fn(
                     torch.from_numpy(pred_c),
                     torch.from_numpy(true_c),
                 )
-                P = precision(tp_, fp_, fn_)
-                R = recall(tp_, fp_, fn_)
-                I = IoU(tp_, fp_, fn_)
-                metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
+                P_val = precision(tp_, fp_, fn_)
+                R_val = recall(tp_, fp_, fn_)
+                I_val = IoU(tp_, fp_, fn_)
+                metric_string_parts.append(f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}")
 
             metrics_text = " | ".join(metric_string_parts)
 

@@ -11,7 +11,7 @@ cleanice:
   threshold: 0.5
   model_type: "best" # "best" or "final"
 
-debris:
-  run_name: "replicate_baseline_debrisice2"
-  threshold: 0.5
-  model_type: "best"
+# debris:
+#   run_name: "replicate_baseline_debrisice2"
+#   threshold: 0.5
+#   model_type: "best"

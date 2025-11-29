@@ -31,6 +31,7 @@ dependencies = [
   "s3fs",
   "segmentation-models-pytorch",
   "opencv-python",
+  "matplotlib>=3.10.7",
 ]
 
 [project.optional-dependencies]

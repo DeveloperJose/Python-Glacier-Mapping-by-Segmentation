@@ -65,6 +65,17 @@ def make_rgb_preview(x):
 def build_cmap(num_classes, is_binary, classname=None):
     """
     Build categorical colormap for GT/Pred visualization.
+    
+    For binary models:
+        - 0 = NOT~class (brown)
+        - 1 = class (blue for CleanIce, red for Debris) 
+        - 255 = mask (black)
+    
+    For multi-class:
+        - 0 = BG (brown)
+        - 1 = CleanIce (blue)
+        - 2 = Debris (red)
+        - 255 = mask (black)
     """
     if not is_binary:
         # Full 3-class dataset
@@ -78,15 +89,22 @@ def build_cmap(num_classes, is_binary, classname=None):
 
 def build_cmap_from_mask_names(mask_names):
     """
-    Ensures categorical colors align with mask_names
-    which define:
-        index 0 : background
-        index 1 : clean ice
-        index 2 : debris
+    Ensures categorical colors align with mask_names.
+    
+    For binary models (2 names like ["NOT~CleanIce", "CleanIce"]):
+        - index 0 : NOT~class (brown)
+        - index 1 : class (blue for CleanIce, red for Debris)
+    
+    For multi-class models (3 names like ["Background", "CleanIce", "Debris"]):
+        - index 0 : background (brown)
+        - index 1 : clean ice (blue)
+        - index 2 : debris (red)
+    
+    Always adds 255 -> black for mask.
     """
     cmap = {}
     for i, name in enumerate(mask_names):
-        if name.lower().startswith("bg"):
+        if name.lower().startswith("bg") or name.lower().startswith("not~"):
             cmap[i] = COLOR_BG
         elif name.lower().startswith("clean"):
             cmap[i] = COLOR_CI

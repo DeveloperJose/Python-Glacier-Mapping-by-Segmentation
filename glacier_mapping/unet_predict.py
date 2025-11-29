@@ -175,7 +175,16 @@ if __name__ == "__main__":
         db_tp=0.0, db_fp=0.0, db_fn=0.0,
     )
 
-    cmap = build_cmap(3, is_binary=False)
+    # Build appropriate colormap based on prediction mode
+    if has_ci and has_deb:
+        # Merged multi-class: BG, CI, Debris, mask
+        cmap = build_cmap(3, is_binary=False)
+    elif has_ci:
+        # Binary CleanIce: NOT~CI, CI, mask
+        cmap = build_cmap(2, is_binary=True, classname="CleanIce")
+    else:
+        # Binary Debris: NOT~Debris, Debris, mask
+        cmap = build_cmap(2, is_binary=True, classname="Debris")
 
     # ------------------------------------------------------------------
     # MAIN LOOP
@@ -224,18 +233,24 @@ if __name__ == "__main__":
 
             df_rows.append([name, P, R, I])
 
-            # Visualization label maps
+            # Visualization label maps - use binary labeling for consistency
             y_gt = y_full.copy()
             y_gt[invalid] = 255
-
+            
+            # For binary visualization: convert to 0=NOT~class, 1=class, 255=mask
+            y_gt_vis = np.zeros_like(y_full)
+            y_gt_vis[valid & (y_full == model_class)] = 1
+            y_gt_vis[valid & (y_full != model_class)] = 0
+            y_gt_vis[invalid] = 255
+            
             y_pred = np.zeros_like(y_full)
-            y_pred[valid & (pred_bin == 1)] = model_class
-            y_pred[valid & (pred_bin == 0)] = 0
+            y_pred[valid & (pred_bin == 1)] = 1  # class
+            y_pred[valid & (pred_bin == 0)] = 0  # NOT~class
             y_pred[invalid] = 255
 
-            # TP/FP/FN masks
-            gt_pos   = (y_full == model_class) & valid
-            pred_pos = (pred_bin == 1) & valid
+            # TP/FP/FN masks - use binary visualization labels
+            gt_pos   = (y_gt_vis == 1) & valid  # class pixels in GT
+            pred_pos = (y_pred == 1) & valid     # class pixels in prediction
             tp_mask = gt_pos & pred_pos
             fp_mask = (~gt_pos) & pred_pos
             fn_mask = gt_pos & (~pred_pos)
@@ -249,7 +264,7 @@ if __name__ == "__main__":
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
-                gt_rgb=label_to_color(y_gt, cmap),
+                gt_rgb=label_to_color(y_gt_vis, cmap),
                 pr_rgb=label_to_color(y_pred, cmap),
                 conf_rgb=conf_rgb,
                 tp_rgb=tp_rgb,
