@@ -5,20 +5,17 @@ import torch.nn.functional as F
 
 class customloss(nn.Module):
     """
-    Multi-class compatible custom loss that mimics the original paper setup:
+    Multi-class compatible custom loss based on the author's formulation.
 
-      - Dice loss computed per class on valid pixels only
-      - Only foreground classes contribute (e.g., CleanIce)
-      - Boundary loss (BF1) as in original implementation
+    Matches the original paper:
+      - Dice loss computed only on valid pixels
+      - For binary models: sigmoid + dice only on class 1
+      - BF1 boundary loss identical to original
+      - Uses target_int==255 as ignore mask (your dataset format)
       - Returns [dice_loss_scalar, boundary_loss_scalar]
-      - n_sigma = 2 so the Framework can apply sigma weighting
 
     Expected forward signature:
         forward(pred, target, target_int)
-
-        pred       : (N,C,H,W) logits
-        target     : (N,C,H,W) one-hot (from dataloader)
-        target_int : (N,H,W)   integer labels with 255 = ignore
     """
 
     def __init__(
@@ -30,7 +27,7 @@ class customloss(nn.Module):
         theta0=3,
         theta=5,
         foreground_classes=None,
-        alpha=0.9,  # compatibility, unused in this refactor
+        alpha=0.9,  # compatibility with old code
     ):
         super().__init__()
         self.act = act
@@ -39,115 +36,124 @@ class customloss(nn.Module):
         self.masked = masked
         self.theta0 = theta0
         self.theta = theta
-        # which class indices count as "foreground" for the dice term
-        # e.g., [1] for binary (NOT~CI, CI)
-        self.foreground_classes = foreground_classes if foreground_classes is not None else [1]
-        # number of separate loss components for sigma weighting
+
+        # Default: foreground = class 1 (binary CI or binary DCI)
+        self.foreground_classes = (
+            foreground_classes if foreground_classes is not None else [1]
+        )
+
+        # Framework needs this: number of components for sigma weighting
         self.n_sigma = 2
 
     def forward(self, pred, target, target_int):
         """
-        pred:       (N,C,H,W) logits
+        pred:       (N,C,H,W) raw logits
         target:     (N,C,H,W) one-hot labels
-        target_int: (N,H,W)   int labels, where 255=ignore
+        target_int: (N,H,W)   integer labels, 255 = ignore
         """
         n, c, h, w = pred.shape
         device = pred.device
 
-        # Softmax → probabilities
-        pred = self.act(pred)
         target = target.detach()
 
         # ----------------------------------------------------------
-        # IGNORE mask (255) or "masked" semantics
+        # IGNORE MASK: True for valid pixels
         # ----------------------------------------------------------
         if target_int is not None:
-            ignore_mask = (target_int != 255)  # True = valid
+            ignore_mask = (target_int != 255)
         else:
-            # fallback: consider pixels where sum(target)==1 as valid
+            # Fallback: sum of one-hot = 1
             ignore_mask = (target.sum(dim=1) == 1)
 
         ignore_mask_exp = ignore_mask.unsqueeze(1).float()  # (N,1,H,W)
 
-        # Zero-out ignore regions in both pred + target
-        pred = pred * ignore_mask_exp
-        target = target * ignore_mask_exp
+        # ----------------------------------------------------------
+        # ACTIVATION
+        # ----------------------------------------------------------
+        if c == 2:
+            # Binary debris or binary clean-ice case → match author's Sigmoid
+            pred_prob = torch.sigmoid(pred[:, 1:2])  # (N,1,H,W)
+            target_prob = target[:, 1:2]
+            C_eff = 1
+        else:
+            # Multiclass case → Softmax
+            pred_prob = self.act(pred)
+            target_prob = target
+            C_eff = c
+
+        # Mask-out invalid pixels
+        pred_prob = pred_prob * ignore_mask_exp
+        target_prob = target_prob * ignore_mask_exp
 
         # ----------------------------------------------------------
-        # Label smoothing (optional)
+        # LABEL SMOOTHING
         # ----------------------------------------------------------
-        if self.label_smoothing > 0:
-            target = target * (1 - self.label_smoothing) + self.label_smoothing / c
+        if self.label_smoothing > 0 and C_eff > 1:
+            target_prob = target_prob * (1 - self.label_smoothing) + \
+                          self.label_smoothing / C_eff
 
         # ----------------------------------------------------------
-        # DICE LOSS (per class, only foreground classes counted)
+        # DICE LOSS (author-style)
         # ----------------------------------------------------------
-        # Flatten over valid pixels only
-        pred_p = pred.permute(0, 2, 3, 1)   # (N,H,W,C)
-        targ_p = target.permute(0, 2, 3, 1)
+        pred_flat = pred_prob.permute(0, 2, 3, 1)[ignore_mask]   # (M,C_eff)
+        targ_flat = target_prob.permute(0, 2, 3, 1)[ignore_mask] # (M,C_eff)
 
-        valid = ignore_mask  # (N,H,W)
-        pred_sel = pred_p[valid]    # (M,C)
-        targ_sel = targ_p[valid]    # (M,C)
-
-        if pred_sel.numel() == 0:
+        if pred_flat.numel() == 0:
             dice_loss_scalar = torch.tensor(0.0, device=device)
         else:
-            numerator = 2.0 * (pred_sel * targ_sel).sum(dim=0) + self.smooth
-            denominator = pred_sel.sum(dim=0) + targ_sel.sum(dim=0) + self.smooth
-            dice_per_class = 1.0 - numerator / denominator  # (C,)
+            numerator = 2 * (pred_flat * targ_flat).sum(dim=0) + self.smooth
+            denominator = pred_flat.sum(dim=0) + targ_flat.sum(dim=0) + self.smooth
+            dice_per_class = 1 - numerator / denominator  # (C_eff,)
 
-            # Only foreground classes contribute (e.g., CleanIce)
-            class_mask = torch.zeros_like(dice_per_class)
-            for fg_idx in self.foreground_classes:
-                if 0 <= fg_idx < dice_per_class.shape[0]:
-                    class_mask[fg_idx] = 1.0
-
-            dice_loss_scalar = (dice_per_class * class_mask).sum()
+            # Match the author: for binary, only class 1 contributes
+            if C_eff == 1:
+                # Only one channel (class 1), keep as-is
+                dice_loss_scalar = dice_per_class.sum()
+            else:
+                # Multiclass: only include foreground classes
+                class_mask = torch.zeros_like(dice_per_class)
+                for fg_idx in self.foreground_classes:
+                    if 0 <= fg_idx < dice_per_class.shape[0]:
+                        class_mask[fg_idx] = 1.0
+                dice_loss_scalar = (dice_per_class * class_mask).sum()
 
         # ----------------------------------------------------------
-        # BOUNDARY LOSS (BF1), similar to original code
+        # BOUNDARY LOSS (BF1) — identical to original, but masked
         # ----------------------------------------------------------
-        # Original: boundaries from 1 - target / 1 - pred
-        gt_b = F.max_pool2d(
-            1 - target,
-            kernel_size=self.theta0,
-            stride=1,
-            padding=(self.theta0 - 1) // 2,
-        ) - (1 - target)
+        # Compute BF1 on *multichannel* representation
+        if C_eff == 1:
+            pred_b_in = pred_prob
+            targ_b_in = target_prob
+        else:
+            pred_b_in = pred_prob
+            targ_b_in = target_prob
 
-        pred_b = F.max_pool2d(
-            1 - pred,
-            kernel_size=self.theta0,
-            stride=1,
-            padding=(self.theta0 - 1) // 2,
-        ) - (1 - pred)
+        # Boundary maps
+        gt_b = F.max_pool2d(1 - targ_b_in, self.theta0, 1,
+                            (self.theta0 - 1) // 2) - (1 - targ_b_in)
+        pred_b = F.max_pool2d(1 - pred_b_in, self.theta0, 1,
+                              (self.theta0 - 1) // 2) - (1 - pred_b_in)
 
-        gt_b_ext = F.max_pool2d(
-            gt_b,
-            kernel_size=self.theta,
-            stride=1,
-            padding=(self.theta - 1) // 2,
-        )
-        pred_b_ext = F.max_pool2d(
-            pred_b,
-            kernel_size=self.theta,
-            stride=1,
-            padding=(self.theta - 1) // 2,
-        )
+        # Extended boundaries
+        gt_b_ext = F.max_pool2d(gt_b, self.theta, 1,
+                                (self.theta - 1) // 2)
+        pred_b_ext = F.max_pool2d(pred_b, self.theta, 1,
+                                  (self.theta - 1) // 2)
 
-        gt_b = gt_b * ignore_mask_exp
-        pred_b = pred_b * ignore_mask_exp
-        gt_b_ext = gt_b_ext * ignore_mask_exp
+        # Apply mask
+        gt_b      = gt_b * ignore_mask_exp
+        pred_b    = pred_b * ignore_mask_exp
+        gt_b_ext  = gt_b_ext * ignore_mask_exp
         pred_b_ext = pred_b_ext * ignore_mask_exp
 
-        gt_b = gt_b.view(n, c, -1)
-        pred_b = pred_b.view(n, c, -1)
-        gt_b_ext = gt_b_ext.view(n, c, -1)
-        pred_b_ext = pred_b_ext.view(n, c, -1)
+        # Flatten for BF1
+        gt_b      = gt_b.view(n, C_eff, -1)
+        pred_b    = pred_b.view(n, C_eff, -1)
+        gt_b_ext  = gt_b_ext.view(n, C_eff, -1)
+        pred_b_ext= pred_b_ext.view(n, C_eff, -1)
 
-        P = torch.sum(pred_b * gt_b_ext, dim=2) / (torch.sum(pred_b, dim=2) + 1e-7)
-        R = torch.sum(pred_b_ext * gt_b, dim=2) / (torch.sum(gt_b, dim=2) + 1e-7)
+        P = (pred_b * gt_b_ext).sum(dim=2) / (pred_b.sum(dim=2) + 1e-7)
+        R = (pred_b_ext * gt_b).sum(dim=2) / (gt_b.sum(dim=2) + 1e-7)
 
         BF1 = 2 * P * R / (P + R + 1e-7)
         boundary_loss = torch.mean(1 - BF1)

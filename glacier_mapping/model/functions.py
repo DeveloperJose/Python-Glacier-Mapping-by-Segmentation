@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Training, validation, logging, and full-tile evaluation helpers.
+Unified visualization pipeline matching unet_predict + visualize.py
 """
 
 import datetime
@@ -14,38 +15,30 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from torchvision.utils import make_grid
 from tqdm import tqdm
 
 import glacier_mapping.model.losses as model_losses
 import glacier_mapping.model.metrics as model_metrics
+
+from glacier_mapping.model.visualize import (
+    build_cmap,
+    make_rgb_preview,
+    label_to_color,
+    make_confidence_map,
+    make_entropy_map,
+    make_tp_fp_fn_masks,
+    make_eight_panel,
+)
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
 
 
 # ============================================================
-# ==================== GLOBAL COLOR CONSTANTS =================
+# Utility logging
 # ============================================================
-
-COLOR_BG = np.array([181, 101, 29], dtype=np.uint8)   # Brown
-COLOR_CI = np.array([135, 206, 250], dtype=np.uint8)  # Light Blue
-COLOR_DEB = np.array([255, 0, 0], dtype=np.uint8)     # Red
-COLOR_IGNORE = np.array([0, 0, 0], dtype=np.uint8)    # Black
-
-GLOBAL_CMAP = {
-    0: COLOR_BG,
-    1: COLOR_CI,
-    2: COLOR_DEB,
-    255: COLOR_IGNORE,
-}
-
-
-# -----------------------------------------
-# Logging helper with timestamp
-# -----------------------------------------
 def log(level, message):
-    message = "{}\t{}\t{}".format(
+    message = "{}\t{}\\t{}".format(
         datetime.datetime.now().strftime("%d-%m-%Y, %H:%M:%S"),
         logging._levelToName[level],
         message,
@@ -55,15 +48,14 @@ def log(level, message):
 
 
 # ============================================================
-# =============== TRAINING + VALIDATION =======================
+# TRAINING
 # ============================================================
-
 def train_epoch(epoch, loader, frame):
-    metrics = frame.metrics_opts.metrics
+    metric_names = frame.metrics_opts.metrics
     n_classes = frame.num_classes
     threshold = frame.metrics_opts.threshold
 
-    loss = 0.0
+    loss_sum = 0.0
     tp = torch.zeros(n_classes)
     fp = torch.zeros(n_classes)
     fn = torch.zeros(n_classes)
@@ -72,39 +64,35 @@ def train_epoch(epoch, loader, frame):
 
     for i, (x, y_onehot, y_int) in enumerate(iterator):
         frame.zero_grad()
-
         y_hat, batch_loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
         frame.step()
 
         batch_loss_f = float(batch_loss.detach())
-        loss += batch_loss_f
+        loss_sum += batch_loss_f
 
         y_hat = frame.act(y_hat)
-
         ignore = (y_int.squeeze(-1) == 255).cpu().numpy()
         _tp, _fp, _fn = frame.metrics(y_hat, y_onehot, ignore, threshold)
+
         tp += _tp
         fp += _fp
         fn += _fn
 
         iterator.set_description(
             f"Train, Epoch={epoch}, Step={i}, "
-            f"Loss={batch_loss_f:.3f}, Avg={loss/(i+1):.3f}"
+            f"Loss={batch_loss_f:.3f}, Avg={loss_sum/(i+1):.3f}"
         )
 
-    metrics = get_metrics(tp, fp, fn, metrics)
-    return loss / (i + 1), metrics, frame.get_loss_alpha()
+    avg_loss = loss_sum / (i + 1)
+    return avg_loss, get_metrics(tp, fp, fn, metric_names), frame.get_loss_alpha()
 
 
+# ============================================================
+# VALIDATION
+# ============================================================
 def validate(epoch, loader, frame, test=False):
-    """
-    Validation / test pass with IGNORE-AWARE metrics.
-
-    - Skips fully ignored patches (all pixels 255)
-    - Computes metrics only on valid (non-255) pixels
-    """
-    metrics = frame.metrics_opts.metrics
     n_classes = frame.num_classes
+    metric_names = frame.metrics_opts.metrics
 
     total_loss = 0.0
     count_batches = 0
@@ -116,11 +104,11 @@ def validate(epoch, loader, frame, test=False):
     desc = "Test Iter" if test else "Val Iter"
     iterator = tqdm(loader, desc=desc)
 
-    def channel_first(x):  # NHWC → NCHW
+    def channel_first(x):
+        # NHWC -> NCHW
         return x.permute(0, 3, 1, 2)
 
     for i, (x, y_onehot, y_int) in enumerate(iterator):
-        # Forward
         y_hat = frame.infer(x)
         batch_loss = frame.calc_loss(
             channel_first(y_hat),
@@ -129,16 +117,12 @@ def validate(epoch, loader, frame, test=False):
         )
         batch_loss_f = float(batch_loss.detach())
 
-        # Apply activation
         y_hat = frame.act(y_hat)
 
         ignore = (y_int.squeeze(-1) == 255).cpu()  # (B,H,W) bool
-
-        # Skip if everything is ignored
         if ignore.all():
             continue
 
-        # From one-hot to class index
         y_true_cls = torch.argmax(y_onehot, dim=-1).cpu()   # (B,H,W)
         y_pred_cls = torch.argmax(y_hat.cpu(), dim=-1)      # (B,H,W)
 
@@ -149,9 +133,7 @@ def validate(epoch, loader, frame, test=False):
         for c in range(n_classes):
             pred_c = (y_pred_valid == c).long()
             true_c = (y_true_valid == c).long()
-
             tp_c, fp_c, fn_c = model_metrics.tp_fp_fn(pred_c, true_c)
-
             tp[c] += tp_c
             fp[c] += fp_c
             fn[c] += fn_c
@@ -160,26 +142,25 @@ def validate(epoch, loader, frame, test=False):
         count_batches += 1
 
         iterator.set_description(
-            f"{desc}, Epoch={epoch}, Step={i}, "
-            f"Loss={batch_loss_f:.3f}, Avg={total_loss/max(count_batches,1):.3f}"
+            f"{desc}, Epoch={epoch}, Step={i}, Loss={batch_loss_f:.3f}, "
+            f"Avg={total_loss/max(count_batches,1):.3f}"
         )
 
     if count_batches == 0:
-        print(f"[WARN] {desc}: All patches were ignored (255). Returning zeros.")
-        return 0.0, get_metrics(tp, fp, fn, metrics)
+        print(f"[WARN] {desc}: all patches ignored.")
+        return 0.0, get_metrics(tp, fp, fn, metric_names)
 
     avg_loss = total_loss / count_batches
 
     if not test:
         frame.val_operations(avg_loss)
 
-    return avg_loss, get_metrics(tp, fp, fn, metrics)
+    return avg_loss, get_metrics(tp, fp, fn, metric_names)
 
 
 # ============================================================
-# =====================  LOG METRICS  =========================
+# METRIC LOGGING
 # ============================================================
-
 def log_metrics(writer, frame, metrics, epoch, stage):
     for key, vals in metrics.items():
         for name, metric in zip(frame.mask_names, vals):
@@ -187,85 +168,121 @@ def log_metrics(writer, frame, metrics, epoch, stage):
 
 
 # ============================================================
-# =====================  LOG IMAGES  ==========================
+# TENSORBOARD IMAGE LOGGING (8-PANEL)
 # ============================================================
-
 def log_images(writer, frame, batch, epoch, stage, normalize):
     """
-    Logs slice-level visualization:
-      - Input x (once)
-      - GT mask
-      - Predicted mask
-      - Side-by-side GT vs Pred
-      - Overlay (input + pred)
+    Logs the SAME 8-panel composite used in predictor:
+
+        TIFF | GT | PRED | CONF
+        TP    | FP | FN   | ENTROPY
+
+    Now includes a metrics header (precision/recall/IoU).
     """
-    log_once = (epoch == 1)
-    normalize_name = frame.loader_opts.normalize
 
+    # ------------------------------
+    # 1. Fetch a batch sample
+    # ------------------------------
     x, y_onehot, y_int = next(iter(batch))
+
+    x_np = x.cpu().numpy()[0]
     y_hat = frame.act(frame.infer(x))
+    yhat_np = y_hat.cpu().numpy()[0]
 
-    x_np = x.cpu().numpy()
-    y_np = y_onehot.cpu().numpy()
-    yhat_np = y_hat.cpu().numpy()
-    yint_np = y_int.cpu().numpy()
+    y_gt = torch.argmax(y_onehot, dim=-1).cpu().numpy()[0]
+    y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
 
-    y_cls = np.argmax(y_np, axis=3)
-    yhat_cls = np.argmax(yhat_np, axis=3)
+    ignore_mask = (y_int.cpu().numpy()[0] == 255)
+    y_gt[ignore_mask] = 255
+    y_pred[ignore_mask] = 255
 
-    ignore_mask = (yint_np == 255).squeeze(-1)
-    y_cls[ignore_mask] = 255
-    yhat_cls[ignore_mask] = 255
+    # ------------------------------
+    # 2. Categorical styling
+    # ------------------------------
+    num_classes = frame.num_classes
+    is_binary = frame.is_binary
+    classname = frame.mask_names[-1] if is_binary else None
+    cmap = build_cmap(num_classes, is_binary, classname)
 
-    cmap = GLOBAL_CMAP
+    x_rgb = make_rgb_preview(x_np)
+    gt_rgb = label_to_color(y_gt, cmap)
+    pr_rgb = label_to_color(y_pred, cmap)
 
-    B, H, W = y_cls.shape
-    y_rgb = np.zeros((B, H, W, 3), dtype=np.uint8)
-    yhat_rgb = np.zeros((B, H, W, 3), dtype=np.uint8)
-
-    for cls, col in cmap.items():
-        y_rgb[y_cls == cls] = col
-        yhat_rgb[yhat_cls == cls] = col
-
-    if normalize_name == "mean-std":
-        mean, std = normalize
-        x_np = (x_np * std) + mean
+    # ------------------------------
+    # 3. Confidence & Entropy maps
+    # ------------------------------
+    if is_binary:
+        conf = yhat_np[..., 1]
     else:
-        x_np = np.clip(x_np, 0, 1)
+        conf = np.max(yhat_np, axis=-1)
 
-    x_np = x_np[..., [2, 1, 0]]  # BGR→RGB convention
+    conf_rgb = make_confidence_map(conf, invalid_mask=ignore_mask)
+    entropy_rgb = make_entropy_map(yhat_np, invalid_mask=ignore_mask)
 
-    x_t = torch.tensor(x_np).float()
-    y_t = torch.tensor(y_rgb).float() / 255.0
-    yhat_t = torch.tensor(yhat_rgb).float() / 255.0
+    # ------------------------------
+    # 4. TP / FP / FN (non-background)
+    # ------------------------------
+    tp_mask = (y_pred == y_gt) & (~ignore_mask) & (y_gt != 0)
+    fp_mask = (y_pred != y_gt) & (~ignore_mask) & (y_pred != 0)
+    fn_mask = (y_pred != y_gt) & (~ignore_mask) & (y_gt != 0)
 
-    # Ensure NHWC before concat
-    if y_t.dim() == 4 and y_t.shape[1] == 3:
-        y_t = y_t.permute(0, 2, 3, 1)
-        yhat_t = yhat_t.permute(0, 2, 3, 1)
+    tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-    side_by_side = torch.cat([y_t, yhat_t], dim=2)
-    overlay = (0.6 * (x_t / 255.0) + 0.4 * yhat_t).clamp(0, 1)
+    # ------------------------------
+    # 5. Compute metrics for header
+    # ------------------------------
+    metric_names = frame.metrics_opts.metrics
+    metric_string_parts = []
 
-    pm = lambda t: t.permute(0, 3, 1, 2)
+    # Compute per-class stats
+    for ci, cname in enumerate(frame.mask_names):
+        pred_c = (y_pred == ci).astype(np.uint8)
+        true_c = (y_gt == ci).astype(np.uint8)
 
-    if log_once:
-        writer.add_image(f"{stage}/x", make_grid(pm(x_t / 255.0)), epoch)
-        writer.add_image(f"{stage}/y_gt", make_grid(pm(y_t)), epoch)
+        tp, fp, fn = model_metrics.tp_fp_fn(
+            torch.from_numpy(pred_c),
+            torch.from_numpy(true_c)
+        )
 
-    writer.add_image(f"{stage}/y_pred", make_grid(pm(yhat_t)), epoch)
-    writer.add_image(f"{stage}/gt_vs_pred", make_grid(pm(side_by_side)), epoch)
-    writer.add_image(f"{stage}/overlay", make_grid(pm(overlay)), epoch)
+        P = model_metrics.precision(tp, fp, fn)
+        R = model_metrics.recall(tp, fp, fn)
+        I = model_metrics.IoU(tp, fp, fn)
 
+        metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
+
+    metrics_text = " | ".join(metric_string_parts)
+
+    # ------------------------------
+    # 6. Assemble 8-panel composite
+    # ------------------------------
+    composite = make_eight_panel(
+        x_rgb=x_rgb,
+        gt_rgb=gt_rgb,
+        pr_rgb=pr_rgb,
+        conf_rgb=conf_rgb,
+        tp_rgb=tp_rgb,
+        fp_rgb=fp_rgb,
+        fn_rgb=fn_rgb,
+        entropy_rgb=entropy_rgb,
+        metrics_text=metrics_text,
+    )
+
+    # ------------------------------
+    # 7. Log to TensorBoard
+    # ------------------------------
+    img_tensor = torch.tensor(composite).permute(2, 0, 1).float() / 255.0
+    writer.add_image(f"{stage}/visualization", img_tensor, epoch)
 
 # ============================================================
-# ====================  FULL TILE EVAL  =======================
+# FULL-TILE EVALUATION (consistent with predictor)
 # ============================================================
-
 def evaluate_full_test_tiles(frame, writer, epoch, output_dir):
     """
-    Full-image evaluation with TensorBoard visualization.
+    Produces PNGs and TensorBoard logs using the SAME unified 8-panel layout.
     """
+
+    import cv2
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -273,48 +290,52 @@ def evaluate_full_test_tiles(frame, writer, epoch, output_dir):
     test_tiles = sorted((data_dir / "test").glob("tiff*"))
 
     n_classes = frame.num_classes
-    mask_names = frame.mask_names
+    is_binary = frame.is_binary
+    classname = frame.mask_names[-1] if is_binary else None
     threshold = frame.metrics_opts.threshold
 
+    rows = []
     tp_sum = np.zeros(n_classes)
     fp_sum = np.zeros(n_classes)
     fn_sum = np.zeros(n_classes)
 
-    rows = []
-    print(f"[Full Eval] Processing {len(test_tiles)} full tiles...")
-
+    # ------------------------------
+    # LOOP THROUGH TEST TILES
+    # ------------------------------
     for x_path in tqdm(test_tiles):
         x = np.load(x_path)
         y_pred, invalid_mask = frame.predict_slice(x, threshold)
 
         y_true_raw = np.load(
-            x_path.parent / x_path.name.replace("tiff", "mask")
+            x_path.with_name(x_path.name.replace("tiff", "mask"))
         ).astype(np.uint8)
 
-        ignore_mask = (y_true_raw == 255)
+        ignore = (y_true_raw == 255)
         if invalid_mask is not None:
-            ignore_mask |= invalid_mask
+            ignore |= invalid_mask
 
+        # Prepare GT for metrics (shift by +1 for classes)
         y_true = y_true_raw.copy()
-        y_true[ignore_mask] = 0
-        valid = ~ignore_mask
-
+        y_true[ignore] = 0
+        valid = ~ignore
         y_true[valid] += 1
 
         y_pred_valid = y_pred[valid]
         y_true_valid = y_true[valid]
 
-        row = [str(x_path.name)]
-
+        # ------------------------------
+        # Per-class metrics
+        # ------------------------------
+        row = [x_path.name]
         for ci in range(n_classes):
             label = ci + 1
             p = (y_pred_valid == label).astype(np.uint8)
             t = (y_true_valid == label).astype(np.uint8)
 
             tp, fp, fn = model_metrics.tp_fp_fn(
-                torch.from_numpy(p), torch.from_numpy(t)
+                torch.from_numpy(p),
+                torch.from_numpy(t),
             )
-
             tp_sum[ci] += tp
             fp_sum[ci] += fp
             fn_sum[ci] += fn
@@ -324,93 +345,144 @@ def evaluate_full_test_tiles(frame, writer, epoch, output_dir):
                 model_metrics.recall(tp, fp, fn),
                 model_metrics.IoU(tp, fp, fn),
             ]
-
         rows.append(row)
 
-    # ---- TOTAL ROW ----
-    total = ["Total"]
-    totals_per_class = []
+    # ------------------------------
+    # Write CSV
+    # ------------------------------
+    cols = ["tile"]
+    for cname in frame.mask_names:
+        cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
 
+    pd.DataFrame(rows, columns=cols).to_csv(
+        output_dir / f"full_eval_epoch{epoch}.csv",
+        index=False,
+    )
+
+    # ------------------------------
+    # Log summary metrics
+    # ------------------------------
+    totals = []
     for ci in range(n_classes):
         tp, fp, fn = tp_sum[ci], fp_sum[ci], fn_sum[ci]
         prec = model_metrics.precision(tp, fp, fn)
         rec = model_metrics.recall(tp, fp, fn)
         iou = model_metrics.IoU(tp, fp, fn)
+        totals.append((prec, rec, iou))
 
-        total += [prec, rec, iou]
-        totals_per_class.append((prec, rec, iou))
-
-    rows.append(total)
-
-    print(f"\n===== Full-Tile Test Metrics (Epoch {epoch}) =====")
-    print("{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU"))
-    print("-" * 48)
-    for cname, (prec, rec, iou) in zip(mask_names, totals_per_class):
-        print("{:<12} {:<10.4f} {:<10.4f} {:<10.4f}".format(cname, prec, rec, iou))
-    print("-" * 48 + "\n")
-
-    cols = ["tile"]
-    for cname in mask_names:
-        cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
-
-    pd.DataFrame(rows, columns=cols).to_csv(
-        output_dir / f"full_eval_epoch{epoch}.csv", index=False
-    )
-
-    for (prec, rec, iou), cname in zip(totals_per_class, mask_names):
+    for (prec, rec, iou), cname in zip(totals, frame.mask_names):
         writer.add_scalar(f"fulltest_precision/{cname}", prec, epoch)
         writer.add_scalar(f"fulltest_recall/{cname}", rec, epoch)
         writer.add_scalar(f"fulltest_iou/{cname}", iou, epoch)
 
-    # Visualization: a few samples
-    try:
-        NUM_SAMPLES = min(5, len(test_tiles))
-        for idx, sample_path in enumerate(test_tiles[:NUM_SAMPLES]):
-            x_full = np.load(sample_path)
-            x_rgb = x_full[..., [2, 1, 0]].astype(np.float32) / 255.0
+    # ------------------------------
+    # Full-tile visualization (first 4 tiles)
+    # ------------------------------
+    cmap = build_cmap(n_classes, is_binary, classname)
+    NUM_SAMPLES = min(4, len(test_tiles))
 
-            y_pred, _ = frame.predict_slice(x_full, threshold)
-            y_gt = np.load(
-                sample_path.parent / sample_path.name.replace("tiff", "mask")
-            ).astype(np.uint8)
+    for idx, x_path in enumerate(test_tiles[:NUM_SAMPLES]):
+        x_full = np.load(x_path)
+        H, W, _ = x_full.shape
 
-            pred_rgb = np.zeros((*y_pred.shape, 3), dtype=np.uint8)
-            gt_rgb = np.zeros((*y_gt.shape, 3), dtype=np.uint8)
+        y_pred, invalid_mask = frame.predict_slice(x_full, threshold)
+        y_true_raw = np.load(
+            x_path.with_name(x_path.name.replace("tiff", "mask"))
+        ).astype(np.uint8)
 
-            for k, col in GLOBAL_CMAP.items():
-                pred_rgb[y_pred == k] = col
-                gt_rgb[y_gt == k] = col
+        ignore = (y_true_raw == 255)
+        if invalid_mask is not None:
+            ignore |= invalid_mask
 
-            x_t = torch.tensor(x_rgb).permute(2, 0, 1).float()
-            ygt_t = torch.tensor(gt_rgb).permute(2, 0, 1).float() / 255.0
-            ypred_t = torch.tensor(pred_rgb).permute(2, 0, 1).float() / 255.0
+        # Visualization label maps (0/1/2/255)
+        y_gt_vis = y_true_raw.copy()
+        y_gt_vis[ignore] = 255
 
-            side_by_side = torch.cat([ygt_t, ypred_t], dim=2)
-            overlay = (0.6 * x_t + 0.4 * ypred_t).clamp(0, 1)
+        y_pred_vis = y_pred.copy()
+        y_pred_vis[ignore] = 255
 
-            base = f"fulltest/sample_{idx}"
-            writer.add_image(f"{base}_input", x_t, epoch)
-            writer.add_image(f"{base}_gt", ygt_t, epoch)
-            writer.add_image(f"{base}_pred", ypred_t, epoch)
-            writer.add_image(f"{base}_gt_vs_pred", side_by_side, epoch)
-            writer.add_image(f"{base}_overlay", overlay, epoch)
+        # Convert to RGB
+        x_rgb = make_rgb_preview(x_full)
+        gt_rgb = label_to_color(y_gt_vis, cmap)
+        pr_rgb = label_to_color(y_pred_vis, cmap)
 
-    except Exception as e:
-        print(f"[Full Eval] Visualization error: {e}")
+        # Confidence & entropy
+        yhat_full = frame.act(
+            frame.infer(
+                torch.from_numpy(
+                    np.expand_dims(
+                        x_full[:, :, frame.loader_opts.use_channels], 0
+                    )
+                ).float()
+            )
+        ).cpu().numpy()[0]
+
+        if is_binary:
+            conf = yhat_full[..., 1]
+        else:
+            conf = np.max(yhat_full, axis=-1)
+
+        conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
+        entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
+
+        # TP / FP / FN (non-background)
+        tp_mask = (y_pred == y_true_raw) & (~ignore) & (y_true_raw != 0)
+        fp_mask = (y_pred != y_true_raw) & (~ignore) & (y_pred != 0)
+        fn_mask = (y_pred != y_true_raw) & (~ignore) & (y_true_raw != 0)
+
+        tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
+
+        # ------ Compute metrics per tile ------
+        metric_string_parts = []
+        for ci, cname in enumerate(frame.mask_names):
+            pred_c = (y_pred == ci).astype(np.uint8)
+            true_c = (y_true_raw == ci).astype(np.uint8)
+
+            tp, fp, fn = model_metrics.tp_fp_fn(
+                torch.from_numpy(pred_c),
+                torch.from_numpy(true_c),
+            )
+
+            P = model_metrics.precision(tp, fp, fn)
+            R = model_metrics.recall(tp, fp, fn)
+            I = model_metrics.IoU(tp, fp, fn)
+
+            metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
+
+        metrics_text = " | ".join(metric_string_parts)
+
+        # ------ Build panel ------
+        composite = make_eight_panel(
+            x_rgb=x_rgb,
+            gt_rgb=gt_rgb,
+            pr_rgb=pr_rgb,
+            conf_rgb=conf_rgb,
+            tp_rgb=tp_rgb,
+            fp_rgb=fp_rgb,
+            fn_rgb=fn_rgb,
+            entropy_rgb=entropy_rgb,
+            metrics_text=metrics_text,
+        )
+
+        out_path = output_dir / f"fulltile_{idx}_epoch{epoch}.png"
+        cv2.imwrite(str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+
+        writer.add_image(
+            f"fulltest/fulltile_{idx}",
+            torch.tensor(composite).permute(2, 0, 1).float() / 255.0,
+            epoch,
+        )
 
 
 # ============================================================
-# ==================== MISC HELPERS ==========================
+# Loss, metrics, utilities
 # ============================================================
-
 def get_loss(outchannels, opts=None):
     """
     Build loss function.
-
     For opts.name == "custom":
       - multi-class compatible
-      - but for binary (2 channels) it only uses foreground channel (index 1),
-        mimicking original CleanIce training.
+      - for binary (2 channels) only uses foreground channel 1.
     """
     if opts is None:
         return model_losses.customloss()
@@ -419,13 +491,7 @@ def get_loss(outchannels, opts=None):
     name = opts.name
 
     if name == "custom":
-        # For binary output (BG vs FG), only channel 1 is foreground
-        if outchannels == 2:
-            fg_classes = [1]
-        else:
-            # For multi-class, treat everything except background (0) as foreground
-            fg_classes = list(range(1, outchannels))
-
+        fg_classes = [1] if outchannels == 2 else list(range(1, outchannels))
         return model_losses.customloss(
             act=torch.nn.Softmax(dim=1),
             smooth=1.0,
@@ -433,14 +499,13 @@ def get_loss(outchannels, opts=None):
             foreground_classes=fg_classes,
         )
 
-    raise ValueError(f"Loss function not recognized: {name}")
+    raise ValueError(f"Loss not recognized: {name}")
 
 
 def get_metrics(tp, fp, fn, metric_names):
     metrics = {}
     for name in metric_names:
-        fun = getattr(model_metrics, name)
-        metrics[name] = fun(tp, fp, fn)
+        metrics[name] = getattr(model_metrics, name)(tp, fp, fn)
     return metrics
 
 
@@ -450,9 +515,9 @@ def print_conf(conf):
 
 
 def print_metrics(frame, train_metric, val_metric, test_metric):
-    def clean(mdict):
+    def clean(metric_dict):
         return {
-            cname: {m: float(mdict[m][i]) for m in frame.metrics_opts.metrics}
+            cname: {m: float(metric_dict[m][i]) for m in frame.metrics_opts.metrics}
             for i, cname in enumerate(frame.mask_names)
         }
 
@@ -481,11 +546,9 @@ def compute_dataset_stats(name, loader):
 
     for x, y_onehot, y_int in loader:
         y = y_int.squeeze()
-
         unique, counts = np.unique(y.cpu().numpy(), return_counts=True)
         for cls, cnt in zip(unique.tolist(), counts.tolist()):
             total_counts[int(cls)] += int(cnt)
-
         total_pixels += y.numel()
         num_images += y.shape[0]
 
@@ -520,10 +583,8 @@ def print_stats_table(results):
 
         print(f"{'Class':<14}{'Count':>14}{'Percent':>12}")
         print("-" * 42)
-
         for cls, info in res["stats"].items():
             print(f"{cls:<14}{info['count']:>14}{info['percent']:>11.2f}%")
-
         print("")
 
 
@@ -537,12 +598,12 @@ def log_stats_tensorboard(writer: SummaryWriter, results):
 
 
 def print_epoch_summary(epoch, train_metric, val_metric, test_metric, mask_names):
-    def fmt(val):
-        if isinstance(val, torch.Tensor):
-            val = val.item()
-        if isinstance(val, (float, np.floating)):
-            return f"{val:.4f}"
-        return str(val)
+    def fmt(v):
+        if isinstance(v, torch.Tensor):
+            v = v.item()
+        if isinstance(v, (float, np.floating)):
+            return f"{v:.4f}"
+        return str(v)
 
     print(f"\n===== Epoch {epoch} Summary =====")
     print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
@@ -564,6 +625,5 @@ def print_epoch_summary(epoch, train_metric, val_metric, test_metric, mask_names
                 fmt(metrics["IoU"][i]),
             ))
         print("-" * 25)
-
     print("")
 

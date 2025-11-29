@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Framework: wraps model, loss, optimizer, scheduler, and training utilities.
+
+Supports:
+- Construction from a YAML config: Framework.from_config(path, device=None)
+- Construction from a checkpoint: Framework.from_checkpoint(path, device=None, ...)
+- Schedulers configured via scheduler_opts in the YAML:
+    name: OneCycleLR | ReduceLROnPlateau | CosineAnnealingLR | None
+"""
+
 import math
 import os
 from pathlib import Path
@@ -5,9 +17,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from addict import Dict
 from torch.cuda.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau, CosineAnnealingLR
 from tqdm import tqdm
 
 import glacier_mapping.model.functions as fn
@@ -18,8 +31,144 @@ from glacier_mapping.model.unet import Unet
 class Framework:
     """
     Wraps model, loss, optimizer, scheduler, and all training utilities.
+
+    Typical use:
+      frame = Framework.from_config("conf/train.yaml", device="cuda:0")
+      # or
+      frame = Framework.from_checkpoint("runs/.../models/model_best.pt", device=0)
     """
 
+    # ------------------------------------------------------------------
+    # Preferred constructors
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_config(cls, config_path, device=None):
+        """
+        Build a Framework from a YAML config file.
+
+        device:
+          - if not None: overrides config gpu_rank
+          - if None: uses conf.gpu_rank or conf.training_opts.gpu_rank if present
+        """
+        config_path = Path(config_path)
+        with open(config_path, "r") as f:
+            raw = yaml.safe_load(f)
+        conf = Dict(raw)
+
+        loss_opts = conf.get("loss_opts", None)
+        loader_opts = conf.loader_opts
+        model_opts = conf.model_opts
+        optimizer_opts = conf.get("optim_opts", conf.get("optimizer_opts", None))
+        reg_opts = conf.get("reg_opts", None)
+        metrics_opts = conf.get("metrics_opts", None)
+        scheduler_opts = conf.get("scheduler_opts", None)
+        training_opts = conf.get("training_opts", None)
+
+        # Resolve device
+        effective_device = device
+        if effective_device is None:
+            gpu_rank = conf.get("gpu_rank", None)
+            if gpu_rank is None and training_opts is not None and hasattr(
+                training_opts, "gpu_rank"
+            ):
+                gpu_rank = training_opts.gpu_rank
+            if gpu_rank is not None:
+                effective_device = int(gpu_rank)
+            else:
+                effective_device = "cpu"
+
+        frame = cls(
+            loss_opts=loss_opts,
+            loader_opts=loader_opts,
+            model_opts=model_opts,
+            optimizer_opts=optimizer_opts,
+            reg_opts=reg_opts,
+            metrics_opts=metrics_opts,
+            training_opts=training_opts,
+            scheduler_opts=scheduler_opts,
+            device=effective_device,
+        )
+        # Keep full config for reproducibility
+        frame.conf = conf
+        return frame
+
+    @staticmethod
+    def from_checkpoint(
+        checkpoint_path: Path,
+        device=None,
+        new_data_path=None,
+        testing=False,
+        override={},
+    ):
+        """
+        Load a Framework from a checkpoint file.
+
+        device: optional override, same semantics as __init__.
+        new_data_path: optional new processed_dir for loader_opts.
+        override: dict of top-level config pieces to override (loader_opts, etc.).
+        """
+        checkpoint_path = Path(checkpoint_path)
+        assert checkpoint_path.exists(), "checkpoint_path does not exist"
+
+        with torch.serialization.safe_globals([Dict]):
+            if torch.cuda.is_available() and device not in ["cpu", torch.device("cpu")]:
+                state = torch.load(checkpoint_path)
+            else:
+                state = torch.load(checkpoint_path, map_location="cpu")
+
+        # Old checkpoints may not have 'conf' or 'scheduler_opts'
+        conf = state.get("conf", None)
+        if conf is not None and not isinstance(conf, Dict):
+            conf = Dict(conf)
+
+        if testing:
+            state["model_opts"].args.dropout = 1e-8
+
+        if len(override) > 0:
+            # Override top-level entries (e.g., loader_opts, training_opts, etc.)
+            for k, v in override.items():
+                state[k] = v
+
+        if new_data_path is not None:
+            new_data_path = Path(new_data_path)
+            state["loader_opts"].processed_dir = new_data_path
+
+        loss_opts = state.get("loss_opts", None)
+        loader_opts = state["loader_opts"]
+        model_opts = state["model_opts"]
+        optimizer_opts = state["optimizer_opts"]
+        reg_opts = state.get("reg_opts", None)
+        metrics_opts = state["metrics_opts"]
+        training_opts = state.get("training_opts", None)
+        scheduler_opts = state.get("scheduler_opts", None)
+
+        frame = Framework(
+            loss_opts=loss_opts,
+            loader_opts=loader_opts,
+            model_opts=model_opts,
+            optimizer_opts=optimizer_opts,
+            reg_opts=reg_opts,
+            metrics_opts=metrics_opts,
+            training_opts=training_opts,
+            scheduler_opts=scheduler_opts,
+            device=device,
+        )
+        frame.model.load_state_dict(state["state_dict"])
+        frame.optimizer.load_state_dict(state["optimizer_state_dict"])
+
+        if "sigma1" in state.keys():  # older checkpoints
+            frame.sigma_list = [state["sigma1"], state["sigma2"]]
+        else:
+            frame.sigma_list = state["sigma_list"]
+
+        if conf is not None:
+            frame.conf = conf
+
+        return frame
+
+    # ------------------------------------------------------------------
+    # Core initializer (usually not called directly)
+    # ------------------------------------------------------------------
     def __init__(
         self,
         loss_opts=None,
@@ -29,28 +178,23 @@ class Framework:
         reg_opts=None,
         metrics_opts=None,
         training_opts=None,
+        scheduler_opts=None,
         device=None,
     ):
         self.scaler = GradScaler()
+        self.training_opts = training_opts
+        self.scheduler_opts = scheduler_opts
 
         # -----------------------------------------
         # Device
         # -----------------------------------------
-        if isinstance(device, int):
-            self.device = torch.device(
-                f"cuda:{device}" if torch.cuda.is_available() else "cpu"
-            )
-            if self.device.type == "cuda":
-                torch.cuda.set_device(self.device)
-                print(f"Using GPU {self.device}")
-        else:
-            self.device = torch.device("cpu")
+        self.device = self._resolve_device(device)
 
         # -----------------------------------------
         # Data-related options
         # -----------------------------------------
         self.loader_opts = loader_opts
-        self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
+        self.use_physics = getattr(loader_opts, "physics_channel", None) in loader_opts.use_channels
         self.use_channels = loader_opts.use_channels
         output_classes = loader_opts.output_classes
 
@@ -97,7 +241,7 @@ class Framework:
         # -----------------------------------------
         self.optimizer_opts = optimizer_opts
         if optimizer_opts is None:
-            optimizer_opts = {"name": "Adam", "args": {"lr": 0.001}}
+            optimizer_opts = Dict({"name": "Adam", "args": {"lr": 0.001}})
 
         opt_args = dict(optimizer_opts["args"])  # shallow copy
         if "lr" in opt_args:
@@ -118,41 +262,11 @@ class Framework:
         self.optimizer = optimizer_def(_optimizer_params)
 
         # -----------------------------------------
-        # Scheduler (OneCycleLR, per-batch)
+        # Scheduler
         # -----------------------------------------
-        self.training_opts = training_opts
-        if training_opts is not None and hasattr(training_opts, "epochs"):
-            print("Using scheduler (OneCycleLR)")
-            num_samples = len(self.df)
-            batch_size = self.loader_opts.batch_size
-            steps_per_epoch = math.ceil(num_samples / batch_size)
-
-            # Debris Ice Model
-            self.lrscheduler = OneCycleLR(
-                self.optimizer,
-                    max_lr=float(opt_args["lr"]) * 1.5,   # gentler peak
-                    steps_per_epoch=steps_per_epoch,
-                    epochs=training_opts.epochs,
-                    pct_start=0.4,                        # longer warmup, prevents collapse
-                    anneal_strategy="cos",
-                    div_factor=10,                        # smaller initial jump
-                    final_div_factor=500,                 # gentler decay
-                )
-
-            # CleanIce Model
-            # max_lr chosen slightly above base lr to emulate warmup
-            # self.lrscheduler = OneCycleLR(
-            #     self.optimizer,
-                # max_lr=float(opt_args["lr"]) * 2.0,
-                # steps_per_epoch=steps_per_epoch,
-                # epochs=training_opts.epochs,
-                # pct_start=0.2,
-                # anneal_strategy="cos",
-                # div_factor=20,
-                # final_div_factor=1e3,
-            # )
-        else:
-            self.lrscheduler = None
+        self.lrscheduler = None
+        self.scheduler_type = None
+        self._init_scheduler(opt_args)
 
         # -----------------------------------------
         # Regularization & Metrics
@@ -161,7 +275,117 @@ class Framework:
         self.metrics_opts = metrics_opts
 
     # ============================================================
-    # =====================  TRAINING OPS  =======================
+    # =====================  INTERNAL HELPERS  ====================
+    # ============================================================
+
+    def _resolve_device(self, device):
+        """
+        Resolve device considering:
+        - explicit device argument (int, str, torch.device)
+        - training_opts.gpu_rank if available
+        """
+        # explicit torch.device
+        if isinstance(device, torch.device):
+            d = device
+        elif isinstance(device, str):
+            if device.startswith("cuda") and torch.cuda.is_available():
+                d = torch.device(device)
+            else:
+                d = torch.device("cpu")
+        elif isinstance(device, int):
+            if torch.cuda.is_available():
+                d = torch.device(f"cuda:{device}")
+                torch.cuda.set_device(d)
+            else:
+                d = torch.device("cpu")
+        else:
+            # No explicit device: try training_opts.gpu_rank
+            if self.training_opts is not None and hasattr(self.training_opts, "gpu_rank"):
+                gpu_rank = int(self.training_opts.gpu_rank)
+                if torch.cuda.is_available():
+                    d = torch.device(f"cuda:{gpu_rank}")
+                    torch.cuda.set_device(d)
+                else:
+                    d = torch.device("cpu")
+            else:
+                d = torch.device("cpu")
+
+        if d.type == "cuda":
+            print(f"Using GPU {d}")
+        else:
+            print("Using CPU")
+
+        return d
+
+    def _init_scheduler(self, opt_args):
+        """
+        Initialize scheduler based on scheduler_opts, or fall back to
+        the old OneCycleLR default if scheduler_opts is None but
+        training_opts is provided.
+        """
+        if self.training_opts is None:
+            self.lrscheduler = None
+            self.scheduler_type = None
+            return
+
+        # Compute steps_per_epoch for schedulers that need it
+        num_samples = len(self.df)
+        batch_size = self.loader_opts.batch_size
+        steps_per_epoch = max(1, math.ceil(num_samples / batch_size))
+
+        sch = self.scheduler_opts
+        if sch is not None:
+            name = sch.get("name", None)
+            if name in [None, "None"]:
+                self.lrscheduler = None
+                self.scheduler_type = None
+                return
+
+            args = dict(sch.get("args", {}))
+
+            if name == "OneCycleLR":
+                # Fill required args if missing
+                if "steps_per_epoch" not in args:
+                    args["steps_per_epoch"] = steps_per_epoch
+                if "epochs" not in args:
+                    args["epochs"] = self.training_opts.epochs
+                # User should provide max_lr; we don't touch it.
+                print("Using scheduler: OneCycleLR")
+                self.lrscheduler = OneCycleLR(self.optimizer, **args)
+                self.scheduler_type = "OneCycleLR"
+
+            elif name == "ReduceLROnPlateau":
+                print("Using scheduler: ReduceLROnPlateau")
+                self.lrscheduler = ReduceLROnPlateau(self.optimizer, **args)
+                self.scheduler_type = "ReduceLROnPlateau"
+
+            elif name in ["CosineAnnealingLR"]:
+                if "T_max" not in args:
+                    args["T_max"] = self.training_opts.epochs
+                print("Using scheduler: CosineAnnealingLR")
+                self.lrscheduler = CosineAnnealingLR(self.optimizer, **args)
+                self.scheduler_type = "CosineAnnealingLR"
+
+            else:
+                raise ValueError(f"Unknown scheduler name: {name}")
+
+        else:
+            # Backward-compatible default: OneCycleLR (Debris-style settings)
+            print("Using default OneCycleLR scheduler (fallback)")
+            self.lrscheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=float(opt_args["lr"]) * 1.5,
+                steps_per_epoch=steps_per_epoch,
+                epochs=self.training_opts.epochs,
+                pct_start=0.4,
+                anneal_strategy="cos",
+                div_factor=10,
+                final_div_factor=500,
+            )
+            self.scheduler_type = "OneCycleLR"
+
+    # ============================================================
+    # =====================  TRAINING OPS  ========================
     # ============================================================
 
     def optimize(self, x, y_onehot, y_int):
@@ -200,17 +424,31 @@ class Framework:
             return param_group["lr"]
 
     def step(self):
+        """
+        Optimizer + per-batch scheduler step (for OneCycleLR, etc.).
+        """
         # Optimizer update
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # Scheduler update (OneCycleLR is per-batch)
-        if self.lrscheduler is not None:
+        # Scheduler update (per-batch only for OneCycleLR)
+        if self.lrscheduler is not None and self.scheduler_type == "OneCycleLR":
             self.lrscheduler.step()
 
     def val_operations(self, val_loss):
-        # Not used with OneCycleLR; kept for API compatibility
-        pass
+        """
+        Called at the end of a validation epoch with avg val_loss.
+
+        Used for epoch-level schedulers like ReduceLROnPlateau and CosineAnnealingLR.
+        """
+        if self.lrscheduler is None:
+            return
+
+        if self.scheduler_type == "ReduceLROnPlateau":
+            self.lrscheduler.step(val_loss)
+        elif self.scheduler_type == "CosineAnnealingLR":
+            self.lrscheduler.step()
+        # OneCycleLR: no epoch-level step
 
     # ============================================================
     # ===================  CHECKPOINT I/O  =======================
@@ -233,57 +471,16 @@ class Framework:
             "reg_opts": self.reg_opts,
             "metrics_opts": self.metrics_opts,
             "training_opts": self.training_opts,
+            "scheduler_opts": self.scheduler_opts,
         }
+
+        # Save full config if available
+        if hasattr(self, "conf"):
+            state["conf"] = self.conf
+
         model_path = Path(out_dir, f"model_{epoch}.pt")
         torch.save(state, model_path)
         print(f"Saved model {epoch}")
-
-    @staticmethod
-    def from_checkpoint(
-        checkpoint_path: Path,
-        device=None,
-        new_data_path=None,
-        testing=False,
-        override={},
-    ):
-        """Load a frame from a checkpoint file."""
-        assert checkpoint_path.exists(), "checkpoint_path does not exist"
-        with torch.serialization.safe_globals([Dict]):
-            if torch.cuda.is_available() and device != "cpu":
-                state = torch.load(checkpoint_path)
-            else:
-                state = torch.load(checkpoint_path, map_location="cpu")
-
-        if testing:
-            state["model_opts"].args.dropout = 1e-8
-
-        if len(override) > 0:
-            state.update(override)
-
-        if new_data_path is not None:
-            if isinstance(new_data_path, str):
-                new_data_path = Path(new_data_path)
-            state["loader_opts"].processed_dir = new_data_path
-
-        frame = Framework(
-            loss_opts=state["loss_opts"],
-            loader_opts=state["loader_opts"],
-            model_opts=state["model_opts"],
-            optimizer_opts=state["optimizer_opts"],
-            reg_opts=state["reg_opts"],
-            metrics_opts=state["metrics_opts"],
-            training_opts=state["training_opts"],
-            device=device,
-        )
-        frame.model.load_state_dict(state["state_dict"])
-        frame.optimizer.load_state_dict(state["optimizer_state_dict"])
-
-        if "sigma1" in state.keys():  # older checkpoints
-            frame.sigma_list = [state["sigma1"], state["sigma2"]]
-        else:
-            frame.sigma_list = state["sigma_list"]
-
-        return frame
 
     # ============================================================
     # ===================  INFERENCE + LOSS  =====================
@@ -424,7 +621,7 @@ class Framework:
             inputs = inputs.permute(0, 3, 1, 2).to(self.device)
             labels = labels.permute(0, 3, 1, 2).to(self.device)
             outputs = self.model(inputs)
-            loss = self.calc_loss(outputs, labels)
+            loss = self.calc_loss(outputs, labels, labels.argmax(dim=1))
             if batch_num > 1 and loss > 4 * best_loss:
                 return log_lrs[10:-5], losses[10:-5]
             if loss < best_loss or batch_num == 1:
@@ -515,7 +712,6 @@ class Framework:
         _y = self.infer(_x).to(self.device)  # NHWC logits
 
         if self.multi_class:
-            # Softmax along channel axis (last dim)
             threshold = None
             _y = torch.nn.functional.softmax(_y, dim=3)
             _y = torch.squeeze(_y, dim=0)   # H,W,C

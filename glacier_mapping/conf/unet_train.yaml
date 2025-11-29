@@ -1,7 +1,8 @@
+gpu_rank: 0
+
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_baseline_debrisice2"
-  gpu_rank: 0
+  run_name: "replicate_baseline_debrisice3"
   epochs: 1000
   fine_tune: False
   find_lr: False
@@ -35,3 +36,16 @@ optim_opts:
   args:
     lr: 0.0003 # 0.0003 for CI
     weight_decay: 5e-5 # Comment out for CI
+scheduler_opts:
+  name: "ReduceLROnPlateau" # OneCycleLR | ReduceLROnPlateau | Cosine | None
+  args:
+    mode: "min"
+    factor: 0.1
+    patience: 15
+    min_lr: 1e-9
+# scheduler_opts:
+#   name: "OneCycleLR"
+#   args:
+#     max_lr: 0.00045
+#     pct_start: 0.4
+#     anneal_strategy: "cos"
