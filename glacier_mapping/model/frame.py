@@ -854,15 +854,23 @@ class Framework:
         x_np = x.cpu().numpy()[0]
         yhat_np = y_hat.cpu().numpy()[0]
         y_gt = torch.argmax(y_onehot, dim=-1).cpu().numpy()[0]
-        y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
+
+        # Generate predictions - use threshold for binary, argmax for multi-class
+        is_binary = self.is_binary
+        if is_binary:
+            # For binary models, threshold channel 1 (foreground class)
+            threshold = self.metrics_opts.threshold[0] if isinstance(self.metrics_opts.threshold, list) else self.metrics_opts.threshold
+            y_pred = (yhat_np[..., 1] >= threshold).astype(np.uint8)
+        else:
+            # For multi-class, use argmax across all classes
+            y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
 
         # Ignore mask
         ignore_mask = (y_int.cpu().numpy()[0] == 255).squeeze()
-        
+
         # ------------------------------------
         # 2. Categorical styling
         # ------------------------------------
-        is_binary = self.is_binary
 
         # For binary models, ensure proper label mapping for visualization
         if is_binary:
@@ -1037,9 +1045,9 @@ class Framework:
             assert isinstance(threshold, list) and len(threshold) == 1
 
             _y = torch.sigmoid(_y)
-            _y = np.squeeze(_y.cpu())
-            y_pred = np.zeros(_y.shape, dtype=np.uint8)
-            y_pred[_y >= threshold[0]] = 1
+            _y = np.squeeze(_y.cpu())  # (H, W, 2) for binary models
+            # Extract channel 1 (foreground class) for binary prediction
+            y_pred = (_y[..., 1] >= threshold[0]).astype(np.uint8)
 
         if use_mask:
             y_pred[_mask] = 0

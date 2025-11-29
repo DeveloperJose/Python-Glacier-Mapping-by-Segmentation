@@ -211,7 +211,7 @@ def concat_v(*imgs):
     return np.concatenate(imgs, axis=0)
 
 
-def title_bar(text, width, height=32, font_scale=0.4):
+def title_bar(text, width, height=32, font_scale=0.6):
     """
     Create a title strip above an image.
     """
@@ -223,7 +223,7 @@ def title_bar(text, width, height=32, font_scale=0.4):
     return bar
 
 
-def add_title(img, text, font_scale=0.4):
+def add_title(img, text, font_scale=0.6):
     bar = title_bar(text, img.shape[1], height=32, font_scale=font_scale)
     return concat_v(bar, img)
 
@@ -270,7 +270,7 @@ def make_eight_panel(
     composite = concat_v(r1, r2)
 
     if metrics_text is not None:
-        header = title_bar(metrics_text, composite.shape[1], height=40, font_scale=0.4)
+        header = title_bar(metrics_text, composite.shape[1], height=40, font_scale=0.6)
         composite = concat_v(header, composite)
 
     return composite
