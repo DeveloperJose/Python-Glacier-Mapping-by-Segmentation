@@ -139,8 +139,13 @@ if __name__ == "__main__":
     best_train_metric = None
     best_val_metric = None
     epochs_without_improvement = 0
+    
+    # Top-k checkpoint tracking
+    max_checkpoints = int(getattr(conf.training_opts, "top_k_checkpoints", 10))
+    top_checkpoints = []  # List of dicts: {epoch, val_loss, train_metric, val_metric}
 
     start_time = timer()
+    final_epoch = 0
 
     for epoch in range(1, conf.training_opts.epochs + 1):
 
@@ -186,13 +191,50 @@ if __name__ == "__main__":
             # test_metric=val_metric,  # formatting only
         )
 
-        # ------------------------ EARLY STOPPING ----------------
+        # ------------------------ CHECKPOINT MANAGEMENT ----------------
+        # Check if current epoch should be in top-k checkpoints
+        checkpoint_data = {
+            "epoch": epoch,
+            "val_loss": float(loss_val),
+            "train_metric": train_metric,
+            "val_metric": val_metric
+        }
+        
+        # Insert into top checkpoints if it qualifies
+        inserted = False
+        for i, existing in enumerate(top_checkpoints):
+            if loss_val < existing["val_loss"]:
+                top_checkpoints.insert(i, checkpoint_data)
+                inserted = True
+                break
+        
+        # If not inserted and we have space, add to end
+        if not inserted and len(top_checkpoints) < max_checkpoints:
+            top_checkpoints.append(checkpoint_data)
+        
+        # Keep only top-k checkpoints
+        if len(top_checkpoints) > max_checkpoints:
+            top_checkpoints = top_checkpoints[:max_checkpoints]
+        
+        # Save checkpoint if it's in top-k
+        if inserted or (not inserted and len(top_checkpoints) <= max_checkpoints):
+            rank = next(i for i, cp in enumerate(top_checkpoints) if cp["epoch"] == epoch)
+            frame.save_with_rank(model_output_dir, epoch, rank + 1, float(loss_val))
+            
+            # Clean up old checkpoint if we exceeded max_checkpoints
+            if len(top_checkpoints) > max_checkpoints:
+                old_checkpoint = top_checkpoints[max_checkpoints]
+                old_file = model_output_dir / f"model_top{max_checkpoints+1:02d}_epoch{old_checkpoint['epoch']:04d}_val{old_checkpoint['val_loss']:.6f}.pt"
+                if old_file.exists():
+                    old_file.unlink()
+                    print(f"Removed old checkpoint: {old_file.name}")
+        
+        # Update best tracking for early stopping
         if loss_val < best_val_loss:
             best_val_loss = float(loss_val)
             best_epoch = epoch
             best_train_metric = train_metric
             best_val_metric = val_metric
-            frame.save(model_output_dir, "best")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -208,6 +250,7 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
         writer.flush()
+        final_epoch = epoch
 
     # ------------------------------------------------------------
     # Save final model
@@ -219,24 +262,64 @@ if __name__ == "__main__":
     fn.log(logging.INFO, f"Finished training {run_name} in {elapsed:.2f}s")
 
     # ------------------------------------------------------------
-    # Print BEST-EPOCH SUMMARY
+    # Print TOP-K CHECKPOINTS SUMMARY
     # ------------------------------------------------------------
-    print("\n================ BEST EPOCH SUMMARY ================\n")
+    print(f"\n================ TOP-{max_checkpoints} CHECKPOINTS ================\n")
     print(f"Best epoch: {best_epoch}")
     print(f"Best validation loss: {best_val_loss:.6f}\n")
+    
+    print("{:<6} {:<8} {:<12} {:<10} {:<10} {:<10}".format(
+        "Rank", "Epoch", "Val Loss", "Precision", "Recall", "IoU"))
+    print("-" * 65)
+    
+    for i, checkpoint in enumerate(top_checkpoints):
+        epoch = checkpoint["epoch"]
+        val_loss = checkpoint["val_loss"]
+        val_metric = checkpoint["val_metric"]
+        
+        # Use first class metrics for summary (or average if multi-class)
+        if isinstance(val_metric["precision"], list):
+            p = val_metric["precision"][0]
+            r = val_metric["recall"][0] 
+            i = val_metric["IoU"][0]
+        else:
+            p = val_metric["precision"]
+            r = val_metric["recall"]
+            i = val_metric["IoU"]
+            
+        print(f"{i+1:<6} {epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {i:<10.4f}")
+    print("-" * 65 + "\n")
 
-    print("{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU"))
-    print("-" * 48)
-    for cname, (p, r, i) in zip(
-        frame.mask_names,
-        zip(
-            best_val_metric["precision"],
-            best_val_metric["recall"],
-            best_val_metric["IoU"],
-        ),
-    ):
-        print(f"{cname:<12} {p:.4f}     {r:.4f}     {i:.4f}")
-    print("-" * 48 + "\n")
+    # ------------------------------------------------------------
+    # Print BEST-EPOCH SUMMARY (detailed)
+    # ------------------------------------------------------------
+    if best_val_metric is not None:
+        print("\n================ BEST EPOCH DETAILED ================\n")
+        print("{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU"))
+        print("-" * 48)
+        for cname, (p, r, i) in zip(
+            frame.mask_names,
+            zip(
+                best_val_metric["precision"],
+                best_val_metric["recall"],
+                best_val_metric["IoU"],
+            ),
+        ):
+            print(f"{cname:<12} {p:.4f}     {r:.4f}     {i:.4f}")
+        print("-" * 48 + "\n")
+
+    # ------------------------------------------------------------
+    # Save checkpoints summary
+    # ------------------------------------------------------------
+    checkpoints_summary = {
+        "max_checkpoints": max_checkpoints,
+        "total_epochs_trained": final_epoch,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "top_checkpoints": top_checkpoints
+    }
+    with open(output_dir / "checkpoints_summary.json", "w") as f:
+        json.dump(checkpoints_summary, f, indent=4)
 
     # ------------------------------------------------------------
     # Desktop Notification (Linux)

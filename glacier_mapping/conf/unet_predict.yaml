@@ -7,7 +7,7 @@ visualization:
   max_width: 2400 # Only used when mode="scaled"
 
 cleanice:
-  run_name: "replicate_baseline_cleanice"
+  run_name: "replicate_baseline_cleanice2"
   threshold: 0.5
   model_type: "best" # "best" or "final"
 

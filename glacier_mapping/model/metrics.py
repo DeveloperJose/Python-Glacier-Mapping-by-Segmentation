@@ -14,7 +14,7 @@ import torch
 def precision(tp, fp, fn):
     try:
         return tp / (tp + fp)
-    except BaseException:
+    except ZeroDivisionError:
         return 0
 
 
@@ -29,21 +29,21 @@ def tp_fp_fn(pred, true, label=1):
 def recall(tp, fp, fn):
     try:
         return tp / (tp + fn)
-    except BaseException:
+    except ZeroDivisionError:
         return 0
 
 
 def dice(tp, fp, fn):
     try:
         return (2 * tp) / (2 * tp + fp + fn)
-    except BaseException:
+    except ZeroDivisionError:
         return 0
 
 
 def IoU(tp, fp, fn):
     try:
         return tp / (tp + fp + fn)
-    except BaseException:
+    except ZeroDivisionError:
         return 0
 
 

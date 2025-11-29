@@ -527,6 +527,39 @@ class Framework:
         torch.save(state, model_path)
         print(f"Saved model {epoch}")
 
+    def save_with_rank(self, out_dir, epoch, rank, val_loss):
+        """
+        Save checkpoint with rank information for top-k tracking.
+        
+        Args:
+            out_dir: Directory to save checkpoint
+            epoch: Epoch number
+            rank: Rank in top checkpoints (1=best)
+            val_loss: Validation loss
+        """
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+
+        state = {
+            "epoch": epoch,
+            "state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "sigma_list": self.sigma_list,
+            "loss_opts": self.loss_opts,
+            "loader_opts": self.loader_opts,
+            "model_opts": self.model_opts,
+            "optimizer_opts": self.optimizer_opts,
+            "reg_opts": self.reg_opts,
+            "metrics_opts": self.metrics_opts,
+            "training_opts": self.training_opts,
+            "scheduler_opts": self.scheduler_opts,
+            "val_loss": val_loss,
+            "rank": rank,
+        }
+        model_path = Path(out_dir, f"model_top{rank:02d}_epoch{epoch:04d}_val{val_loss:.6f}.pt")
+        torch.save(state, model_path)
+        print(f"Saved top-{rank} checkpoint: epoch {epoch}, val_loss {val_loss:.6f}")
+
     # ================================================================
     # INFERENCE + LOSS
     # ================================================================

@@ -8,6 +8,7 @@ training_opts:
   find_lr: False
   early_stopping: 100 # Epochs to wait for improvement
   full_eval_every: 10
+  top_k_checkpoints: 10 # Save top K checkpoints during training
 loader_opts:
   processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline/"
   batch_size: 12

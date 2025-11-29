@@ -350,8 +350,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         return bg, ci, deb, mas, mask
 
 
-    if not os.path.exists(conf["out_dir"]):
-        os.makedirs(conf["out_dir"])
+    os.makedirs(conf["out_dir"], exist_ok=True)
 
     tiff_np = get_tiff_np(
         tiff_fname,

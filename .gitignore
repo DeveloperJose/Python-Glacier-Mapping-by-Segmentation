@@ -1,7 +1,8 @@
+original_code/
 **output/
 **pred_runs/
 **runs/
-debug/
+**debug/
 newruns/
 .ruff_cache/
 .python-version
