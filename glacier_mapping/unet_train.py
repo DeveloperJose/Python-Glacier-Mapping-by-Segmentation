@@ -32,9 +32,6 @@ import glacier_mapping.model.functions as fn
 from glacier_mapping.model.frame import Framework
 from glacier_mapping.data.data import fetch_loaders
 
-# ---------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------
 random.seed(41)
 np.random.seed(41)
 torch.manual_seed(41)
@@ -45,13 +42,7 @@ torch.backends.cudnn.benchmark = False
 warnings.filterwarnings("ignore")
 
 
-# ---------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    # ------------------------------------------------------------
-    # Load config
-    # ------------------------------------------------------------
     conf = Dict(yaml.safe_load(open("./conf/unet_train.yaml")))
 
     run_name: str = conf.training_opts.run_name
@@ -61,24 +52,16 @@ if __name__ == "__main__":
 
     full_eval_every: int = int(getattr(conf.training_opts, "full_eval_every", 5))
 
-    # Sanity check: physics model
     if (
         "phys" in run_name
         and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels
     ):
         raise ValueError("Training a phys model but physics channel is missing.")
 
-    # ------------------------------------------------------------
-    # Load dataset
-    # ------------------------------------------------------------
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
-    # ------------------------------------------------------------
-    # Create training framework
-    # ------------------------------------------------------------
     frame = Framework.from_config("./conf/unet_train.yaml")
 
-    # Optional: fine-tuning
     if conf.training_opts.fine_tune:
         fn.log(logging.INFO, "Finetuning from previous final model…")
         final_model_path = output_dir / "models" / "model_final.pt"
@@ -89,14 +72,10 @@ if __name__ == "__main__":
         )
         frame.freeze_layers()
 
-    # Optional: LR Finder
     if conf.training_opts.find_lr:
         frame.lr_finder(train_loader, init_value=1e-9, final_value=1.0)
         raise SystemExit
 
-    # ------------------------------------------------------------
-    # Prepare directories
-    # ------------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
     model_output_dir.mkdir(parents=True, exist_ok=True)
 

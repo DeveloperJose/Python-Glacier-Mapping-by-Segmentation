@@ -88,13 +88,11 @@ if __name__ == "__main__":
                         skipped_df.loc[len(skipped_df.index)] = row
                     pbar.update(1)
 
-            # Aggregate stats for this split (AFTER processing all images)
             means_agg = np.mean(np.asarray(means), axis=0)
             stds_agg = np.mean(np.asarray(stds), axis=0)
             mins_agg = np.min(np.asarray(mins), axis=0)
             maxs_agg = np.max(np.asarray(maxs), axis=0)
 
-            # Save per-split normalization (no contamination)
             np.save(
                 Path(conf["out_dir"]) / f"normalize_{split}",
                 np.asarray((means_agg, stds_agg, mins_agg, maxs_agg)),
@@ -108,9 +106,6 @@ if __name__ == "__main__":
         Path(conf["out_dir"]) / "skipped_slices_meta.csv", encoding="utf-8", index=False
     )
 
-    # ============================================================================
-    # Compute and save dataset statistics
-    # ============================================================================
     statistics = {}
 
     print("\n" + "=" * 80)
@@ -123,26 +118,21 @@ if __name__ == "__main__":
         if len(split_df) == 0:
             continue
 
-        # Calculate total pixels across all slices in this split
         total_bg = split_df["Background"].sum()
         total_ci = split_df["Clean Ice"].sum()
         total_debris = split_df["Debris"].sum()
         total_masked = split_df["Masked"].sum()
-        total_valid = total_bg + total_ci + total_debris  # excludes masked
+        total_valid = total_bg + total_ci + total_debris
         total_all = total_valid + total_masked
 
-        # Percentages relative to all pixels (including masked)
         pct_bg = (total_bg / total_all) * 100 if total_all > 0 else 0
         pct_ci = (total_ci / total_all) * 100 if total_all > 0 else 0
         pct_debris = (total_debris / total_all) * 100 if total_all > 0 else 0
         pct_masked = (total_masked / total_all) * 100 if total_all > 0 else 0
 
-        # Percentages relative to valid pixels only (excluding masked)
         pct_ci_valid = (total_ci / total_valid) * 100 if total_valid > 0 else 0
         pct_debris_valid = (total_debris / total_valid) * 100 if total_valid > 0 else 0
         pct_bg_valid = (total_bg / total_valid) * 100 if total_valid > 0 else 0
-
-        # Store statistics
         statistics[split] = {
             "images": int(len(split_df["Image"].unique())),
             "slices": int(len(split_df)),

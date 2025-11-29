@@ -50,7 +50,6 @@ class Framework:
         conf_path = Path(conf_path)
         conf = Dict(yaml.safe_load(open(conf_path)))
 
-        # Prefer top-level gpu_rank, fallback to training_opts.gpu_rank, default 0
         gpu_rank = int(
             conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0))
         )
@@ -92,14 +91,10 @@ class Framework:
             else:
                 state = torch.load(checkpoint_path, map_location="cpu")
 
-        # Dropout tweak for test-time
         if testing and "model_opts" in state:
             state["model_opts"].args.dropout = 1e-8
 
-        # Allow simple overrides
         state.update(override)
-
-        # Optionally change dataset location
         if new_data_path is not None:
             new_data_path = Path(new_data_path)
             state["loader_opts"].processed_dir = new_data_path
@@ -118,7 +113,6 @@ class Framework:
         frame.model.load_state_dict(state["state_dict"])
         frame.optimizer.load_state_dict(state["optimizer_state_dict"])
 
-        # Backwards compatibility with old sigma storage
         if "sigma1" in state:
             frame.sigma_list = [state["sigma1"], state["sigma2"]]
         else:
@@ -152,16 +146,13 @@ class Framework:
         else:
             self.device = torch.device("cpu")
 
-        # ------------------- Data-related opts -------------------------
         self.loader_opts = loader_opts
         self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
         self.use_channels = loader_opts.use_channels
         output_classes = loader_opts.output_classes
 
-        # Slice metadata (for steps_per_epoch estimation etc.)
         self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
-        # Binary vs multi-class
         if len(output_classes) == 1:
             cl_name = loader_opts.class_names[output_classes[0]]
             self.mask_names = [f"NOT~{cl_name}", cl_name]
@@ -174,7 +165,6 @@ class Framework:
         if self.is_binary:
             self.binary_class_idx = loader_opts.output_classes[0]
 
-        # Normalization parameters (subset to use_channels)
         self.normalization = loader_opts.normalize
         self.norm_arr_full = np.load(
             Path(loader_opts.processed_dir) / "normalize_train.npy"
@@ -182,17 +172,14 @@ class Framework:
         assert self.normalization in ["mean-std", "min-max"], "Invalid normalization"
         self.norm_arr = self.norm_arr_full[:, self.use_channels]
 
-        # ------------------- Model -------------------------------------
         self.model_opts = model_opts
         self.model_opts.args.inchannels = len(loader_opts.use_channels)
         self.model_opts.args.outchannels = self.num_classes
         self.model = Unet(**model_opts.args).to(self.device)
 
-        # ------------------- Loss --------------------------------------
         self.loss_opts = loss_opts
         self.loss_fn = self._build_loss(self.num_classes, loss_opts).to(self.device)
 
-        # ------------------- Optimizer + sigma -------------------------
         self.optimizer_opts = optimizer_opts or Dict(
             {"name": "Adam", "args": {"lr": 0.001}}
         )
@@ -202,10 +189,8 @@ class Framework:
         if "weight_decay" in opt_args:
             opt_args["weight_decay"] = float(opt_args["weight_decay"])
 
-        # main model params
         _optimizer_params = [{"params": self.model.parameters(), **opt_args}]
 
-        # CustomLoss sigma list (uncertainty weighting; 2 terms: dice + boundary)
         self.sigma_list = []
         for _ in range(self.loss_fn.n_sigma):
             sigma = torch.tensor([1.0], requires_grad=True, device=self.device)
@@ -215,7 +200,6 @@ class Framework:
         optimizer_def = getattr(torch.optim, self.optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
 
-        # ------------------- Scheduler ---------------------------------
         self.training_opts = training_opts
         self.scheduler_opts = scheduler_opts
         self.scheduler_type = None
@@ -224,13 +208,8 @@ class Framework:
         if self.scheduler_opts is not None and self.scheduler_opts.get("name"):
             self._init_scheduler(opt_args)
 
-        # ------------------- Regularization & Metrics ------------------
         self.reg_opts = reg_opts
         self.metrics_opts = metrics_opts
-
-    # ------------------------------------------------------------------
-    # Loss builder
-    # ------------------------------------------------------------------
     def _build_loss(self, outchannels, opts=None):
         """
         Only customloss is supported.
