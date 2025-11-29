@@ -37,12 +37,12 @@ optim_opts:
     lr: 0.0003 # 0.0003 for CI
     # weight_decay: 5e-5 # Comment out for CI
 scheduler_opts:
-name: "ReduceLROnPlateau" # OneCycleLR | ReduceLROnPlateau | Cosine | None
-args:
-  mode: "min"
-  factor: 0.1
-  patience: 15
-  min_lr: 1e-9
+  name: "ReduceLROnPlateau" # OneCycleLR | ReduceLROnPlateau | Cosine | None
+  args:
+    mode: "min"
+    factor: 0.1
+    patience: 15
+    min_lr: 1e-9
 # scheduler_opts:
 #   name: "OneCycleLR"
 #   args:

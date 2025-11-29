@@ -83,16 +83,16 @@ if __name__ == "__main__":
     if conf.training_opts.fine_tune:
         fn.log(logging.INFO, "Finetuning from previous final model…")
         final_model_path = output_dir / "models" / "model_final.pt"
+
         frame = Framework.from_checkpoint(
             final_model_path,
-            device=int(conf.training_opts.gpu_rank),
             testing=False,
         )
         frame.freeze_layers()
 
     # Optional: LR Finder
     if conf.training_opts.find_lr:
-        fn.find_lr(frame, train_loader, init_value=1e-9, final_value=1)
+        frame.lr_finder(train_loader, init_value=1e-9, final_value=1.0)
         raise SystemExit
 
     # ------------------------------------------------------------
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     with open(output_dir / "conf.json", "w") as f:
         json.dump(conf, f, indent=4, sort_keys=True)
 
-    # Load normalization info for logging thumbnails
+    # Load normalization info for logging thumbnails (still passed into log_images)
     norm_path = pathlib.Path(conf.loader_opts.processed_dir) / "normalize_train.npy"
     _normalize = np.load(norm_path)
     if conf.loader_opts.normalize == "min-max":
@@ -145,25 +145,26 @@ if __name__ == "__main__":
     for epoch in range(1, conf.training_opts.epochs + 1):
 
         # ------------------------ TRAIN ------------------------
-        loss_train, train_metric, loss_alpha = fn.train_epoch(
-            epoch, train_loader, frame
+        loss_train, train_metric, loss_alpha = frame.train_one_epoch(
+            epoch, train_loader
         )
-        fn.log_metrics(writer, frame, train_metric, epoch, "train")
+        frame.log_metrics(writer, train_metric, epoch, "train")
 
         # ------------------------ VALIDATE ---------------------
-        loss_val, val_metric = fn.validate(epoch, val_loader, frame, test=False)
-        fn.log_metrics(writer, frame, val_metric, epoch, "val")
+        loss_val, val_metric = frame.validate_one_epoch(
+            epoch, val_loader, test=False
+        )
+        frame.log_metrics(writer, val_metric, epoch, "val")
 
         # ------------------------ LOG IMAGES -------------------
         if (epoch - 1) % 5 == 0:
-            fn.log_images(writer, frame, train_loader, epoch, "train", _normalize)
-            fn.log_images(writer, frame, val_loader, epoch, "val", _normalize)
+            frame.log_images(writer, train_loader, epoch, "train", _normalize)
+            frame.log_images(writer, val_loader, epoch, "val", _normalize)
 
         # ------------------------ FULL TILE EVAL ---------------
-        if full_eval_every > 0 and epoch % full_eval_every == 0:
+        if epoch % full_eval_every == 0:
             fn.log(logging.INFO, f"Full-tile eval at epoch {epoch}…")
-            fn.evaluate_full_test_tiles(
-                frame=frame,
+            frame.evaluate_full_test_tiles(
                 writer=writer,
                 epoch=epoch,
                 output_dir=output_dir / "full_eval",
@@ -172,18 +173,17 @@ if __name__ == "__main__":
         # ------------------------ LOG SCALARS -------------------
         writer.add_scalar("loss_train", loss_train, epoch)
         writer.add_scalar("loss_val", loss_val, epoch)
-        writer.add_scalar("lr", fn.get_current_lr(frame), epoch)
+        writer.add_scalar("lr", frame.get_current_lr(), epoch)
 
         for idx, sigma in enumerate(loss_alpha):
             writer.add_scalar(f"sigma/{idx + 1}", sigma, epoch)
 
-        # Print epoch summary
-        fn.print_epoch_summary(
+        # Print epoch summary (now using Framework method)
+        frame.print_epoch_summary(
             epoch,
             train_metric=train_metric,
             val_metric=val_metric,
-            test_metric=val_metric,  # formatting only
-            mask_names=frame.mask_names,
+            # test_metric=val_metric,  # formatting only
         )
 
         # ------------------------ EARLY STOPPING ----------------

@@ -33,22 +33,30 @@ GLOBAL_CMAP = {
 # ============================================================
 # BASIC HELPERS
 # ============================================================
-
 def make_rgb_preview(x):
     """
-    Convert tile (H,W,C) into an RGB preview.
-    Assumes bands: [..., B,G,R].
+    Convert multispectral tile (H,W,C) into an RGB preview.
+
+    Assumes Landsat 7 ordering:
+        index 0: B1 (Blue)
+        index 1: B2 (Green)
+        index 2: B3 (Red)
+    Other channels (NIR, SWIR, DEM, slope, physics) ignored for RGB.
     """
-    x = x.astype(np.float32)
-    if x.max() > 1:
-        x = x / 255.0
 
-    rgb = np.zeros((x.shape[0], x.shape[1], 3), dtype=np.uint8)
-    rgb[..., 0] = (x[..., 2] * 255).clip(0, 255)  # R
-    rgb[..., 1] = (x[..., 1] * 255).clip(0, 255)  # G
-    rgb[..., 2] = (x[..., 0] * 255).clip(0, 255)  # B
-    return rgb
+    # Extract R,G,B from correct indices
+    R = x[..., 2]
+    G = x[..., 1]
+    B = x[..., 0]
 
+    # Normalize each channel independently
+    rgb_stack = np.stack([R, G, B], axis=-1).astype(np.float32)
+    rgb_min = rgb_stack.min(axis=(0, 1), keepdims=True)
+    rgb_max = rgb_stack.max(axis=(0, 1), keepdims=True)
+    rgb_norm = (rgb_stack - rgb_min) / (rgb_max - rgb_min + 1e-6)
+
+    rgb_uint8 = (rgb_norm * 255).clip(0, 255).astype(np.uint8)
+    return rgb_uint8
 
 # ============================================================
 # COLORMAPS
@@ -68,6 +76,26 @@ def build_cmap(num_classes, is_binary, classname=None):
     else:  # Debris
         return {0: COLOR_BG, 1: COLOR_DEB, 255: COLOR_IGNORE}
 
+def build_cmap_from_mask_names(mask_names):
+    """
+    Ensures categorical colors align with mask_names
+    which define:
+        index 0 : background
+        index 1 : clean ice
+        index 2 : debris
+    """
+    cmap = {}
+    for i, name in enumerate(mask_names):
+        if name.lower().startswith("bg"):
+            cmap[i] = COLOR_BG
+        elif name.lower().startswith("clean"):
+            cmap[i] = COLOR_CI
+        elif name.lower().startswith("debr"):
+            cmap[i] = COLOR_DEB
+        else:
+            cmap[i] = np.array([255, 255, 255], np.uint8)  # fallback white
+    cmap[255] = COLOR_IGNORE
+    return cmap
 
 def label_to_color(label_img, cmap):
     """

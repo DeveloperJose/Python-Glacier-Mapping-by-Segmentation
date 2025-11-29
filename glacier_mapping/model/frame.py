@@ -20,10 +20,12 @@ from glacier_mapping.model.metrics import (
     precision,
     recall,
     IoU,
+    l1_reg,
+    l2_reg,
 )
 from glacier_mapping.model.unet import Unet
 from glacier_mapping.model.visualize import (
-    build_cmap,
+    build_cmap_from_mask_names,
     make_rgb_preview,
     label_to_color,
     make_confidence_map,
@@ -51,7 +53,8 @@ class Framework:
         conf_path = Path(conf_path)
         conf = Dict(yaml.safe_load(open(conf_path)))
 
-        gpu_rank = int(conf.training_opts.gpu_rank)
+        # Prefer top-level gpu_rank, fallback to training_opts.gpu_rank, default 0
+        gpu_rank = int(conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0)))
         if device is None:
             device = gpu_rank
 
@@ -278,6 +281,19 @@ class Framework:
 
         elif name == "ReduceLROnPlateau":
             kwargs = dict(self.scheduler_opts.args)
+
+            # Robust type casting in case YAML gave us strings
+            if "factor" in kwargs:
+                kwargs["factor"] = float(kwargs["factor"])
+            if "min_lr" in kwargs:
+                # Can be scalar or list-like; convert all to float
+                mlr = kwargs["min_lr"]
+                if isinstance(mlr, (list, tuple)):
+                    kwargs["min_lr"] = [float(v) for v in mlr]
+                else:
+                    kwargs["min_lr"] = float(mlr)
+
+            # mode, patience, etc. are fine as-is (int/str)
             self.lrscheduler = ReduceLROnPlateau(
                 self.optimizer,
                 **kwargs,
@@ -344,6 +360,144 @@ class Framework:
         """
         if self.scheduler_type == "ReduceLROnPlateau" and self.lrscheduler is not None:
             self.lrscheduler.step(val_loss)
+
+    # ------------------------------------------------------------------
+    # Per-epoch training & validation
+    # ------------------------------------------------------------------
+    def _compute_metrics_dict(self, tp, fp, fn, metric_names):
+        func_map = {
+            "IoU": IoU,
+            "precision": precision,
+            "recall": recall,
+        }
+        metrics = {}
+        for name in metric_names:
+            if name not in func_map:
+                raise ValueError(f"Unknown metric: {name}")
+            metrics[name] = func_map[name](tp, fp, fn)
+        return metrics
+
+    def train_one_epoch(self, epoch, loader):
+        """
+        Single training epoch on a dataloader.
+
+        Returns:
+            avg_loss (float),
+            metrics_dict (dict of tensors),
+            loss_alpha (list of sigma scalars)
+        """
+        metric_names = self.metrics_opts.metrics
+        n_classes = self.num_classes
+        threshold = self.metrics_opts.threshold
+
+        loss_sum = 0.0
+        tp = torch.zeros(n_classes)
+        fp = torch.zeros(n_classes)
+        fn = torch.zeros(n_classes)
+
+        iterator = tqdm(loader, desc="Train", leave=False)
+
+        for i, (x, y_onehot, y_int) in enumerate(iterator):
+            self.zero_grad()
+            y_hat, batch_loss = self.optimize(x, y_onehot, y_int.squeeze(-1))
+            self.step()
+
+            batch_loss_f = float(batch_loss.detach())
+            loss_sum += batch_loss_f
+
+            # metrics() expects probabilities, NHWC
+            y_hat_act = self.act(y_hat)
+            ignore = (y_int.squeeze(-1) == 255).cpu().numpy()
+            _tp, _fp, _fn = self.metrics(y_hat_act, y_onehot, ignore, threshold)
+
+            tp += _tp
+            fp += _fp
+            fn += _fn
+
+            iterator.set_description(
+                f"Train Ep={epoch} Step={i} "
+                f"Loss={batch_loss_f:.3f} Avg={loss_sum/(i+1):.3f}"
+            )
+
+        avg_loss = loss_sum / (i + 1)
+        metrics_dict = self._compute_metrics_dict(tp, fp, fn, metric_names)
+        loss_alpha = self.get_loss_alpha()
+        return avg_loss, metrics_dict, loss_alpha
+
+    def validate_one_epoch(self, epoch, loader, test=False):
+        """
+        Validation or test pass.
+
+        Uses argmax over classes (no thresholds) for metrics, matching original val logic.
+        """
+        n_classes = self.num_classes
+        metric_names = self.metrics_opts.metrics
+
+        total_loss = 0.0
+        count_batches = 0
+
+        tp_tot = torch.zeros(n_classes)
+        fp_tot = torch.zeros(n_classes)
+        fn_tot = torch.zeros(n_classes)
+
+        desc = "Test" if test else "Val"
+        iterator = tqdm(loader, desc=desc, leave=False)
+
+        for i, (x, y_onehot, y_int) in enumerate(iterator):
+            # logits, NHWC
+            y_hat_logits = self.infer(x)
+
+            # loss expects NCHW
+            y_hat_ch = y_hat_logits.permute(0, 3, 1, 2)
+            y_onehot_ch = y_onehot.permute(0, 3, 1, 2)
+            batch_loss = self.calc_loss(
+                y_hat_ch,
+                y_onehot_ch,
+                y_int.squeeze(-1),
+            )
+            batch_loss_f = float(batch_loss.detach())
+
+            y_hat_act = self.act(y_hat_logits)
+
+            ignore = (y_int.squeeze(-1) == 255).cpu()  # (B,H,W) bool
+            if ignore.all():
+                continue
+
+            y_true_cls = torch.argmax(y_onehot, dim=-1).cpu()   # (B,H,W)
+            y_pred_cls = torch.argmax(y_hat_act.cpu(), dim=-1)  # (B,H,W)
+
+            valid = ~ignore
+            y_true_valid = y_true_cls[valid]
+            y_pred_valid = y_pred_cls[valid]
+
+            for c in range(n_classes):
+                pred_c = (y_pred_valid == c).long()
+                true_c = (y_true_valid == c).long()
+                tp_c, fp_c, fn_c = tp_fp_fn(pred_c, true_c)
+                tp_tot[c] += tp_c
+                fp_tot[c] += fp_c
+                fn_tot[c] += fn_c
+
+            total_loss += batch_loss_f
+            count_batches += 1
+
+            iterator.set_description(
+                f"{desc} Ep={epoch} Step={i} "
+                f"Loss={batch_loss_f:.3f} Avg={total_loss/max(count_batches,1):.3f}"
+            )
+
+        if count_batches == 0:
+            print(f"[WARN] {desc}: all patches ignored.")
+            metrics_dict = self._compute_metrics_dict(tp_tot, fp_tot, fn_tot, metric_names)
+            return 0.0, metrics_dict
+
+        avg_loss = total_loss / count_batches
+
+        if not test:
+            self.val_operations(avg_loss)
+
+        metrics_dict = self._compute_metrics_dict(tp_tot, fp_tot, fn_tot, metric_names)
+        return avg_loss, metrics_dict
 
     # ================================================================
     # CHECKPOINT I/O
@@ -415,9 +569,11 @@ class Framework:
         total_loss += torch.abs(torch.log(sigma_mult))
 
         if self.reg_opts:
+            reg_map = {"l1_reg": l1_reg, "l2_reg": l2_reg}
             for reg_type, coeff in self.reg_opts.items():
-                reg_fn = globals()[reg_type]
-                total_loss += reg_fn(self.model.parameters(), coeff, self.device)
+                if reg_type not in reg_map:
+                    raise ValueError(f"Unknown regularization type: {reg_type}")
+                total_loss += reg_map[reg_type](self.model.parameters(), coeff, self.device)
 
         return total_loss
 
@@ -479,6 +635,11 @@ class Framework:
     # ================================================================
     # OTHER UTILS
     # ================================================================
+    def log_metrics(self, writer, metrics, epoch, stage):
+        for metric_name, values in metrics.items():
+            for class_name, value in zip(self.mask_names, values):
+                writer.add_scalar(f"{stage}/{metric_name}_{class_name}", float(value), epoch)
+
     def freeze_layers(self, layers=None):
         for i, layer in enumerate(self.model.parameters()):
             if layers is None:
@@ -509,7 +670,8 @@ class Framework:
             inputs = inputs.permute(0, 3, 1, 2).to(self.device)
             labels = labels.permute(0, 3, 1, 2).to(self.device)
             outputs = self.model(inputs)
-            loss = self.calc_loss(outputs, labels)
+            # Note: this call assumes binary (old API); kept only for legacy debugging
+            loss = self.calc_loss(outputs, labels, torch.zeros(labels.shape[0:3], dtype=torch.long, device=self.device))
             if batch_num > 1 and loss > 4 * best_loss:
                 return log_lrs[10:-5], losses[10:-5]
             if loss < best_loss or batch_num == 1:
@@ -526,6 +688,234 @@ class Framework:
             lr = lr * update_step
             self.optimizer.param_groups[0]["lr"] = lr
         return log_lrs[10:-5], losses[10:-5]
+
+    def lr_finder(self, train_loader, init_value=1e-9, final_value=1.0):
+        """
+        Thin wrapper around Framework.find_lr().
+        Produces an LR curve plot (lr_curve.png).
+        """
+        import matplotlib.pyplot as plt
+
+        logs, losses = self.find_lr(train_loader, init_value, final_value)
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(logs, losses)
+        plt.xlabel("Learning Rate (log10)")
+        plt.ylabel("Loss")
+        plt.title("LR Finder")
+        plt.grid(True)
+        plt.savefig("lr_curve.png")
+        print("LR curve saved to lr_curve.png")
+
+        return logs, losses
+
+    def compute_dataset_stats(self, name, loader):
+        """
+        Compute per-class pixel frequency statistics.
+        Returns a summary dict.
+        """
+        from collections import defaultdict
+
+        total_counts = defaultdict(int)
+        total_pixels = 0
+        num_images = 0
+
+        for _, _, y_int in loader:
+            y = y_int.squeeze()  # (H,W)
+            unique, counts = np.unique(y.cpu().numpy(), return_counts=True)
+
+            for cls, cnt in zip(unique.tolist(), counts.tolist()):
+                total_counts[int(cls)] += int(cnt)
+
+            total_pixels += y.numel()
+            num_images += y.shape[0]
+
+        stats = {}
+        for cls in [0, 1, 2, 255]:
+            cls_count = total_counts.get(cls, 0)
+            stats[cls] = {
+                "count": cls_count,
+                "percent": (cls_count / total_pixels) * 100 if total_pixels else 0.0,
+            }
+
+        return {
+            "dataset": name,
+            "num_images": num_images,
+            "total_pixels": total_pixels,
+            "stats": {
+                "BG (0)": stats[0],
+                "CleanIce (1)": stats[1],
+                "Debris (2)": stats[2],
+                "Mask (255)": stats[255],
+            },
+        }
+
+    def print_stats_table(self, results):
+        print("\n================ DATASET STATISTICS ================\n")
+
+        for res in results:
+            print(f"Dataset: {res['dataset']}")
+            print(f"Images:  {res['num_images']}")
+            print(f"Pixels:  {res['total_pixels']:,}\n")
+
+            print(f"{'Class':<14}{'Count':>14}{'Percent':>12}")
+            print("-" * 42)
+            for cls, info in res["stats"].items():
+                print(f"{cls:<14}{info['count']:>14}{info['percent']:>11.2f}%")
+
+            print("")
+
+    def log_stats_tensorboard(self, writer, results):
+        """
+        Write dataset statistics to TensorBoard.
+        """
+        for res in results:
+            prefix = f"dataset_stats/{res['dataset']}"
+            for cls, info in res["stats"].items():
+                cname = cls.replace(" ", "_").replace("(", "").replace(")", "")
+                writer.add_scalar(f"{prefix}/{cname}_percent", info["percent"], 0)
+                writer.add_scalar(f"{prefix}/{cname}_count", info["count"], 0)
+
+    def print_epoch_summary(self, epoch, train_metric, val_metric, test_metric=None):
+        """
+        Print end-of-epoch table showing precision/recall/IoU per class.
+        """
+        def fmt(v):
+            if isinstance(v, torch.Tensor):
+                v = v.item()
+            return f"{float(v):.4f}"
+
+        print(f"\n===== Epoch {epoch} Summary =====")
+        print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
+            "Split", "Class", "Precision", "Recall", "IoU"
+        ))
+        print("-" * 54)
+
+        for split, metrics in [
+            ("Train", train_metric),
+            ("Val",   val_metric),
+            # ("Test",  test_metric if test_metric else val_metric),
+        ]:
+            for i, cname in enumerate(self.mask_names):
+                print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
+                    split,
+                    cname,
+                    fmt(metrics["precision"][i]),
+                    fmt(metrics["recall"][i]),
+                    fmt(metrics["IoU"][i]),
+                ))
+            print("-" * 25)
+        print("")
+
+    def log_images(self, writer, batch, epoch, stage, normalize):
+        """
+        Logs the SAME 8-panel composite used in predictor:
+        TIFF | GT | PRED | CONF | TP | FP | FN | ENTROPY
+
+        Includes a metrics header (precision/recall/IoU).
+        """
+
+        # ------------------------------------
+        # 1. Fetch batch sample
+        # ------------------------------------
+        x, y_onehot, y_int = next(iter(batch))
+        x = x.to(self.device)
+        y_onehot = y_onehot.to(self.device)
+
+        # Forward pass
+        with torch.no_grad():
+            y_hat = self.act(self.infer(x))
+
+        # Convert to NumPy
+        x_np = x.cpu().numpy()[0]
+        yhat_np = y_hat.cpu().numpy()[0]
+        y_gt = torch.argmax(y_onehot, dim=-1).cpu().numpy()[0]
+        y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
+
+        # Ignore mask
+        ignore_mask = (y_int.cpu().numpy()[0] == 255).squeeze()
+        y_gt[ignore_mask] = 255
+        y_pred[ignore_mask] = 255
+
+        # ------------------------------------
+        # 2. Categorical styling
+        # ------------------------------------
+        num_classes = self.num_classes
+        is_binary = self.is_binary
+        classname = self.mask_names[-1] if is_binary else None
+
+
+        # cmap = build_cmap(num_classes, is_binary, classname)
+        cmap = build_cmap_from_mask_names(self.mask_names)
+
+        x_rgb = make_rgb_preview(x_np)
+        gt_rgb = label_to_color(y_gt, cmap)
+        pr_rgb = label_to_color(y_pred, cmap)
+
+        # ------------------------------------
+        # 3. Confidence & entropy maps
+        # ------------------------------------
+        if is_binary:
+            conf = yhat_np[..., 1]
+        else:
+            conf = np.max(yhat_np, axis=-1)
+
+        conf_rgb = make_confidence_map(conf, invalid_mask=ignore_mask)
+        entropy_rgb = make_entropy_map(yhat_np, invalid_mask=ignore_mask)
+
+        # ------------------------------------
+        # 4. TP / FP / FN
+        # ------------------------------------
+        tp_mask = (y_pred == y_gt) & (~ignore_mask) & (y_gt != 0)
+        fp_mask = (y_pred != y_gt) & (~ignore_mask) & (y_pred != 0)
+        fn_mask = (y_pred != y_gt) & (~ignore_mask) & (y_gt != 0)
+
+        tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
+
+        # ------------------------------------
+        # 5. Metrics header
+        # ------------------------------------
+        from glacier_mapping.model import metrics as model_metrics
+
+        metric_string_parts = []
+
+        for ci, cname in enumerate(self.mask_names):
+            pred_c = (y_pred == ci).astype(np.uint8)
+            true_c = (y_gt == ci).astype(np.uint8)
+
+            tp, fp, fn = model_metrics.tp_fp_fn(
+                torch.from_numpy(pred_c),
+                torch.from_numpy(true_c),
+            )
+            P = model_metrics.precision(tp, fp, fn)
+            R = model_metrics.recall(tp, fp, fn)
+            I = model_metrics.IoU(tp, fp, fn)
+
+            metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
+
+        metrics_text = " | ".join(metric_string_parts)
+
+        # ------------------------------------
+        # 6. Assemble panel
+        # ------------------------------------
+        composite = make_eight_panel(
+            x_rgb=x_rgb,
+            gt_rgb=gt_rgb,
+            pr_rgb=pr_rgb,
+            conf_rgb=conf_rgb,
+            tp_rgb=tp_rgb,
+            fp_rgb=fp_rgb,
+            fn_rgb=fn_rgb,
+            entropy_rgb=entropy_rgb,
+            metrics_text=metrics_text,
+        )
+
+        # ------------------------------------
+        # 7. Log to TensorBoard
+        # ------------------------------------
+        img_tensor = torch.tensor(composite).permute(2, 0, 1).float() / 255.0
+        writer.add_image(f"{stage}/visualization", img_tensor, epoch)
+
 
     def get_model_device(self):
         return self.model, self.device
@@ -648,6 +1038,9 @@ class Framework:
         Writes a CSV and logs optional TensorBoard scalars + images.
         """
         import cv2
+        from glacier_mapping.model.visualize import (
+            build_cmap_from_mask_names,
+        )
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -656,9 +1049,8 @@ class Framework:
         test_tiles = sorted((data_dir / "test").glob("tiff*"))
 
         n_classes = self.num_classes
-        is_binary = self.is_binary
-        classname = self.mask_names[-1] if is_binary else None
         threshold = self.metrics_opts.threshold
+        cmap = build_cmap_from_mask_names(self.mask_names)
 
         rows = []
         tp_sum = np.zeros(n_classes)
@@ -687,6 +1079,7 @@ class Framework:
             y_pred_valid = y_pred[valid]
             y_true_valid = y_true[valid]
 
+            # Per-tile metrics row
             row = [x_path.name]
             for ci in range(n_classes):
                 label = ci + 1
@@ -714,18 +1107,16 @@ class Framework:
             cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
 
         pd.DataFrame(rows, columns=cols).to_csv(
-            output_dir / f"full_eval_epoch{epoch}.csv",
-            index=False,
+            output_dir / f"full_eval_epoch{epoch}.csv", index=False
         )
 
         # ------------------- Summary metrics ----------------
         totals = []
         for ci in range(n_classes):
             tp_, fp_, fn_ = tp_sum[ci], fp_sum[ci], fn_sum[ci]
-            prec = precision(tp_, fp_, fn_)
-            rec = recall(tp_, fp_, fn_)
-            iou = IoU(tp_, fp_, fn_)
-            totals.append((prec, rec, iou))
+            totals.append((precision(tp_, fp_, fn_),
+                           recall(tp_, fp_, fn_),
+                           IoU(tp_, fp_, fn_)))
 
         if writer is not None:
             for (prec, rec, iou), cname in zip(totals, self.mask_names):
@@ -733,9 +1124,11 @@ class Framework:
                 writer.add_scalar(f"fulltest_recall/{cname}", rec, epoch)
                 writer.add_scalar(f"fulltest_iou/{cname}", iou, epoch)
 
-        # ------------------- Sample viz ---------------------
-        cmap = build_cmap(n_classes, is_binary, classname)
+        # ------------------- Sample visualizations ---------------------
         num_samples = min(num_samples, len(test_tiles))
+
+        # Get normalization parameters
+        norm_type = self.loader_opts.normalize
 
         for idx, x_path in enumerate(test_tiles[:num_samples]):
             x_full = np.load(x_path)
@@ -749,30 +1142,37 @@ class Framework:
             if invalid_mask is not None:
                 ignore |= invalid_mask
 
-            # Visualization label maps (0/1/2/255)
+            # GT/PRED for visualization
             y_gt_vis = y_true_raw.copy()
             y_gt_vis[ignore] = 255
-
             y_pred_vis = y_pred.copy()
             y_pred_vis[ignore] = 255
 
-            # Convert to RGB
+            # ----------- Correct RGB visualization -----------
             x_rgb = make_rgb_preview(x_full)
-            gt_rgb = label_to_color(y_gt_vis, cmap)
-            pr_rgb = label_to_color(y_pred_vis, cmap)
 
-            # Confidence & entropy
-            yhat_full = self.act(
-                self.infer(
-                    torch.from_numpy(
-                        np.expand_dims(
-                            x_full[:, :, self.loader_opts.use_channels], 0
-                        )
-                    ).float()
-                )
-            ).cpu().numpy()[0]
+            # ----------- Apply same normalization as training -----------
+            x_use = x_full[..., self.loader_opts.use_channels].astype(np.float32)
 
-            if is_binary:
+            if norm_type == "mean-std":
+                mean = self.norm_arr[0].astype(np.float32)
+                std  = self.norm_arr[1].astype(np.float32)
+                x_norm = (x_use - mean) / (std + 1e-6)
+
+            elif norm_type == "min-max":
+                minv = self.norm_arr[2].astype(np.float32)
+                maxv = self.norm_arr[3].astype(np.float32)
+                x_norm = (x_use - minv) / (maxv - minv + 1e-6)
+
+            else:
+                x_norm = x_use
+
+            # ----------- Infer probability cube (correct!) -----------
+            t_in = torch.from_numpy(x_norm[None, ...]).float().to(self.device)
+            yhat_full = self.act(self.infer(t_in)).cpu().numpy()[0]
+
+            # Confidence / entropy
+            if self.is_binary:
                 conf = yhat_full[..., 1]
             else:
                 conf = np.max(yhat_full, axis=-1)
@@ -780,14 +1180,14 @@ class Framework:
             conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
             entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
 
-            # TP / FP / FN (non-background)
+            # TP / FP / FN masks
             tp_mask = (y_pred == y_true_raw) & (~ignore) & (y_true_raw != 0)
             fp_mask = (y_pred != y_true_raw) & (~ignore) & (y_pred != 0)
             fn_mask = (y_pred != y_true_raw) & (~ignore) & (y_true_raw != 0)
 
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-            # Per-class metrics string (for header)
+            # Per-class metrics string
             metric_string_parts = []
             for ci, cname in enumerate(self.mask_names):
                 pred_c = (y_pred == ci + 1).astype(np.uint8)
@@ -797,20 +1197,17 @@ class Framework:
                     torch.from_numpy(pred_c),
                     torch.from_numpy(true_c),
                 )
-
                 P = precision(tp_, fp_, fn_)
                 R = recall(tp_, fp_, fn_)
                 I = IoU(tp_, fp_, fn_)
-                metric_string_parts.append(
-                    f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}"
-                )
+                metric_string_parts.append(f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}")
 
             metrics_text = " | ".join(metric_string_parts)
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
-                gt_rgb=gt_rgb,
-                pr_rgb=pr_rgb,
+                gt_rgb=label_to_color(y_gt_vis, cmap),
+                pr_rgb=label_to_color(y_pred_vis, cmap),
                 conf_rgb=conf_rgb,
                 tp_rgb=tp_rgb,
                 fp_rgb=fp_rgb,
