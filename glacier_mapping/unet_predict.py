@@ -90,107 +90,52 @@ def get_pr_iou(pred, true):
     )
 
 
-# ---------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------
-if __name__ == "__main__":
+def get_checkpoint_paths(runs_dir, run_name, model_type):
+    """
+    Get list of checkpoint paths based on model_type.
 
-    conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
-    gpu = int(conf.get("gpu_rank", 0))
+    Args:
+        model_type: "all" for all checkpoints, or specific name like "best", "final"
 
-    runs_dir = pathlib.Path(conf.runs_dir)
-    out_root = pathlib.Path(conf.output_dir)
-    out_root.mkdir(parents=True, exist_ok=True)
+    Returns:
+        List of tuples: [(checkpoint_path, checkpoint_name), ...]
+    """
+    models_dir = runs_dir / run_name / "models"
 
-    # Visualization settings
-    vis_conf = conf.get("visualization", {})
-    vis_mode = vis_conf.get("mode", "scaled")      # scaled or fullres
-    vis_maxw = int(vis_conf.get("max_width", 2400))
-
-    has_ci  = "cleanice" in conf
-    has_deb = "debris"  in conf
-
-    if not (has_ci or has_deb):
-        raise RuntimeError("predict YAML must specify cleanice: or debris:")
-
-    # ------------------------------------------------------------------
-    # Load CI model
-    # ------------------------------------------------------------------
-    if has_ci:
-        ck = conf.cleanice
-        ckpt_ci = runs_dir / ck.run_name / "models" / f"model_{ck.model_type}.pt"
-        print("Loading CleanIce:", ckpt_ci)
-        frame_ci = Framework.from_checkpoint(ckpt_ci, device=gpu, testing=True)
-        thr_ci = float(ck.threshold)
-
-    # ------------------------------------------------------------------
-    # Load Debris model
-    # ------------------------------------------------------------------
-    if has_deb:
-        ck = conf.debris
-        ckpt_db = runs_dir / ck.run_name / "models" / f"model_{ck.model_type}.pt"
-        print("Loading Debris:", ckpt_db)
-        frame_deb = Framework.from_checkpoint(ckpt_db, device=gpu, testing=True)
-        thr_deb = float(ck.threshold)
-
-    # Determine dataset path
-    data_dir = (
-        frame_ci.loader_opts.processed_dir if has_ci else
-        frame_deb.loader_opts.processed_dir
-    )
-
-    test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
-    print(f"Found {len(test_tiles)} test tiles.\n")
-
-    # ------------------------------------------------------------------
-    # Output dirs
-    # ------------------------------------------------------------------
-    if has_ci and not has_deb:
-        run_name = conf.cleanice.run_name
-    elif has_deb and not has_ci:
-        run_name = conf.debris.run_name
+    if model_type == "all":
+        # All model_*.pt files
+        ckpts = sorted(models_dir.glob("model_*.pt"))
+        return [(ckpt, ckpt.stem.replace("model_", "")) for ckpt in ckpts]
     else:
-        run_name = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
+        # Single checkpoint
+        ckpt = models_dir / f"model_{model_type}.pt"
+        if not ckpt.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+        return [(ckpt, model_type)]
 
-    out_dir = out_root / run_name
-    preds_dir = out_dir / "preds"
-    preds_dir.mkdir(parents=True, exist_ok=True)
 
-    # CSV
-    if has_ci and has_deb:
-        columns = [
-            "tile",
-            "CleanIce_precision", "CleanIce_recall", "CleanIce_IoU",
-            "Debris_precision",   "Debris_recall",   "Debris_IoU",
-        ]
-    else:
-        cname = "CleanIce" if has_ci else "Debris"
-        columns = ["tile", f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
+# ---------------------------------------------------------------------
+# Prediction runner for a single checkpoint combination
+# ---------------------------------------------------------------------
+def run_prediction(
+    frame_ci, frame_deb, thr_ci, thr_deb,
+    test_tiles, cmap, vis_mode, vis_maxw,
+    preds_dir, has_ci, has_deb
+):
+    """
+    Run predictions on all test tiles for a single checkpoint combination.
 
+    Returns:
+        df_rows: List of per-tile metric rows
+        acc: Dict of accumulated TP/FP/FN counts
+    """
     df_rows = []
-
-    # accumulators
     acc = dict(
         ci_tp=0.0, ci_fp=0.0, ci_fn=0.0,
         db_tp=0.0, db_fp=0.0, db_fn=0.0,
     )
 
-    # Build appropriate colormap based on prediction mode
-    if has_ci and has_deb:
-        # Merged multi-class: BG, CI, Debris, mask
-        cmap = build_cmap(3, is_binary=False)
-    elif has_ci:
-        # Binary CleanIce: NOT~CI, CI, mask
-        cmap = build_cmap(2, is_binary=True, classname="CleanIce")
-    else:
-        # Binary Debris: NOT~Debris, Debris, mask
-        cmap = build_cmap(2, is_binary=True, classname="Debris")
-
-    # ------------------------------------------------------------------
-    # MAIN LOOP
-    # ------------------------------------------------------------------
     for tile in tqdm(test_tiles, desc="Predicting"):
-
         name = tile.name
         base = tile.stem
 
@@ -236,13 +181,13 @@ if __name__ == "__main__":
             # Visualization label maps - use binary labeling for consistency
             y_gt = y_full.copy()
             y_gt[invalid] = 255
-            
+
             # For binary visualization: convert to 0=NOT~class, 1=class, 255=mask
             y_gt_vis = np.zeros_like(y_full)
             y_gt_vis[valid & (y_full == model_class)] = 1
             y_gt_vis[valid & (y_full != model_class)] = 0
             y_gt_vis[invalid] = 255
-            
+
             y_pred = np.zeros_like(y_full)
             y_pred[valid & (pred_bin == 1)] = 1  # class
             y_pred[valid & (pred_bin == 0)] = 0  # NOT~class
@@ -350,41 +295,201 @@ if __name__ == "__main__":
 
         cv2.imwrite(str(viz_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
 
+    return df_rows, acc
+
+
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+
+    conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
+    gpu = int(conf.get("gpu_rank", 0))
+
+    runs_dir = pathlib.Path(conf.runs_dir)
+    out_root = pathlib.Path(conf.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # Visualization settings
+    vis_conf = conf.get("visualization", {})
+    vis_mode = vis_conf.get("mode", "scaled")      # scaled or fullres
+    vis_maxw = int(vis_conf.get("max_width", 2400))
+
+    has_ci  = "cleanice" in conf
+    has_deb = "debris"  in conf
+
+    if not (has_ci or has_deb):
+        raise RuntimeError("predict YAML must specify cleanice: or debris:")
+
     # ------------------------------------------------------------------
-    # FINAL SUMMARY
+    # Get checkpoint lists
     # ------------------------------------------------------------------
-    print("\n===== TEST SET SUMMARY =====")
-
-    if has_ci and has_deb:
-        Pci = precision(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
-        Rci = recall(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
-        Ici = IoU(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
-
-        Pdb = precision(acc["db_tp"], acc["db_fp"], acc["db_fn"])
-        Rdb = recall(acc["db_tp"], acc["db_fp"], acc["db_fn"])
-        Idb = IoU(acc["db_tp"], acc["db_fp"], acc["db_fn"])
-
-        print(f"CleanIce TOTAL: P={Pci:.4f} R={Rci:.4f} IoU={Ici:.4f}")
-        print(f"Debris   TOTAL: P={Pdb:.4f} R={Rdb:.4f} IoU={Idb:.4f}")
-
-        df_rows.append(["TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
-
+    if has_ci:
+        ck = conf.cleanice
+        ci_checkpoints = get_checkpoint_paths(runs_dir, ck.run_name, ck.model_type)
+        thr_ci = float(ck.threshold)
     else:
-        if has_ci:
-            tp = acc["ci_tp"]; fp = acc["ci_fp"]; fn = acc["ci_fn"]
-            cname = "CleanIce"
-        else:
-            tp = acc["db_tp"]; fp = acc["db_fp"]; fn = acc["db_fn"]
-            cname = "Debris"
+        ci_checkpoints = [(None, None)]
+        thr_ci = None
 
-        P = precision(tp, fp, fn); R = recall(tp, fp, fn); I = IoU(tp, fp, fn)
-        print(f"{cname} TOTAL: P={P:.4f} R={R:.4f} IoU={I:.4f}")
-        df_rows.append(["TOTAL", P, R, I])
+    if has_deb:
+        ck = conf.debris
+        deb_checkpoints = get_checkpoint_paths(runs_dir, ck.run_name, ck.model_type)
+        thr_deb = float(ck.threshold)
+    else:
+        deb_checkpoints = [(None, None)]
+        thr_deb = None
 
-    df = pd.DataFrame(df_rows, columns=columns)
-    df.to_csv(out_dir / "metrics.csv", index=False)
+    # Build appropriate colormap based on prediction mode
+    if has_ci and has_deb:
+        cmap = build_cmap(3, is_binary=False)
+    elif has_ci:
+        cmap = build_cmap(2, is_binary=True, classname="CleanIce")
+    else:
+        cmap = build_cmap(2, is_binary=True, classname="Debris")
 
-    print("\n✓ Prediction complete.")
-    print("Metrics CSV:", out_dir / "metrics.csv")
-    print("Visualization PNGs:", preds_dir)
+    # CSV columns
+    if has_ci and has_deb:
+        columns = [
+            "checkpoint", "tile",
+            "CleanIce_precision", "CleanIce_recall", "CleanIce_IoU",
+            "Debris_precision",   "Debris_recall",   "Debris_IoU",
+        ]
+    else:
+        cname = "CleanIce" if has_ci else "Debris"
+        columns = ["checkpoint", "tile", f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
+
+    # Summary for all checkpoints
+    all_checkpoint_results = []
+
+    # ------------------------------------------------------------------
+    # LOOP OVER ALL CHECKPOINT COMBINATIONS
+    # ------------------------------------------------------------------
+    print(f"\nRunning predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n")
+
+    for ci_ckpt_path, ci_ckpt_name in ci_checkpoints:
+        for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
+
+            # ----------------------------------------------------------
+            # Load models
+            # ----------------------------------------------------------
+            frame_ci = None
+            frame_deb = None
+
+            if has_ci:
+                print(f"\nLoading CleanIce: {ci_ckpt_path}")
+                frame_ci = Framework.from_checkpoint(ci_ckpt_path, device=gpu, testing=True)
+
+            if has_deb:
+                print(f"Loading Debris: {deb_ckpt_path}")
+                frame_deb = Framework.from_checkpoint(deb_ckpt_path, device=gpu, testing=True)
+
+            # Get test tiles (from whichever model was loaded)
+            data_dir = (
+                frame_ci.loader_opts.processed_dir if has_ci else
+                frame_deb.loader_opts.processed_dir
+            )
+            test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
+
+            # ----------------------------------------------------------
+            # Create output directory for this checkpoint
+            # ----------------------------------------------------------
+            if has_ci and not has_deb:
+                ckpt_name = ci_ckpt_name
+                run_base = conf.cleanice.run_name
+            elif has_deb and not has_ci:
+                ckpt_name = deb_ckpt_name
+                run_base = conf.debris.run_name
+            else:
+                ckpt_name = f"ci_{ci_ckpt_name}__db_{deb_ckpt_name}"
+                run_base = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
+
+            out_dir = out_root / run_base / ckpt_name
+            preds_dir = out_dir / "preds"
+            preds_dir.mkdir(parents=True, exist_ok=True)
+
+            print(f"Output dir: {out_dir}")
+            print(f"Running on {len(test_tiles)} test tiles...")
+
+            # ----------------------------------------------------------
+            # Run predictions
+            # ----------------------------------------------------------
+            df_rows, acc = run_prediction(
+                frame_ci, frame_deb, thr_ci, thr_deb,
+                test_tiles, cmap, vis_mode, vis_maxw,
+                preds_dir, has_ci, has_deb
+            )
+
+            # ----------------------------------------------------------
+            # Compute summary metrics
+            # ----------------------------------------------------------
+            if has_ci and has_deb:
+                Pci = precision(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
+                Rci = recall(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
+                Ici = IoU(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
+
+                Pdb = precision(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+                Rdb = recall(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+                Idb = IoU(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+
+                print(f"\n===== {ckpt_name} SUMMARY =====")
+                print(f"CleanIce: P={Pci:.4f} R={Rci:.4f} IoU={Ici:.4f}")
+                print(f"Debris:   P={Pdb:.4f} R={Rdb:.4f} IoU={Idb:.4f}")
+
+                df_rows.append([ckpt_name, "TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
+                all_checkpoint_results.append({
+                    "checkpoint": ckpt_name,
+                    "CI_P": Pci, "CI_R": Rci, "CI_IoU": Ici,
+                    "Deb_P": Pdb, "Deb_R": Rdb, "Deb_IoU": Idb
+                })
+
+            else:
+                if has_ci:
+                    tp = acc["ci_tp"]; fp = acc["ci_fp"]; fn = acc["ci_fn"]
+                    cname = "CleanIce"
+                else:
+                    tp = acc["db_tp"]; fp = acc["db_fp"]; fn = acc["db_fn"]
+                    cname = "Debris"
+
+                P = precision(tp, fp, fn)
+                R = recall(tp, fp, fn)
+                I = IoU(tp, fp, fn)
+
+                print(f"\n===== {ckpt_name} SUMMARY =====")
+                print(f"{cname}: P={P:.4f} R={R:.4f} IoU={I:.4f}")
+
+                df_rows.append([ckpt_name, "TOTAL", P, R, I])
+                all_checkpoint_results.append({
+                    "checkpoint": ckpt_name,
+                    "P": P, "R": R, "IoU": I
+                })
+
+            # Add checkpoint column to all rows
+            df_rows_with_ckpt = [[ckpt_name] + row for row in df_rows]
+
+            # Save per-tile metrics for this checkpoint
+            df = pd.DataFrame(df_rows_with_ckpt, columns=columns)
+            df.to_csv(out_dir / "metrics.csv", index=False)
+            print(f"Saved metrics: {out_dir / 'metrics.csv'}")
+
+            # Free GPU memory
+            del frame_ci, frame_deb
+            torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------------
+    # FINAL SUMMARY ACROSS ALL CHECKPOINTS
+    # ------------------------------------------------------------------
+    if len(all_checkpoint_results) > 1:
+        print("\n" + "="*80)
+        print("SUMMARY ACROSS ALL CHECKPOINTS")
+        print("="*80)
+
+        summary_df = pd.DataFrame(all_checkpoint_results)
+        summary_path = out_root / run_base / "checkpoints_comparison.csv"
+        summary_df.to_csv(summary_path, index=False)
+
+        print(summary_df.to_string(index=False))
+        print(f"\nSaved checkpoint comparison: {summary_path}")
+
+    print("\n✓ Prediction complete for all checkpoints.")
 

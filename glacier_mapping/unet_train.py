@@ -217,17 +217,11 @@ if __name__ == "__main__":
             top_checkpoints = top_checkpoints[:max_checkpoints]
         
         # Save checkpoint if it's in top-k
-        if inserted or (not inserted and len(top_checkpoints) <= max_checkpoints):
+        # Check if the checkpoint actually made it into the list
+        checkpoint_in_list = any(cp["epoch"] == epoch for cp in top_checkpoints)
+        if checkpoint_in_list:
             rank = next(i for i, cp in enumerate(top_checkpoints) if cp["epoch"] == epoch)
             frame.save_with_rank(model_output_dir, epoch, rank + 1, float(loss_val))
-            
-            # Clean up old checkpoint if we exceeded max_checkpoints
-            if len(top_checkpoints) > max_checkpoints:
-                old_checkpoint = top_checkpoints[max_checkpoints]
-                old_file = model_output_dir / f"model_top{max_checkpoints+1:02d}_epoch{old_checkpoint['epoch']:04d}_val{old_checkpoint['val_loss']:.6f}.pt"
-                if old_file.exists():
-                    old_file.unlink()
-                    print(f"Removed old checkpoint: {old_file.name}")
         
         # Update best tracking for early stopping
         if loss_val < best_val_loss:
