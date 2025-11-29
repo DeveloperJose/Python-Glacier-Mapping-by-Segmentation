@@ -22,7 +22,8 @@ import glacier_mapping.data.slice as fn
 import glacier_mapping.utils as utils
 
 import matplotlib
-matplotlib.use("Agg")   # ensures no GUI backend is used
+
+matplotlib.use("Agg")  # ensures no GUI backend is used
 
 if __name__ == "__main__":
     random.seed(42)
@@ -137,9 +138,9 @@ if __name__ == "__main__":
     # ============================================================================
     statistics = {}
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("DATASET STATISTICS BY SPLIT")
-    print("="*80)
+    print("=" * 80)
 
     for split in ["train", "val", "test"]:
         split_df = saved_df[saved_df["split"] == split]
@@ -168,26 +169,26 @@ if __name__ == "__main__":
 
         # Store statistics
         statistics[split] = {
-            "images": int(len(split_df['Image'].unique())),
+            "images": int(len(split_df["Image"].unique())),
             "slices": int(len(split_df)),
             "total_pixels": int(total_all),
             "pixels": {
                 "background": int(total_bg),
                 "clean_ice": int(total_ci),
                 "debris_ice": int(total_debris),
-                "masked_invalid": int(total_masked)
+                "masked_invalid": int(total_masked),
             },
             "percentages_all_pixels": {
                 "background": float(pct_bg),
                 "clean_ice": float(pct_ci),
                 "debris_ice": float(pct_debris),
-                "masked_invalid": float(pct_masked)
+                "masked_invalid": float(pct_masked),
             },
             "percentages_valid_pixels": {
                 "background": float(pct_bg_valid),
                 "clean_ice": float(pct_ci_valid),
-                "debris_ice": float(pct_debris_valid)
-            }
+                "debris_ice": float(pct_debris_valid),
+            },
         }
 
         # Print statistics
@@ -210,10 +211,12 @@ if __name__ == "__main__":
     # ============================================================================
     statistics["skipped"] = {}
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("SKIPPED SLICES STATISTICS (due to filtering)")
-    print("="*80)
-    print(f"Filter threshold: {conf.filter * 100}% minimum glacier pixels (CI + Debris)")
+    print("=" * 80)
+    print(
+        f"Filter threshold: {conf.filter * 100}% minimum glacier pixels (CI + Debris)"
+    )
 
     for split in ["train", "val", "test"]:
         split_skipped_df = skipped_df[skipped_df["split"] == split]
@@ -247,19 +250,19 @@ if __name__ == "__main__":
                 "background": int(total_bg),
                 "clean_ice": int(total_ci),
                 "debris_ice": int(total_debris),
-                "masked_invalid": int(total_masked)
+                "masked_invalid": int(total_masked),
             },
             "percentages_all_pixels": {
                 "background": float(pct_bg),
                 "clean_ice": float(pct_ci),
                 "debris_ice": float(pct_debris),
-                "masked_invalid": float(pct_masked)
+                "masked_invalid": float(pct_masked),
             },
             "percentages_valid_pixels": {
                 "background": float(pct_bg_valid),
                 "clean_ice": float(pct_ci_valid),
-                "debris_ice": float(pct_debris_valid)
-            }
+                "debris_ice": float(pct_debris_valid),
+            },
         }
 
         # Print statistics
@@ -277,14 +280,30 @@ if __name__ == "__main__":
         print(f"    Debris Ice:        {pct_debris_valid:5.2f}%")
 
     # Add summary statistics
-    total_kept_slices = sum(stats["slices"] for stats in statistics.values() if isinstance(stats, dict) and "slices" in stats)
-    total_skipped_slices = sum(stats["slices"] for stats in statistics.get("skipped", {}).values() if isinstance(stats, dict))
+    total_kept_slices = sum(
+        stats["slices"]
+        for stats in statistics.values()
+        if isinstance(stats, dict) and "slices" in stats
+    )
+    total_skipped_slices = sum(
+        stats["slices"]
+        for stats in statistics.get("skipped", {}).values()
+        if isinstance(stats, dict)
+    )
     total_all_slices = total_kept_slices + total_skipped_slices
-    kept_percentage = (total_kept_slices / total_all_slices * 100) if total_all_slices > 0 else 0
-    skipped_percentage = (total_skipped_slices / total_all_slices * 100) if total_all_slices > 0 else 0
+    kept_percentage = (
+        (total_kept_slices / total_all_slices * 100) if total_all_slices > 0 else 0
+    )
+    skipped_percentage = (
+        (total_skipped_slices / total_all_slices * 100) if total_all_slices > 0 else 0
+    )
 
     statistics["summary"] = {
-        "total_images": sum(stats["images"] for stats in statistics.values() if isinstance(stats, dict) and "images" in stats),
+        "total_images": sum(
+            stats["images"]
+            for stats in statistics.values()
+            if isinstance(stats, dict) and "images" in stats
+        ),
         "total_slices_kept": total_kept_slices,
         "total_slices_skipped": total_skipped_slices,
         "total_slices_processed": total_all_slices,
@@ -293,31 +312,35 @@ if __name__ == "__main__":
         "split_ratios": {
             "test": float(conf.test),
             "val": float(conf.val),
-            "train": 1.0 - float(conf.test) - float(conf.val)
+            "train": 1.0 - float(conf.test) - float(conf.val),
         },
         "config": {
             "window_size": conf.window_size,
             "overlap": int(conf.overlap),
-            "filter_threshold": float(conf.filter)
-        }
+            "filter_threshold": float(conf.filter),
+        },
     }
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("OVERALL SUMMARY:")
     print(f"  Total slices processed: {total_all_slices:,}")
     print(f"  Slices kept:            {total_kept_slices:,} ({kept_percentage:.2f}%)")
-    print(f"  Slices skipped:         {total_skipped_slices:,} ({skipped_percentage:.2f}%)")
-    print("="*80)
+    print(
+        f"  Slices skipped:         {total_skipped_slices:,} ({skipped_percentage:.2f}%)"
+    )
+    print("=" * 80)
 
     # Save statistics to JSON
     stats_path = Path(conf["out_dir"]) / "dataset_statistics.json"
-    with open(stats_path, 'w') as f:
+    with open(stats_path, "w") as f:
         json.dump(statistics, f, indent=2)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("FILES SAVED:")
     print(f"  Dataset statistics:     {stats_path}")
     print(f"  Kept slices metadata:   {Path(conf['out_dir']) / 'slice_meta.csv'}")
-    print(f"  Skipped slices metadata: {Path(conf['out_dir']) / 'skipped_slices_meta.csv'}")
+    print(
+        f"  Skipped slices metadata: {Path(conf['out_dir']) / 'skipped_slices_meta.csv'}"
+    )
     print(f"\nProcessing completed successfully!")
-    print("="*80)
+    print("=" * 80)

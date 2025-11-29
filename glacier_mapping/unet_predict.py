@@ -82,12 +82,7 @@ def get_pr_iou(pred, true):
     pred_t = torch.from_numpy(pred.astype(np.uint8))
     true_t = torch.from_numpy(true.astype(np.uint8))
     tp, fp, fn = tp_fp_fn(pred_t, true_t)
-    return (
-        precision(tp, fp, fn),
-        recall(tp, fp, fn),
-        IoU(tp, fp, fn),
-        tp, fp, fn
-    )
+    return (precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn), tp, fp, fn)
 
 
 def get_checkpoint_paths(runs_dir, run_name, model_type):
@@ -118,9 +113,17 @@ def get_checkpoint_paths(runs_dir, run_name, model_type):
 # Prediction runner for a single checkpoint combination
 # ---------------------------------------------------------------------
 def run_prediction(
-    frame_ci, frame_deb, thr_ci, thr_deb,
-    test_tiles, cmap, vis_mode, vis_maxw,
-    preds_dir, has_ci, has_deb
+    frame_ci,
+    frame_deb,
+    thr_ci,
+    thr_deb,
+    test_tiles,
+    cmap,
+    vis_mode,
+    vis_maxw,
+    preds_dir,
+    has_ci,
+    has_deb,
 ):
     """
     Run predictions on all test tiles for a single checkpoint combination.
@@ -131,8 +134,12 @@ def run_prediction(
     """
     df_rows = []
     acc = dict(
-        ci_tp=0.0, ci_fp=0.0, ci_fn=0.0,
-        db_tp=0.0, db_fp=0.0, db_fn=0.0,
+        ci_tp=0.0,
+        ci_fp=0.0,
+        ci_fn=0.0,
+        db_tp=0.0,
+        db_fp=0.0,
+        db_fn=0.0,
     )
 
     for tile in tqdm(test_tiles, desc="Predicting"):
@@ -152,10 +159,9 @@ def run_prediction(
         # SINGLE MODEL
         # ===============================================================
         if has_ci ^ has_deb:
-
             frame = frame_ci if has_ci else frame_deb
             model_class = 1 if has_ci else 2
-            model_name  = "CleanIce" if has_ci else "Debris"
+            model_name = "CleanIce" if has_ci else "Debris"
             thr = thr_ci if has_ci else thr_deb
 
             probs = softmax_probs(frame, x_full)  # (H,W,2)
@@ -172,9 +178,13 @@ def run_prediction(
 
             # accumulate
             if has_ci:
-                acc["ci_tp"] += tp; acc["ci_fp"] += fp; acc["ci_fn"] += fn
+                acc["ci_tp"] += tp
+                acc["ci_fp"] += fp
+                acc["ci_fn"] += fn
             else:
-                acc["db_tp"] += tp; acc["db_fp"] += fp; acc["db_fn"] += fn
+                acc["db_tp"] += tp
+                acc["db_fp"] += fp
+                acc["db_fn"] += fn
 
             df_rows.append([name, P, R, I])
 
@@ -194,8 +204,8 @@ def run_prediction(
             y_pred[invalid] = 255
 
             # TP/FP/FN masks - use binary visualization labels
-            gt_pos   = (y_gt_vis == 1) & valid  # class pixels in GT
-            pred_pos = (y_pred == 1) & valid     # class pixels in prediction
+            gt_pos = (y_gt_vis == 1) & valid  # class pixels in GT
+            pred_pos = (y_pred == 1) & valid  # class pixels in prediction
             tp_mask = gt_pos & pred_pos
             fp_mask = (~gt_pos) & pred_pos
             fn_mask = gt_pos & (~pred_pos)
@@ -223,8 +233,8 @@ def run_prediction(
         # MERGED CI + DEBRIS BINARY MODELS
         # ===============================================================
         else:
-            prob_ci  = softmax_probs(frame_ci,  x_full)
-            prob_db  = softmax_probs(frame_deb, x_full)
+            prob_ci = softmax_probs(frame_ci, x_full)
+            prob_db = softmax_probs(frame_deb, x_full)
 
             merged, probs = merge_ci_debris(prob_ci, prob_db, thr_ci, thr_deb)
             np.save(prob_path, probs)
@@ -238,16 +248,20 @@ def run_prediction(
             # CleanIce metrics
             Pci, Rci, Ici, tp, fp, fn = get_pr_iou(
                 (merged[valid] == 1).astype(np.uint8),
-                (y_full[valid] == 1).astype(np.uint8)
+                (y_full[valid] == 1).astype(np.uint8),
             )
-            acc["ci_tp"] += tp; acc["ci_fp"] += fp; acc["ci_fn"] += fn
+            acc["ci_tp"] += tp
+            acc["ci_fp"] += fp
+            acc["ci_fn"] += fn
 
             # Debris metrics
             Pdb, Rdb, Idb, tp, fp, fn = get_pr_iou(
                 (merged[valid] == 2).astype(np.uint8),
-                (y_full[valid] == 2).astype(np.uint8)
+                (y_full[valid] == 2).astype(np.uint8),
             )
-            acc["db_tp"] += tp; acc["db_fp"] += fp; acc["db_fn"] += fn
+            acc["db_tp"] += tp
+            acc["db_fp"] += fp
+            acc["db_fn"] += fn
 
             df_rows.append([name, Pci, Rci, Ici, Pdb, Rdb, Idb])
 
@@ -258,9 +272,11 @@ def run_prediction(
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
             # Confidence = prob of predicted class
-            conf_map = probs[np.arange(probs.shape[0])[:,None],
-                             np.arange(probs.shape[1])[None,:],
-                             merged]
+            conf_map = probs[
+                np.arange(probs.shape[0])[:, None],
+                np.arange(probs.shape[1])[None, :],
+                merged,
+            ]
             conf_map[invalid] = 0
             conf_rgb = make_confidence_map(conf_map, invalid_mask=invalid)
             entropy_rgb = make_entropy_map(probs, invalid_mask=invalid)
@@ -302,7 +318,6 @@ def run_prediction(
 # MAIN
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-
     conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
     # gpu = int(conf.get("gpu_rank", 0))
     gpu = conf.get("gpu_rank")
@@ -313,11 +328,11 @@ if __name__ == "__main__":
 
     # Visualization settings
     vis_conf = conf.get("visualization", {})
-    vis_mode = vis_conf.get("mode", "scaled")      # scaled or fullres
+    vis_mode = vis_conf.get("mode", "scaled")  # scaled or fullres
     vis_maxw = int(vis_conf.get("max_width", 2400))
 
-    has_ci  = "cleanice" in conf
-    has_deb = "debris"  in conf
+    has_ci = "cleanice" in conf
+    has_deb = "debris" in conf
 
     if not (has_ci or has_deb):
         raise RuntimeError("predict YAML must specify cleanice: or debris:")
@@ -352,13 +367,24 @@ if __name__ == "__main__":
     # CSV columns
     if has_ci and has_deb:
         columns = [
-            "checkpoint", "tile",
-            "CleanIce_precision", "CleanIce_recall", "CleanIce_IoU",
-            "Debris_precision",   "Debris_recall",   "Debris_IoU",
+            "checkpoint",
+            "tile",
+            "CleanIce_precision",
+            "CleanIce_recall",
+            "CleanIce_IoU",
+            "Debris_precision",
+            "Debris_recall",
+            "Debris_IoU",
         ]
     else:
         cname = "CleanIce" if has_ci else "Debris"
-        columns = ["checkpoint", "tile", f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
+        columns = [
+            "checkpoint",
+            "tile",
+            f"{cname}_precision",
+            f"{cname}_recall",
+            f"{cname}_IoU",
+        ]
 
     # Summary for all checkpoints
     all_checkpoint_results = []
@@ -366,11 +392,12 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # LOOP OVER ALL CHECKPOINT COMBINATIONS
     # ------------------------------------------------------------------
-    print(f"\nRunning predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n")
+    print(
+        f"\nRunning predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n"
+    )
 
     for ci_ckpt_path, ci_ckpt_name in ci_checkpoints:
         for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
-
             # ----------------------------------------------------------
             # Load models
             # ----------------------------------------------------------
@@ -379,16 +406,21 @@ if __name__ == "__main__":
 
             if has_ci:
                 print(f"\nLoading CleanIce: {ci_ckpt_path}")
-                frame_ci = Framework.from_checkpoint(ci_ckpt_path, device=gpu, testing=True)
+                frame_ci = Framework.from_checkpoint(
+                    ci_ckpt_path, device=gpu, testing=True
+                )
 
             if has_deb:
                 print(f"Loading Debris: {deb_ckpt_path}")
-                frame_deb = Framework.from_checkpoint(deb_ckpt_path, device=gpu, testing=True)
+                frame_deb = Framework.from_checkpoint(
+                    deb_ckpt_path, device=gpu, testing=True
+                )
 
             # Get test tiles (from whichever model was loaded)
             data_dir = (
-                frame_ci.loader_opts.processed_dir if has_ci else
-                frame_deb.loader_opts.processed_dir
+                frame_ci.loader_opts.processed_dir
+                if has_ci
+                else frame_deb.loader_opts.processed_dir
             )
             test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
 
@@ -416,9 +448,17 @@ if __name__ == "__main__":
             # Run predictions
             # ----------------------------------------------------------
             df_rows, acc = run_prediction(
-                frame_ci, frame_deb, thr_ci, thr_deb,
-                test_tiles, cmap, vis_mode, vis_maxw,
-                preds_dir, has_ci, has_deb
+                frame_ci,
+                frame_deb,
+                thr_ci,
+                thr_deb,
+                test_tiles,
+                cmap,
+                vis_mode,
+                vis_maxw,
+                preds_dir,
+                has_ci,
+                has_deb,
             )
 
             # ----------------------------------------------------------
@@ -440,18 +480,28 @@ if __name__ == "__main__":
                 # df_rows.append([ckpt_name, "TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
                 df_rows.append(["TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
 
-                all_checkpoint_results.append({
-                    "checkpoint": ckpt_name,
-                    "CI_P": Pci, "CI_R": Rci, "CI_IoU": Ici,
-                    "Deb_P": Pdb, "Deb_R": Rdb, "Deb_IoU": Idb
-                })
+                all_checkpoint_results.append(
+                    {
+                        "checkpoint": ckpt_name,
+                        "CI_P": Pci,
+                        "CI_R": Rci,
+                        "CI_IoU": Ici,
+                        "Deb_P": Pdb,
+                        "Deb_R": Rdb,
+                        "Deb_IoU": Idb,
+                    }
+                )
 
             else:
                 if has_ci:
-                    tp = acc["ci_tp"]; fp = acc["ci_fp"]; fn = acc["ci_fn"]
+                    tp = acc["ci_tp"]
+                    fp = acc["ci_fp"]
+                    fn = acc["ci_fn"]
                     cname = "CleanIce"
                 else:
-                    tp = acc["db_tp"]; fp = acc["db_fp"]; fn = acc["db_fn"]
+                    tp = acc["db_tp"]
+                    fp = acc["db_fp"]
+                    fn = acc["db_fn"]
                     cname = "Debris"
 
                 P = precision(tp, fp, fn)
@@ -463,10 +513,9 @@ if __name__ == "__main__":
 
                 # df_rows.append([ckpt_name, "TOTAL", P, R, I])
                 df_rows.append(["TOTAL", P, R, I])
-                all_checkpoint_results.append({
-                    "checkpoint": ckpt_name,
-                    "P": P, "R": R, "IoU": I
-                })
+                all_checkpoint_results.append(
+                    {"checkpoint": ckpt_name, "P": P, "R": R, "IoU": I}
+                )
 
             # Add checkpoint column to all rows
             df_rows_with_ckpt = [[ckpt_name] + row for row in df_rows]
@@ -484,9 +533,9 @@ if __name__ == "__main__":
     # FINAL SUMMARY ACROSS ALL CHECKPOINTS
     # ------------------------------------------------------------------
     if len(all_checkpoint_results) > 1:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("SUMMARY ACROSS ALL CHECKPOINTS")
-        print("="*80)
+        print("=" * 80)
 
         summary_df = pd.DataFrame(all_checkpoint_results)
         summary_path = out_root / run_base / "checkpoints_comparison.csv"
@@ -496,4 +545,3 @@ if __name__ == "__main__":
         print(f"\nSaved checkpoint comparison: {summary_path}")
 
     print("\n✓ Prediction complete for all checkpoints.")
-

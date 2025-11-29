@@ -49,7 +49,6 @@ warnings.filterwarnings("ignore")
 # MAIN
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-
     # ------------------------------------------------------------
     # Load config
     # ------------------------------------------------------------
@@ -147,7 +146,6 @@ if __name__ == "__main__":
     final_epoch = 0
 
     for epoch in range(1, conf.training_opts.epochs + 1):
-
         # ------------------------ TRAIN ------------------------
         loss_train, train_metric, loss_alpha = frame.train_one_epoch(
             epoch, train_loader
@@ -155,9 +153,7 @@ if __name__ == "__main__":
         frame.log_metrics(writer, train_metric, epoch, "train")
 
         # ------------------------ VALIDATE ---------------------
-        loss_val, val_metric = frame.validate_one_epoch(
-            epoch, val_loader, test=False
-        )
+        loss_val, val_metric = frame.validate_one_epoch(epoch, val_loader, test=False)
         frame.log_metrics(writer, val_metric, epoch, "val")
 
         # ------------------------ LOG IMAGES -------------------
@@ -211,7 +207,7 @@ if __name__ == "__main__":
                 "epoch": epoch,
                 "val_loss": float(loss_val),
                 "train_metric": train_metric,
-                "val_metric": val_metric
+                "val_metric": val_metric,
             }
             improvement_checkpoints.append(checkpoint_data)
         else:
@@ -246,8 +242,11 @@ if __name__ == "__main__":
     print(f"Best epoch: {best_epoch}")
     print(f"Best validation loss: {best_val_loss:.6f}")
     print(f"Total improvements saved: {len(improvement_checkpoints)}\n")
-    print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
-    "Epoch", "Val Loss", "Precision", "Recall", "IoU"))
+    print(
+        "{:<8} {:<12} {:<10} {:<10} {:<10}".format(
+            "Epoch", "Val Loss", "Precision", "Recall", "IoU"
+        )
+    )
     print("-" * 58)
 
     def to_float(x):
@@ -277,7 +276,9 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     if best_val_metric is not None:
         print("\n================ BEST EPOCH DETAILED ================\n")
-        print("{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU"))
+        print(
+            "{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU")
+        )
         print("-" * 48)
         for cname, (p, r, i) in zip(
             frame.mask_names,
@@ -298,7 +299,7 @@ if __name__ == "__main__":
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
         "total_improvements": len(improvement_checkpoints),
-        "improvement_checkpoints": improvement_checkpoints
+        "improvement_checkpoints": improvement_checkpoints,
     }
     with open(output_dir / "checkpoints_summary.json", "w") as f:
         json.dump(checkpoints_summary, f, indent=4)
@@ -318,4 +319,3 @@ if __name__ == "__main__":
         pass
 
     print(f"Training run complete: {run_name}")
-

@@ -54,7 +54,9 @@ class Framework:
         conf = Dict(yaml.safe_load(open(conf_path)))
 
         # Prefer top-level gpu_rank, fallback to training_opts.gpu_rank, default 0
-        gpu_rank = int(conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0)))
+        gpu_rank = int(
+            conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0))
+        )
         if device is None:
             device = gpu_rank
 
@@ -416,7 +418,7 @@ class Framework:
 
             iterator.set_description(
                 f"Train Ep={epoch} Step={i} "
-                f"Loss={batch_loss_f:.3f} Avg={loss_sum/(i+1):.3f}"
+                f"Loss={batch_loss_f:.3f} Avg={loss_sum / (i + 1):.3f}"
             )
 
         avg_loss = loss_sum / (i + 1)
@@ -476,12 +478,14 @@ class Framework:
 
             iterator.set_description(
                 f"{desc} Ep={epoch} Step={i} "
-                f"Loss={batch_loss_f:.3f} Avg={total_loss/max(count_batches,1):.3f}"
+                f"Loss={batch_loss_f:.3f} Avg={total_loss / max(count_batches, 1):.3f}"
             )
 
         if count_batches == 0:
             print(f"[WARN] {desc}: all patches ignored.")
-            metrics_dict = self._compute_metrics_dict(tp_tot, fp_tot, fn_tot, metric_names)
+            metrics_dict = self._compute_metrics_dict(
+                tp_tot, fp_tot, fn_tot, metric_names
+            )
             return 0.0, metrics_dict
 
         avg_loss = total_loss / count_batches
@@ -597,7 +601,9 @@ class Framework:
             for reg_type, coeff in self.reg_opts.items():
                 if reg_type not in reg_map:
                     raise ValueError(f"Unknown regularization type: {reg_type}")
-                total_loss += reg_map[reg_type](self.model.parameters(), coeff, self.device)
+                total_loss += reg_map[reg_type](
+                    self.model.parameters(), coeff, self.device
+                )
 
         return total_loss
 
@@ -644,9 +650,7 @@ class Framework:
     def segment(self, y_hat):
         if self.multi_class:
             y_hat = torch.argmax(y_hat, axis=3)
-            y_hat = torch.nn.functional.one_hot(
-                y_hat, num_classes=self.num_classes
-            )
+            y_hat = torch.nn.functional.one_hot(y_hat, num_classes=self.num_classes)
         else:
             y_hat = torch.sigmoid(y_hat)
         return y_hat
@@ -662,7 +666,9 @@ class Framework:
     def log_metrics(self, writer, metrics, epoch, stage):
         for metric_name, values in metrics.items():
             for class_name, value in zip(self.mask_names, values):
-                writer.add_scalar(f"{stage}/{metric_name}_{class_name}", float(value), epoch)
+                writer.add_scalar(
+                    f"{stage}/{metric_name}_{class_name}", float(value), epoch
+                )
 
     def freeze_layers(self, layers=None):
         for i, layer in enumerate(self.model.parameters()):
@@ -695,7 +701,11 @@ class Framework:
             labels = labels.permute(0, 3, 1, 2).to(self.device)
             outputs = self.model(inputs)
             # Note: this call assumes binary (old API); kept only for legacy debugging
-            loss = self.calc_loss(outputs, labels, torch.zeros(labels.shape[0:3], dtype=torch.long, device=self.device))
+            loss = self.calc_loss(
+                outputs,
+                labels,
+                torch.zeros(labels.shape[0:3], dtype=torch.long, device=self.device),
+            )
             if batch_num > 1 and loss > 4 * best_loss:
                 return log_lrs[10:-5], losses[10:-5]
             if loss < best_loss or batch_num == 1:
@@ -804,30 +814,35 @@ class Framework:
         """
         Print end-of-epoch table showing precision/recall/IoU per class.
         """
+
         def fmt(v):
             if isinstance(v, torch.Tensor):
                 v = v.item()
             return f"{float(v):.4f}"
 
         print(f"\n===== Epoch {epoch} Summary =====")
-        print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
-            "Split", "Class", "Precision", "Recall", "IoU"
-        ))
+        print(
+            "{:<8} {:<12} {:<10} {:<10} {:<10}".format(
+                "Split", "Class", "Precision", "Recall", "IoU"
+            )
+        )
         print("-" * 54)
 
         for split, metrics in [
             ("Train", train_metric),
-            ("Val",   val_metric),
+            ("Val", val_metric),
             # ("Test",  test_metric if test_metric else val_metric),
         ]:
             for i, cname in enumerate(self.mask_names):
-                print("{:<8} {:<12} {:<10} {:<10} {:<10}".format(
-                    split,
-                    cname,
-                    fmt(metrics["precision"][i]),
-                    fmt(metrics["recall"][i]),
-                    fmt(metrics["IoU"][i]),
-                ))
+                print(
+                    "{:<8} {:<12} {:<10} {:<10} {:<10}".format(
+                        split,
+                        cname,
+                        fmt(metrics["precision"][i]),
+                        fmt(metrics["recall"][i]),
+                        fmt(metrics["IoU"][i]),
+                    )
+                )
             print("-" * 25)
         print("")
 
@@ -859,7 +874,11 @@ class Framework:
         is_binary = self.is_binary
         if is_binary:
             # For binary models, threshold channel 1 (foreground class)
-            threshold = self.metrics_opts.threshold[0] if isinstance(self.metrics_opts.threshold, list) else self.metrics_opts.threshold
+            threshold = (
+                self.metrics_opts.threshold[0]
+                if isinstance(self.metrics_opts.threshold, list)
+                else self.metrics_opts.threshold
+            )
             y_pred = (yhat_np[..., 1] >= threshold).astype(np.uint8)
         else:
             # For multi-class, use argmax across all classes
@@ -907,9 +926,24 @@ class Framework:
         # 4. TP / FP / FN
         # ------------------------------------
         # Use the visualization labels for consistency
-        tp_mask = (y_pred_vis == y_gt_vis) & (~ignore_mask) & (y_gt_vis != 0) & (y_gt_vis != 255)
-        fp_mask = (y_pred_vis != y_gt_vis) & (~ignore_mask) & (y_pred_vis != 0) & (y_pred_vis != 255)
-        fn_mask = (y_pred_vis != y_gt_vis) & (~ignore_mask) & (y_gt_vis != 0) & (y_gt_vis != 255)
+        tp_mask = (
+            (y_pred_vis == y_gt_vis)
+            & (~ignore_mask)
+            & (y_gt_vis != 0)
+            & (y_gt_vis != 255)
+        )
+        fp_mask = (
+            (y_pred_vis != y_gt_vis)
+            & (~ignore_mask)
+            & (y_pred_vis != 0)
+            & (y_pred_vis != 255)
+        )
+        fn_mask = (
+            (y_pred_vis != y_gt_vis)
+            & (~ignore_mask)
+            & (y_gt_vis != 0)
+            & (y_gt_vis != 255)
+        )
 
         tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
@@ -932,7 +966,9 @@ class Framework:
             R_val = model_metrics.recall(tp, fp, fn)
             I_val = model_metrics.IoU(tp, fp, fn)
 
-            metric_string_parts.append(f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}")
+            metric_string_parts.append(
+                f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
+            )
 
         metrics_text = " | ".join(metric_string_parts)
 
@@ -956,7 +992,6 @@ class Framework:
         # ------------------------------------
         img_tensor = torch.tensor(composite).permute(2, 0, 1).float() / 255.0
         writer.add_image(f"{stage}/visualization", img_tensor, epoch)
-
 
     def get_model_device(self):
         return self.model, self.device
@@ -1033,9 +1068,9 @@ class Framework:
             # Softmax along channel axis (last dim)
             threshold = None
             _y = torch.nn.functional.softmax(_y, dim=3)
-            _y = torch.squeeze(_y, dim=0)   # H,W,C
+            _y = torch.squeeze(_y, dim=0)  # H,W,C
             _y = _y.cpu().numpy()
-            cls = np.argmax(_y, axis=2)     # H,W
+            cls = np.argmax(_y, axis=2)  # H,W
             y_pred = cls.astype(np.uint8) + 1  # 1..C
         else:
             if threshold is None:
@@ -1107,7 +1142,7 @@ class Framework:
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
             ).astype(np.uint8)
 
-            ignore = (y_true_raw == 255)
+            ignore = y_true_raw == 255
             if invalid_mask is not None:
                 ignore |= invalid_mask
 
@@ -1155,9 +1190,9 @@ class Framework:
         totals = []
         for ci in range(n_classes):
             tp_, fp_, fn_ = tp_sum[ci], fp_sum[ci], fn_sum[ci]
-            totals.append((precision(tp_, fp_, fn_),
-                           recall(tp_, fp_, fn_),
-                           IoU(tp_, fp_, fn_)))
+            totals.append(
+                (precision(tp_, fp_, fn_), recall(tp_, fp_, fn_), IoU(tp_, fp_, fn_))
+            )
 
         if writer is not None:
             for (prec, rec, iou), cname in zip(totals, self.mask_names):
@@ -1179,14 +1214,14 @@ class Framework:
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
             ).astype(np.uint8)
 
-            ignore = (y_true_raw == 255)
+            ignore = y_true_raw == 255
             if invalid_mask is not None:
                 ignore |= invalid_mask
 
             # GT/PRED for visualization - ensure proper labeling
             y_gt_vis = y_true_raw.copy()
             y_pred_vis = y_pred.copy()
-            
+
             # For binary models, ensure proper 0/1 labeling before masking
             if self.is_binary:
                 # Binary models should have 0=NOT~class, 1=class, 255=mask
@@ -1200,7 +1235,7 @@ class Framework:
             else:
                 # Multi-class: 0=BG, 1=CI, 2=DCI, 255=mask
                 y_gt_vis[ignore] = 255
-                
+
             y_pred_vis[ignore] = 255
 
             # ----------- Correct RGB visualization -----------
@@ -1211,7 +1246,7 @@ class Framework:
 
             if norm_type == "mean-std":
                 mean = self.norm_arr[0].astype(np.float32)
-                std  = self.norm_arr[1].astype(np.float32)
+                std = self.norm_arr[1].astype(np.float32)
                 x_norm = (x_use - mean) / (std + 1e-6)
 
             elif norm_type == "min-max":
@@ -1236,9 +1271,24 @@ class Framework:
             entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
 
             # TP / FP / FN masks - use visualization labels for consistency
-            tp_mask = (y_pred_vis == y_gt_vis) & (~ignore) & (y_gt_vis != 0) & (y_gt_vis != 255)
-            fp_mask = (y_pred_vis != y_gt_vis) & (~ignore) & (y_pred_vis != 0) & (y_pred_vis != 255)
-            fn_mask = (y_pred_vis != y_gt_vis) & (~ignore) & (y_gt_vis != 0) & (y_gt_vis != 255)
+            tp_mask = (
+                (y_pred_vis == y_gt_vis)
+                & (~ignore)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
+            )
+            fp_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore)
+                & (y_pred_vis != 0)
+                & (y_pred_vis != 255)
+            )
+            fn_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
+            )
 
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
@@ -1261,7 +1311,9 @@ class Framework:
                 P_val = precision(tp_, fp_, fn_)
                 R_val = recall(tp_, fp_, fn_)
                 I_val = IoU(tp_, fp_, fn_)
-                metric_string_parts.append(f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}")
+                metric_string_parts.append(
+                    f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
+                )
 
             metrics_text = " | ".join(metric_string_parts)
 
@@ -1286,4 +1338,3 @@ class Framework:
                     torch.tensor(composite).permute(2, 0, 1).float() / 255.0,
                     epoch,
                 )
-

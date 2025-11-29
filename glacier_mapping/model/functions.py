@@ -28,4 +28,3 @@ def print_conf(conf):
     """
     for k, v in conf.items():
         log(logging.INFO, f"{k} = {v}")
-

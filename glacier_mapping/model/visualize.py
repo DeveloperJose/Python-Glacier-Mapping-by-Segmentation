@@ -17,15 +17,15 @@ from matplotlib import cm
 # ============================================================
 # GLOBAL COLORS (same scheme as training)
 # ============================================================
-COLOR_BG     = np.array([181, 101, 29], dtype=np.uint8)   # Brown
-COLOR_CI     = np.array([135, 206, 250], dtype=np.uint8)  # Light Blue
-COLOR_DEB    = np.array([255, 0, 0], dtype=np.uint8)      # Red
-COLOR_IGNORE = np.array([0, 0, 0], dtype=np.uint8)        # Black
+COLOR_BG = np.array([181, 101, 29], dtype=np.uint8)  # Brown
+COLOR_CI = np.array([135, 206, 250], dtype=np.uint8)  # Light Blue
+COLOR_DEB = np.array([255, 0, 0], dtype=np.uint8)  # Red
+COLOR_IGNORE = np.array([0, 0, 0], dtype=np.uint8)  # Black
 
 GLOBAL_CMAP = {
-    0:   COLOR_BG,
-    1:   COLOR_CI,
-    2:   COLOR_DEB,
+    0: COLOR_BG,
+    1: COLOR_CI,
+    2: COLOR_DEB,
     255: COLOR_IGNORE,
 }
 
@@ -58,19 +58,21 @@ def make_rgb_preview(x):
     rgb_uint8 = (rgb_norm * 255).clip(0, 255).astype(np.uint8)
     return rgb_uint8
 
+
 # ============================================================
 # COLORMAPS
 # ============================================================
 
+
 def build_cmap(num_classes, is_binary, classname=None):
     """
     Build categorical colormap for GT/Pred visualization.
-    
+
     For binary models:
         - 0 = NOT~class (brown)
-        - 1 = class (blue for CleanIce, red for Debris) 
+        - 1 = class (blue for CleanIce, red for Debris)
         - 255 = mask (black)
-    
+
     For multi-class:
         - 0 = BG (brown)
         - 1 = CleanIce (blue)
@@ -87,19 +89,20 @@ def build_cmap(num_classes, is_binary, classname=None):
     else:  # Debris
         return {0: COLOR_BG, 1: COLOR_DEB, 255: COLOR_IGNORE}
 
+
 def build_cmap_from_mask_names(mask_names):
     """
     Ensures categorical colors align with mask_names.
-    
+
     For binary models (2 names like ["NOT~CleanIce", "CleanIce"]):
         - index 0 : NOT~class (brown)
         - index 1 : class (blue for CleanIce, red for Debris)
-    
+
     For multi-class models (3 names like ["Background", "CleanIce", "Debris"]):
         - index 0 : background (brown)
         - index 1 : clean ice (blue)
         - index 2 : debris (red)
-    
+
     Always adds 255 -> black for mask.
     """
     cmap = {}
@@ -115,6 +118,7 @@ def build_cmap_from_mask_names(mask_names):
     cmap[255] = COLOR_IGNORE
     return cmap
 
+
 def label_to_color(label_img, cmap):
     """
     Convert integer label map into RGB using categorical cmap.
@@ -129,6 +133,7 @@ def label_to_color(label_img, cmap):
 # ============================================================
 # CONTINUOUS MAPS (VIRIDIS)
 # ============================================================
+
 
 def _viridis_from_scalar(scalar_01):
     """Helper: scalar [0,1] → RGB via VIRIDIS."""
@@ -172,6 +177,7 @@ def make_entropy_map(prob_cube, invalid_mask=None):
 # TP / FP / FN MASKS (BOOLEAN → RGB)
 # ============================================================
 
+
 def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
     """
     tp_mask, fp_mask, fn_mask: boolean arrays (H,W)
@@ -183,9 +189,9 @@ def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
     fp_rgb = np.zeros_like(tp_rgb)
     fn_rgb = np.zeros_like(tp_rgb)
 
-    tp_rgb[tp_mask] = [0, 255, 0]      # green
-    fp_rgb[fp_mask] = [255, 0, 0]      # red
-    fn_rgb[fn_mask] = [255, 255, 0]    # yellow
+    tp_rgb[tp_mask] = [0, 255, 0]  # green
+    fp_rgb[fp_mask] = [255, 0, 0]  # red
+    fn_rgb[fn_mask] = [255, 255, 0]  # yellow
 
     return tp_rgb, fp_rgb, fn_rgb
 
@@ -194,11 +200,11 @@ def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
 # PANEL BUILDERS
 # ============================================================
 
+
 def pad_border(img, pad=4):
     """Adds a white border around image."""
     return cv2.copyMakeBorder(
-        img, pad, pad, pad, pad,
-        cv2.BORDER_CONSTANT, value=[255, 255, 255]
+        img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[255, 255, 255]
     )
 
 
@@ -217,8 +223,14 @@ def title_bar(text, width, height=32, font_scale=0.6):
     """
     bar = np.full((height, width, 3), 255, dtype=np.uint8)
     cv2.putText(
-        bar, text, (10, height - 8),
-        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 2, cv2.LINE_AA
+        bar,
+        text,
+        (10, height - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
     return bar
 
@@ -231,6 +243,7 @@ def add_title(img, text, font_scale=0.6):
 # ============================================================
 # MAJOR PANEL LAYOUTS
 # ============================================================
+
 
 def make_eight_panel(
     x_rgb,
@@ -274,4 +287,3 @@ def make_eight_panel(
         composite = concat_v(header, composite)
 
     return composite
-

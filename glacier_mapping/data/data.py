@@ -319,9 +319,6 @@ class ElasticDeform(object):
         data, label = sample["image"], sample["mask"]
         label = label.astype(np.float32)
         if torch.rand(1) < self.p:
-            [data, label] = elasticdeform.deform_random_grid(
-                [data, label], axis=(0, 1)
-            )
+            [data, label] = elasticdeform.deform_random_grid([data, label], axis=(0, 1))
         label = np.round(label).astype(bool)
         return {"image": data, "mask": label}
-

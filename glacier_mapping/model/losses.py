@@ -60,10 +60,10 @@ class customloss(nn.Module):
         # IGNORE MASK: True for valid pixels
         # ----------------------------------------------------------
         if target_int is not None:
-            ignore_mask = (target_int != 255)
+            ignore_mask = target_int != 255
         else:
             # Fallback: sum of one-hot = 1
-            ignore_mask = (target.sum(dim=1) == 1)
+            ignore_mask = target.sum(dim=1) == 1
 
         ignore_mask_exp = ignore_mask.unsqueeze(1).float()  # (N,1,H,W)
 
@@ -89,14 +89,15 @@ class customloss(nn.Module):
         # LABEL SMOOTHING
         # ----------------------------------------------------------
         if self.label_smoothing > 0 and C_eff > 1:
-            target_prob = target_prob * (1 - self.label_smoothing) + \
-                          self.label_smoothing / C_eff
+            target_prob = (
+                target_prob * (1 - self.label_smoothing) + self.label_smoothing / C_eff
+            )
 
         # ----------------------------------------------------------
         # DICE LOSS (author-style)
         # ----------------------------------------------------------
-        pred_flat = pred_prob.permute(0, 2, 3, 1)[ignore_mask]   # (M,C_eff)
-        targ_flat = target_prob.permute(0, 2, 3, 1)[ignore_mask] # (M,C_eff)
+        pred_flat = pred_prob.permute(0, 2, 3, 1)[ignore_mask]  # (M,C_eff)
+        targ_flat = target_prob.permute(0, 2, 3, 1)[ignore_mask]  # (M,C_eff)
 
         if pred_flat.numel() == 0:
             dice_loss_scalar = torch.tensor(0.0, device=device)
@@ -129,28 +130,28 @@ class customloss(nn.Module):
             targ_b_in = target_prob
 
         # Boundary maps
-        gt_b = F.max_pool2d(1 - targ_b_in, self.theta0, 1,
-                            (self.theta0 - 1) // 2) - (1 - targ_b_in)
-        pred_b = F.max_pool2d(1 - pred_b_in, self.theta0, 1,
-                              (self.theta0 - 1) // 2) - (1 - pred_b_in)
+        gt_b = F.max_pool2d(1 - targ_b_in, self.theta0, 1, (self.theta0 - 1) // 2) - (
+            1 - targ_b_in
+        )
+        pred_b = F.max_pool2d(1 - pred_b_in, self.theta0, 1, (self.theta0 - 1) // 2) - (
+            1 - pred_b_in
+        )
 
         # Extended boundaries
-        gt_b_ext = F.max_pool2d(gt_b, self.theta, 1,
-                                (self.theta - 1) // 2)
-        pred_b_ext = F.max_pool2d(pred_b, self.theta, 1,
-                                  (self.theta - 1) // 2)
+        gt_b_ext = F.max_pool2d(gt_b, self.theta, 1, (self.theta - 1) // 2)
+        pred_b_ext = F.max_pool2d(pred_b, self.theta, 1, (self.theta - 1) // 2)
 
         # Apply mask
-        gt_b      = gt_b * ignore_mask_exp
-        pred_b    = pred_b * ignore_mask_exp
-        gt_b_ext  = gt_b_ext * ignore_mask_exp
+        gt_b = gt_b * ignore_mask_exp
+        pred_b = pred_b * ignore_mask_exp
+        gt_b_ext = gt_b_ext * ignore_mask_exp
         pred_b_ext = pred_b_ext * ignore_mask_exp
 
         # Flatten for BF1
-        gt_b      = gt_b.view(n, C_eff, -1)
-        pred_b    = pred_b.view(n, C_eff, -1)
-        gt_b_ext  = gt_b_ext.view(n, C_eff, -1)
-        pred_b_ext= pred_b_ext.view(n, C_eff, -1)
+        gt_b = gt_b.view(n, C_eff, -1)
+        pred_b = pred_b.view(n, C_eff, -1)
+        gt_b_ext = gt_b_ext.view(n, C_eff, -1)
+        pred_b_ext = pred_b_ext.view(n, C_eff, -1)
 
         P = (pred_b * gt_b_ext).sum(dim=2) / (pred_b.sum(dim=2) + 1e-7)
         R = (pred_b_ext * gt_b).sum(dim=2) / (gt_b.sum(dim=2) + 1e-7)
@@ -159,4 +160,3 @@ class customloss(nn.Module):
         boundary_loss = torch.mean(1 - BF1)
 
         return [dice_loss_scalar, boundary_loss]
-

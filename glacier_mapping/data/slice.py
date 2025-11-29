@@ -21,6 +21,7 @@ from glacier_mapping.data import physics
 
 IGNORE_LABEL = 255
 
+
 def plot_image_and_mask(rgb, mask, title, out_path):
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
@@ -55,13 +56,14 @@ def plot_image_and_mask(rgb, mask, title, out_path):
         ticks=[0.5, 1.5, 2.5, 255.5],
         boundaries=bounds,
         fraction=0.046,
-        pad=0.04
+        pad=0.04,
     )
     cbar.ax.set_yticklabels(["0 = BG", "1 = CI", "2 = DCI", "255 = IGNORE"])
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
+
 
 def read_shp(filename):
     """
@@ -299,11 +301,10 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         return slice
 
     def filter_percentage(slice, percentage, type="mask", name="noname", image=None):
-
         if type == "image":
             return True
 
-        valid = (slice != IGNORE_LABEL)
+        valid = slice != IGNORE_LABEL
         num_valid = np.count_nonzero(valid)
         if num_valid == 0:
             return False
@@ -322,7 +323,11 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             dci = np.sum(slice == 2)
             title = f"CI={ci}, DCI={dci}, labelled={num_labels}, valid={num_valid}, frac={frac:.6f}"
 
-            out_path = pathlib.Path(conf["out_dir"], "skipped_slices", f"{name}_{os.path.basename(savepath)}.png")
+            out_path = pathlib.Path(
+                conf["out_dir"],
+                "skipped_slices",
+                f"{name}_{os.path.basename(savepath)}.png",
+            )
             if not out_path.parent.exists():
                 out_path.parent.mkdir(parents=True, exist_ok=True)
             plot_image_and_mask(image, slice, title, out_path)
@@ -335,20 +340,18 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         np.save(filename, arr)
 
     def get_pixel_count(tiff_slice, mask_slice):
-
         # Work on a copy — avoid modifying original
         mask = mask_slice.copy()
 
-        invalid = (np.sum(tiff_slice, axis=2) == 0)
+        invalid = np.sum(tiff_slice, axis=2) == 0
         mask[invalid] = IGNORE_LABEL
 
-        ci  = np.sum(mask == 1)
+        ci = np.sum(mask == 1)
         deb = np.sum(mask == 2)
         mas = np.sum(mask == IGNORE_LABEL)
-        bg  = np.sum(mask == 0)
+        bg = np.sum(mask == 0)
 
         return bg, ci, deb, mas, mask
-
 
     os.makedirs(conf["out_dir"], exist_ok=True)
 
@@ -373,7 +376,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         for column in range(
             0, tiff_np.shape[1], conf["window_size"][1] - conf["overlap"]
         ):
-
             # ------------------------------
             # Extract slices
             # ------------------------------
@@ -387,14 +389,14 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             tiff_slice = tiff_np[
                 row : row + conf["window_size"][0],
                 column : column + conf["window_size"][1],
-                :
+                :,
             ]
             tiff_slice = verify_slice_size(tiff_slice, conf)
 
             # ------------------------------
             # Identify invalid (all-zero) image pixels
             # ------------------------------
-            invalid = (np.sum(tiff_slice, axis=2) == 0)
+            invalid = np.sum(tiff_slice, axis=2) == 0
 
             # Assign IGNORE to mask immediately
             mask_slice[invalid] = IGNORE_LABEL
@@ -405,7 +407,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             rgb_preview = tiff_np[
                 row : row + conf["window_size"][0],
                 column : column + conf["window_size"][1],
-                [2, 1, 0]  # true-color preview for debugging plots
+                [2, 1, 0],  # true-color preview for debugging plots
             ]
 
             # ------------------------------
@@ -427,39 +429,49 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                 conf["filter"],
                 type="mask",
                 name=f"discarded_{filenum}_slice_{slicenum}",
-                image=rgb_preview
+                image=rgb_preview,
             )
 
             if not keep:
                 # Track skipped slices
-                skipped_rows.append([
-                    tiff_fname.name,
-                    filenum,
-                    slicenum,
-                    bg, ci, deb, mas,
-                    bg / total,
-                    ci / total,
-                    deb / total,
-                    mas / total,
-                    os.path.basename(savepath),
-                ])
+                skipped_rows.append(
+                    [
+                        tiff_fname.name,
+                        filenum,
+                        slicenum,
+                        bg,
+                        ci,
+                        deb,
+                        mas,
+                        bg / total,
+                        ci / total,
+                        deb / total,
+                        mas / total,
+                        os.path.basename(savepath),
+                    ]
+                )
                 slicenum += 1
                 continue
 
             # ------------------------------
             # Record kept slice
             # ------------------------------
-            df_rows.append([
-                tiff_fname.name,
-                filenum,
-                slicenum,
-                bg, ci, deb, mas,
-                bg / total,
-                ci / total,
-                deb / total,
-                mas / total,
-                os.path.basename(savepath),
-            ])
+            df_rows.append(
+                [
+                    tiff_fname.name,
+                    filenum,
+                    slicenum,
+                    bg,
+                    ci,
+                    deb,
+                    mas,
+                    bg / total,
+                    ci / total,
+                    deb / total,
+                    mas / total,
+                    os.path.basename(savepath),
+                ]
+            )
 
             # ------------------------------
             # Save slices
@@ -483,4 +495,3 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         df_rows,
         skipped_rows,
     )
-
