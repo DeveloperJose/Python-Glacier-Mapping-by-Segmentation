@@ -7,11 +7,11 @@ visualization:
   max_width: 2400 # Only used when mode="scaled"
 
 cleanice:
-  run_name: "replicate_baseline_cleanice3"
+  run_name: "replicate_baseline_cleanice3_all"
   threshold: 0.5
-  model_type: "all" # "best" or "final" or "all"
+  model_type: "top01_epoch0011_val0.341247" # "best" or "final" or "all"
 
-# debris:
-#   run_name: "replicate_baseline_debrisice2"
-#   threshold: 0.5
-#   model_type: "best"
+debris:
+  run_name: "replicate_baseline_debrisice3"
+  threshold: 0.5
+  model_type: "top09_epoch0010_val1.004838"

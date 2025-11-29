@@ -437,7 +437,9 @@ if __name__ == "__main__":
                 print(f"CleanIce: P={Pci:.4f} R={Rci:.4f} IoU={Ici:.4f}")
                 print(f"Debris:   P={Pdb:.4f} R={Rdb:.4f} IoU={Idb:.4f}")
 
-                df_rows.append([ckpt_name, "TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
+                # df_rows.append([ckpt_name, "TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
+                df_rows.append(["TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
+
                 all_checkpoint_results.append({
                     "checkpoint": ckpt_name,
                     "CI_P": Pci, "CI_R": Rci, "CI_IoU": Ici,
@@ -459,7 +461,8 @@ if __name__ == "__main__":
                 print(f"\n===== {ckpt_name} SUMMARY =====")
                 print(f"{cname}: P={P:.4f} R={R:.4f} IoU={I:.4f}")
 
-                df_rows.append([ckpt_name, "TOTAL", P, R, I])
+                # df_rows.append([ckpt_name, "TOTAL", P, R, I])
+                df_rows.append(["TOTAL", P, R, I])
                 all_checkpoint_results.append({
                     "checkpoint": ckpt_name,
                     "P": P, "R": R, "IoU": I

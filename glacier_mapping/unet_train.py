@@ -261,27 +261,30 @@ if __name__ == "__main__":
     print(f"\n================ TOP-{max_checkpoints} CHECKPOINTS ================\n")
     print(f"Best epoch: {best_epoch}")
     print(f"Best validation loss: {best_val_loss:.6f}\n")
-    
     print("{:<6} {:<8} {:<12} {:<10} {:<10} {:<10}".format(
-        "Rank", "Epoch", "Val Loss", "Precision", "Recall", "IoU"))
+    "Rank", "Epoch", "Val Loss", "Precision", "Recall", "IoU"))
     print("-" * 65)
-    
-    for i, checkpoint in enumerate(top_checkpoints):
+
+    def to_float(x):
+        if isinstance(x, torch.Tensor):
+            return float(x.detach().cpu().item())
+        return float(x)
+
+    for rank, checkpoint in enumerate(top_checkpoints, start=1):
         epoch = checkpoint["epoch"]
         val_loss = checkpoint["val_loss"]
         val_metric = checkpoint["val_metric"]
-        
-        # Use first class metrics for summary (or average if multi-class)
+
         if isinstance(val_metric["precision"], list):
-            p = val_metric["precision"][0]
-            r = val_metric["recall"][0] 
-            i = val_metric["IoU"][0]
+            p = to_float(val_metric["precision"][0])
+            r = to_float(val_metric["recall"][0])
+            iou = to_float(val_metric["IoU"][0])
         else:
-            p = val_metric["precision"]
-            r = val_metric["recall"]
-            i = val_metric["IoU"]
-            
-        print(f"{i+1:<6} {epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {i:<10.4f}")
+            p = to_float(val_metric["precision"])
+            r = to_float(val_metric["recall"])
+            iou = to_float(val_metric["IoU"])
+
+        print(f"{rank:<6} {epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {iou:<10.4f}")
     print("-" * 65 + "\n")
 
     # ------------------------------------------------------------
