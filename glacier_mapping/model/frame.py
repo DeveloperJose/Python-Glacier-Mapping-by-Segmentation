@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import math
 import os
 from pathlib import Path
@@ -210,6 +207,7 @@ class Framework:
 
         self.reg_opts = reg_opts
         self.metrics_opts = metrics_opts
+
     def _build_loss(self, outchannels, opts=None):
         """
         Only customloss is supported.
@@ -229,9 +227,6 @@ class Framework:
             foreground_classes=fg_classes,
         )
 
-    # ------------------------------------------------------------------
-    # Scheduler init
-    # ------------------------------------------------------------------
     def _init_scheduler(self, opt_args):
         name = self.scheduler_opts.name
         self.scheduler_type = name
@@ -1105,7 +1100,6 @@ class Framework:
         fp_sum = np.zeros(n_classes)
         fn_sum = np.zeros(n_classes)
 
-        # ------------------- Loop over tiles ---------------------------
         for x_path in tqdm(test_tiles, desc="Full-tile eval"):
             x = np.load(x_path)
             y_pred, invalid_mask = self.predict_slice(x, threshold)
@@ -1210,7 +1204,6 @@ class Framework:
 
             y_pred_vis[ignore] = 255
 
-            # ----------- Correct RGB visualization -----------
             x_rgb = make_rgb_preview(x_full)
 
             # ----------- Apply same normalization as training -----------
@@ -1229,7 +1222,6 @@ class Framework:
             else:
                 x_norm = x_use
 
-            # ----------- Infer probability cube (correct!) -----------
             t_in = torch.from_numpy(x_norm[None, ...]).float().to(self.device)
             yhat_full = self.act(self.infer(t_in)).cpu().numpy()[0]
 

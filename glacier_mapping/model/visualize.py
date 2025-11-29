@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Visualization helpers for segmentation predictions.
-
-Uses:
- - VIRIDIS for confidence + entropy
- - Categorical colors for GT / Pred / TP / FP / FN
- - Modular 3-, 4-, 6-, 8-panel layouts
-"""
-
 import numpy as np
 import cv2
 from matplotlib import cm

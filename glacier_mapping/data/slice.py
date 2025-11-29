@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Feb 24 13:26:56 2021
-
-@author: mibook
-"""
-
 import os
 import pathlib
 

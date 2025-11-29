@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Glacier dataset + dataloaders (multi-channel, multi-task compatible).
-
-Supports:
- - arbitrary channel subsets via use_channels
- - binary or multi-class labels via output_classes
- - integer label mask with 0=BG, 1=CleanIce, 2=Debris, 255=IGNORE
-"""
-
 import glob
 import logging
 import os

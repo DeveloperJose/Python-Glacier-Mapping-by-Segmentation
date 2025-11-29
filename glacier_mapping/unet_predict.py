@@ -39,9 +39,7 @@ from glacier_mapping.model.visualize import (
 )
 
 
-# ---------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------
 def softmax_probs(frame, x_full):
     """
     Returns probability cube (H, W, C) for a single model.
@@ -109,9 +107,9 @@ def get_checkpoint_paths(runs_dir, run_name, model_type):
         return [(ckpt, model_type)]
 
 
-# ---------------------------------------------------------------------
 # Prediction runner for a single checkpoint combination
-# ---------------------------------------------------------------------
+
+
 def run_prediction(
     frame_ci,
     frame_deb,
@@ -314,9 +312,7 @@ def run_prediction(
     return df_rows, acc
 
 
-# ---------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------
+# Main
 if __name__ == "__main__":
     conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
     # gpu = int(conf.get("gpu_rank", 0))
@@ -398,9 +394,8 @@ if __name__ == "__main__":
 
     for ci_ckpt_path, ci_ckpt_name in ci_checkpoints:
         for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
-            # ----------------------------------------------------------
             # Load models
-            # ----------------------------------------------------------
+
             frame_ci = None
             frame_deb = None
 
@@ -424,9 +419,8 @@ if __name__ == "__main__":
             )
             test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
 
-            # ----------------------------------------------------------
             # Create output directory for this checkpoint
-            # ----------------------------------------------------------
+
             if has_ci and not has_deb:
                 ckpt_name = ci_ckpt_name
                 run_base = conf.cleanice.run_name
@@ -444,9 +438,8 @@ if __name__ == "__main__":
             print(f"Output dir: {out_dir}")
             print(f"Running on {len(test_tiles)} test tiles...")
 
-            # ----------------------------------------------------------
             # Run predictions
-            # ----------------------------------------------------------
+
             df_rows, acc = run_prediction(
                 frame_ci,
                 frame_deb,
@@ -461,9 +454,8 @@ if __name__ == "__main__":
                 has_deb,
             )
 
-            # ----------------------------------------------------------
             # Compute summary metrics
-            # ----------------------------------------------------------
+
             if has_ci and has_deb:
                 Pci = precision(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
                 Rci = recall(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])

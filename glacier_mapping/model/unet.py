@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Sep  4 22:41:45 2020
-
-@author: mibook
-
-UNet Model Class
-
-This code holds the definition for a U-Net model
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

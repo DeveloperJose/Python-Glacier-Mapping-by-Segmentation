@@ -165,7 +165,6 @@ if __name__ == "__main__":
             # test_metric=val_metric,  # formatting only
         )
 
-        # ------------------------ CHECKPOINT MANAGEMENT ----------------
         # Save checkpoint if validation loss improved
         if loss_val < best_val_loss:
             best_val_loss = float(loss_val)
