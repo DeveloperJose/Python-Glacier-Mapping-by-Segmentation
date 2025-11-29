@@ -1,15 +1,15 @@
 runs_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
 output_dir: "/home/devj/local-debian/glacier_mapping/debian-pred-runs/"
-gpu_rank: 0
+gpu_rank: "cpu"
 
 visualization:
   mode: "scaled" # "scaled" (Option C) or "fullres" (Option B)
   max_width: 2400 # Only used when mode="scaled"
 
 cleanice:
-  run_name: "replicate_baseline_cleanice2"
+  run_name: "replicate_baseline_cleanice3"
   threshold: 0.5
-  model_type: "best" # "best" or "final"
+  model_type: "all" # "best" or "final" or "all"
 
 # debris:
 #   run_name: "replicate_baseline_debrisice2"

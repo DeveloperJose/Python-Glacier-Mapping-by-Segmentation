@@ -304,7 +304,8 @@ def run_prediction(
 if __name__ == "__main__":
 
     conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
-    gpu = int(conf.get("gpu_rank", 0))
+    # gpu = int(conf.get("gpu_rank", 0))
+    gpu = conf.get("gpu_rank")
 
     runs_dir = pathlib.Path(conf.runs_dir)
     out_root = pathlib.Path(conf.output_dir)
