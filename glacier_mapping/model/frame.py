@@ -428,10 +428,11 @@ class Framework:
         """
         Validation or test pass.
 
-        Uses argmax over classes (no thresholds) for metrics, matching original val logic.
+        Uses the same threshold-based prediction as training for consistency.
         """
         n_classes = self.num_classes
         metric_names = self.metrics_opts.metrics
+        threshold = self.metrics_opts.threshold
 
         total_loss = 0.0
         count_batches = 0
@@ -459,24 +460,16 @@ class Framework:
 
             y_hat_act = self.act(y_hat_logits)
 
-            ignore = (y_int.squeeze(-1) == 255).cpu()  # (B,H,W) bool
+            ignore = (y_int.squeeze(-1) == 255).cpu().numpy()
             if ignore.all():
                 continue
 
-            y_true_cls = torch.argmax(y_onehot, dim=-1).cpu()   # (B,H,W)
-            y_pred_cls = torch.argmax(y_hat_act.cpu(), dim=-1)  # (B,H,W)
+            # Use same threshold-based metrics as training
+            _tp, _fp, _fn = self.metrics(y_hat_act, y_onehot, ignore, threshold)
 
-            valid = ~ignore
-            y_true_valid = y_true_cls[valid]
-            y_pred_valid = y_pred_cls[valid]
-
-            for c in range(n_classes):
-                pred_c = (y_pred_valid == c).long()
-                true_c = (y_true_valid == c).long()
-                tp_c, fp_c, fn_c = tp_fp_fn(pred_c, true_c)
-                tp_tot[c] += tp_c
-                fp_tot[c] += fp_c
-                fn_tot[c] += fn_c
+            tp_tot += _tp
+            fp_tot += _fp
+            fn_tot += _fn
 
             total_loss += batch_loss_f
             count_batches += 1
@@ -527,14 +520,13 @@ class Framework:
         torch.save(state, model_path)
         print(f"Saved model {epoch}")
 
-    def save_with_rank(self, out_dir, epoch, rank, val_loss):
+    def save_improvement(self, out_dir, epoch, val_loss):
         """
-        Save checkpoint with rank information for top-k tracking.
-        
+        Save checkpoint for an improvement iteration.
+
         Args:
             out_dir: Directory to save checkpoint
             epoch: Epoch number
-            rank: Rank in top checkpoints (1=best)
             val_loss: Validation loss
         """
         if not os.path.exists(out_dir):
@@ -554,11 +546,10 @@ class Framework:
             "training_opts": self.training_opts,
             "scheduler_opts": self.scheduler_opts,
             "val_loss": val_loss,
-            "rank": rank,
         }
-        model_path = Path(out_dir, f"model_top{rank:02d}_epoch{epoch:04d}_val{val_loss:.6f}.pt")
+        model_path = Path(out_dir, f"model_epoch{epoch:04d}_val{val_loss:.6f}.pt")
         torch.save(state, model_path)
-        print(f"Saved top-{rank} checkpoint: epoch {epoch}, val_loss {val_loss:.6f}")
+        print(f"Saved improvement checkpoint: epoch {epoch}, val_loss {val_loss:.6f}")
 
     # ================================================================
     # INFERENCE + LOSS

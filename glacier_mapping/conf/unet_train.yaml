@@ -2,27 +2,29 @@ gpu_rank: 0
 
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_baseline_debrisice3"
-  epochs: 2000
+  run_name: "replicate_bibek_cleanice_all_channels"
+  epochs: 500
   fine_tune: False
   find_lr: False
-  early_stopping: 100 # Epochs to wait for improvement
+  early_stopping: 251 # Epochs to wait for improvement
   full_eval_every: 10
-  top_k_checkpoints: 10 # Save top K checkpoints during training
 loader_opts:
-  processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline_v3/"
-  batch_size: 48 # 12 (512x512)
-  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics'] # 10 = physics augmented
-  output_classes: [2] # 0=BG, 1=CI, 2=Debris
+  processed_dir: "/home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1/"
+  batch_size: 8 # 8 (original paper), 12 (debian 512x512) or 46-48 (debian 256x256)
+  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  # [0="B1", 1="B2", 2="B3", 3="B4", 4="B5", 5="B6_VCID1", 6="B6_VCID2", 7="B7"] derived from Landsat-7 TIFF
+  # [8="elevation", 9="slope"] derived from DEM
+  # [10="NDVI", 11="NDWI", 12="NDSI", 13="H", 14="S", 15="V"] spectral indices + HSV
+  output_classes: [1] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
-  physics_channel: 10 # For physics experiments (No need to change)
+  physics_channel: None
   class_names: ["BG", "CleanIce", "Debris"] # All class names in the dataset (No need to change)
 metrics_opts:
   metrics: ["IoU", "precision", "recall"]
-  threshold: [0.3] # 0.5 for CI, 0.30 for DCI
+  threshold: [0.5] # 0.5 for CI, 0.30 for DCI
 loss_opts:
   name: "custom"
-  masked: False # True for CI, False for DCI
+  masked: True # True for CI, False for DCI
   gaussian_blur_sigma: None
   label_smoothing: 0 # 0.1 for CI, 0 for DCI
   use_unified: False

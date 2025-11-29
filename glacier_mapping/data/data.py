@@ -35,7 +35,12 @@ BAND_NAMES = np.array(
         "B7",
         "elevation",
         "slope",
-        "physics",
+        "NDVI",
+        "NDWI",
+        "NDSI",
+        "H",
+        "S",
+        "V",
     ]
 )
 

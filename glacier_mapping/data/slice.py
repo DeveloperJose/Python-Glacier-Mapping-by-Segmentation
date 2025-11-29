@@ -316,7 +316,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         frac = num_labels / num_valid
 
         if frac < percentage:
-            print(f"Skipping {name}: frac={frac:.6f} valid={num_valid} labelled={num_labels}", os.path.basename(savepath))
+            # print(f"Skipping {name}: frac={frac:.6f} valid={num_valid} labelled={num_labels}", os.path.basename(savepath))
 
             ci = np.sum(slice == 1)
             dci = np.sum(slice == 2)
@@ -366,6 +366,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
 
     slicenum = 0
     df_rows = []
+    skipped_rows = []
     # breakpoint()
     # print(np.unique(mask, True))
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
@@ -407,6 +408,20 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                 [2, 1, 0]  # true-color preview for debugging plots
             ]
 
+            # ------------------------------
+            # Prepare slice and compute stats (before filtering decision)
+            # ------------------------------
+            final_save_slice = np.copy(tiff_slice)
+            final_save_slice[invalid] = 0
+
+            bg, ci, deb, mas, modified_mask = get_pixel_count(
+                final_save_slice, mask_slice
+            )
+            total = bg + ci + deb + mas
+
+            # ------------------------------
+            # Filter slice based on mask
+            # ------------------------------
             keep = filter_percentage(
                 mask_slice,
                 conf["filter"],
@@ -416,24 +431,24 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             )
 
             if not keep:
+                # Track skipped slices
+                skipped_rows.append([
+                    tiff_fname.name,
+                    filenum,
+                    slicenum,
+                    bg, ci, deb, mas,
+                    bg / total,
+                    ci / total,
+                    deb / total,
+                    mas / total,
+                    os.path.basename(savepath),
+                ])
                 slicenum += 1
                 continue
 
             # ------------------------------
-            # Prepare slice to save
-            # Zero-out invalid pixels
+            # Record kept slice
             # ------------------------------
-            final_save_slice = np.copy(tiff_slice)
-            final_save_slice[invalid] = 0
-
-            # ------------------------------
-            # Compute stats + ensure IGNORE is correct
-            # ------------------------------
-            bg, ci, deb, mas, modified_mask = get_pixel_count(
-                final_save_slice, mask_slice
-            )
-            total = bg + ci + deb + mas
-
             df_rows.append([
                 tiff_fname.name,
                 filenum,
@@ -466,5 +481,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         np.min(tiff_np, axis=(0, 1)),
         np.max(tiff_np, axis=(0, 1)),
         df_rows,
+        skipped_rows,
     )
 
