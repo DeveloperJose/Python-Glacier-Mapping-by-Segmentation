@@ -1,6 +1,13 @@
 runs_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-run_name: "baseline_cleanice_nofiltv2"
 output_dir: "/home/devj/local-debian/glacier_mapping/debian-pred-runs/"
 gpu_rank: 0
-threshold: 0.5
-model_type: "best" # "best" or "final"
+
+# cleanice:
+#   run_name: "replicate_baseline_cleanice"
+#   threshold: 0.5
+#   model_type: "best" # "best" or "final"
+
+debris:
+  run_name: "replicate_baseline_debrisice"
+  threshold: 0.5
+  model_type: "best"
