@@ -2,7 +2,7 @@ gpu_rank: 0
 
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_baseline_cleanice2"
+  run_name: "replicate_baseline_cleanice3"
   epochs: 2000
   fine_tune: False
   find_lr: False
@@ -10,8 +10,8 @@ training_opts:
   full_eval_every: 10
   top_k_checkpoints: 10 # Save top K checkpoints during training
 loader_opts:
-  processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline/"
-  batch_size: 12
+  processed_dir: "/home/devj/local-debian/datasets/HKH/debian_baseline_v3/"
+  batch_size: 48 # 12 (512x512)
   use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7", "elevation", "slope", 'physics'] # 10 = physics augmented
   output_classes: [1] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
