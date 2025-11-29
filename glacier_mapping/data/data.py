@@ -30,6 +30,7 @@ BAND_NAMES = np.array(
         "H",
         "S",
         "V",
+        "physics",
     ]
 )
 

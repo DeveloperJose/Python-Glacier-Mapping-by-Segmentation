@@ -182,16 +182,6 @@ def get_tiff_np(
         dem_np = compute_dems(dem_np)
         tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
 
-    use_physics = (
-        isinstance(physics_res, (float, str, int))
-        and physics_res != "None"
-        and isinstance(physics_scale, (float, int))
-        and use_dem
-    )
-    if use_physics:
-        phys_np = physics.compute_phys_v2(dem_np[:, :, 0], physics_res, physics_scale)
-        tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
-
     tiff_np = np.nan_to_num(tiff_np.astype(np.float32))
 
     if add_ndvi:
@@ -204,6 +194,15 @@ def get_tiff_np(
         rgb_img = tiff_np[:, :, [4, 3, 1]] / 255
         hsv_img = rgb2hsv(rgb_img[:, :, [2, 1, 0]])
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
+
+    use_physics = (
+            isinstance(physics_res, (float, str, int))
+            and physics_res != "None"
+            and isinstance(physics_scale, (float, int))
+            )
+    if use_physics and use_dem:
+        phys_np = physics.compute_phys_v2(dem_np[:, :, 0], physics_res, physics_scale)
+        tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
 
     if verbose:
         print(f"use_dem={use_dem}, use_physics={use_physics}")

@@ -2,7 +2,7 @@ gpu_rank: 0
 
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_bibek_cleanice_all_channels"
+  run_name: "replicate_bibek_debrisice_all_channels"
   epochs: 500
   fine_tune: False
   find_lr: False
@@ -15,16 +15,17 @@ loader_opts:
   # [0="B1", 1="B2", 2="B3", 3="B4", 4="B5", 5="B6_VCID1", 6="B6_VCID2", 7="B7"] derived from Landsat-7 TIFF
   # [8="elevation", 9="slope"] derived from DEM
   # [10="NDVI", 11="NDWI", 12="NDSI", 13="H", 14="S", 15="V"] spectral indices + HSV
-  output_classes: [1] # 0=BG, 1=CI, 2=Debris
+  # [16="physics"] physics-derived features (not in use_channels yet)
+  output_classes: [2] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
-  physics_channel: None
+  physics_channel: 16
   class_names: ["BG", "CleanIce", "Debris"] # All class names in the dataset (No need to change)
 metrics_opts:
   metrics: ["IoU", "precision", "recall"]
   threshold: [0.5] # 0.5 for CI, 0.30 for DCI
 loss_opts:
   name: "custom"
-  masked: True # True for CI, False for DCI
+  masked: False # True for CI, False for DCI
   gaussian_blur_sigma: None
   label_smoothing: 0 # 0.1 for CI, 0 for DCI
   use_unified: False
