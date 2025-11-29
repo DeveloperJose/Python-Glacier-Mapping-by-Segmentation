@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unified predictor with:
- - thresholds inside each model block
- - 8-panel visualizations (TIFF | GT | Pred | Confidence / TP | FP | FN | Entropy)
- - VIRIDIS for confidence / entropy
- - categorical colors unified with training (BG=Brown, CI=Light Blue, Debris=Red, Mask=Black)
- - printed TOTAL test-set metrics
- - everything saved under preds/
+Unified predictor for:
+ - Single CleanIce model
+ - Single Debris model
+ - Merged CleanIce + Debris binary models → 3-class output
 
-Supports:
-  • Single CleanIce model
-  • Single Debris model
-  • CleanIce + Debris merged (author-style)
+Outputs for each test tile:
+ - *_probs.npy (probability cube)
+ - *_viz.png   (8-panel visualization)
+
+Also produces:
+ - metrics.csv (per-tile metrics)
+ - summary printout
 """
 
-import pathlib
 import yaml
+import pathlib
+import numpy as np
+import pandas as pd
 from addict import Dict
 from tqdm import tqdm
 
-import numpy as np
-import pandas as pd
 import torch
-from scipy.ndimage import binary_fill_holes
 import cv2
+from scipy.ndimage import binary_fill_holes
 
-from model.frame import Framework
-import model.metrics as metrics
-
-from model.visualize import (
+from glacier_mapping.model.frame import Framework
+from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
+from glacier_mapping.model.visualize import (
     build_cmap,
     make_rgb_preview,
     label_to_color,
@@ -40,30 +39,12 @@ from model.visualize import (
 )
 
 
-# -------------------------------------------------------------
-# Metric helpers
-# -------------------------------------------------------------
-def get_tp_fp_fn(pred, true):
-    pred_t = torch.from_numpy(pred.astype(np.uint8))
-    true_t = torch.from_numpy(true.astype(np.uint8))
-    tp, fp, fn = metrics.tp_fp_fn(pred_t, true_t)
-    return float(tp), float(fp), float(fn)
-
-
-def get_PR_IoU(tp, fp, fn):
-    return (
-        float(metrics.precision(tp, fp, fn)),
-        float(metrics.recall(tp, fp, fn)),
-        float(metrics.IoU(tp, fp, fn)),
-    )
-
-
-# -------------------------------------------------------------
-# Model inference
-# -------------------------------------------------------------
-def run_single_model(frame, x_full):
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def softmax_probs(frame, x_full):
     """
-    Returns probability cube (H,W,C) for a single model (after softmax).
+    Returns probability cube (H, W, C) for a single model.
     """
     use_ch = frame.loader_opts.use_channels
     x = x_full[:, :, use_ch]
@@ -71,13 +52,13 @@ def run_single_model(frame, x_full):
 
     inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float()
     logits = frame.infer(inp)
-    probs = torch.nn.functional.softmax(logits, dim=3).squeeze(0).cpu().numpy()
+    probs = torch.nn.functional.softmax(logits, dim=3)[0].cpu().numpy()
     return probs
 
 
 def merge_ci_debris(prob_ci, prob_deb, thr_ci, thr_deb):
     """
-    Merge CleanIce & Debris binary models into 3-class labels:
+    Combine two binary models into a 3-class map:
         0 = BG, 1 = CI, 2 = Debris
     """
     ci_mask = binary_fill_holes(prob_ci[:, :, 1] >= thr_ci)
@@ -97,64 +78,73 @@ def merge_ci_debris(prob_ci, prob_deb, thr_ci, thr_deb):
     return merged, probs
 
 
-# -------------------------------------------------------------
+def get_pr_iou(pred, true):
+    pred_t = torch.from_numpy(pred.astype(np.uint8))
+    true_t = torch.from_numpy(true.astype(np.uint8))
+    tp, fp, fn = tp_fp_fn(pred_t, true_t)
+    return (
+        precision(tp, fp, fn),
+        recall(tp, fp, fn),
+        IoU(tp, fp, fn),
+        tp, fp, fn
+    )
+
+
+# ---------------------------------------------------------------------
 # MAIN
-# -------------------------------------------------------------
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
 
-    print("\nLoading config...")
     conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
+    gpu = int(conf.get("gpu_rank", 0))
 
-    gpu      = int(conf.get("gpu_rank", 0))
     runs_dir = pathlib.Path(conf.runs_dir)
     out_root = pathlib.Path(conf.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Visualization config
+    # Visualization settings
     vis_conf = conf.get("visualization", {})
-    vis_mode = vis_conf.get("mode", "scaled")        # "scaled" or "fullres"
+    vis_mode = vis_conf.get("mode", "scaled")      # scaled or fullres
     vis_maxw = int(vis_conf.get("max_width", 2400))
 
-    # Check for models
     has_ci  = "cleanice" in conf
     has_deb = "debris"  in conf
 
     if not (has_ci or has_deb):
-        raise RuntimeError("YAML must specify cleanice: or debris:")
+        raise RuntimeError("predict YAML must specify cleanice: or debris:")
 
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     # Load CI model
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     if has_ci:
-        ci = conf.cleanice
-        ckpt_ci = runs_dir / ci.run_name / "models" / f"model_{ci.model_type}.pt"
-        print("Loading CleanIce model:", ckpt_ci)
+        ck = conf.cleanice
+        ckpt_ci = runs_dir / ck.run_name / "models" / f"model_{ck.model_type}.pt"
+        print("Loading CleanIce:", ckpt_ci)
         frame_ci = Framework.from_checkpoint(ckpt_ci, device=gpu, testing=True)
-        thr_ci = float(ci.threshold)
+        thr_ci = float(ck.threshold)
 
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     # Load Debris model
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     if has_deb:
-        db = conf.debris
-        ckpt_db = runs_dir / db.run_name / "models" / f"model_{db.model_type}.pt"
-        print("Loading Debris model:", ckpt_db)
+        ck = conf.debris
+        ckpt_db = runs_dir / ck.run_name / "models" / f"model_{ck.model_type}.pt"
+        print("Loading Debris:", ckpt_db)
         frame_deb = Framework.from_checkpoint(ckpt_db, device=gpu, testing=True)
-        thr_deb = float(db.threshold)
+        thr_deb = float(ck.threshold)
 
-    # Dataset path
+    # Determine dataset path
     data_dir = (
-        frame_ci.loader_opts.processed_dir
-        if has_ci else frame_deb.loader_opts.processed_dir
+        frame_ci.loader_opts.processed_dir if has_ci else
+        frame_deb.loader_opts.processed_dir
     )
-    test_dir = pathlib.Path(data_dir) / "test"
-    tiles    = sorted(test_dir.glob("tiff*"))
 
-    print(f"Found {len(tiles)} test tiles.\n")
+    test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
+    print(f"Found {len(test_tiles)} test tiles.\n")
 
-    # ---------------------------------------------------------
-    # Output directory
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Output dirs
+    # ------------------------------------------------------------------
     if has_ci and not has_deb:
         run_name = conf.cleanice.run_name
     elif has_deb and not has_ci:
@@ -162,13 +152,11 @@ if __name__ == "__main__":
     else:
         run_name = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
 
-    out_dir   = out_root / run_name
+    out_dir = out_root / run_name
     preds_dir = out_dir / "preds"
     preds_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---------------------------------------------------------
-    # CSV header
-    # ---------------------------------------------------------
+    # CSV
     if has_ci and has_deb:
         columns = [
             "tile",
@@ -181,100 +169,88 @@ if __name__ == "__main__":
 
     df_rows = []
 
-    # Accumulators
-    tot_tp = tot_fp = tot_fn = 0.0
-    acc = dict(ci_tp=0.0, ci_fp=0.0, ci_fn=0.0,
-               deb_tp=0.0, deb_fp=0.0, deb_fn=0.0)
+    # accumulators
+    acc = dict(
+        ci_tp=0.0, ci_fp=0.0, ci_fn=0.0,
+        db_tp=0.0, db_fp=0.0, db_fn=0.0,
+    )
 
-    # Unified categorical cmap for GT/Pred
-    cmap_dataset = build_cmap(num_classes=3, is_binary=False, classname=None)
+    cmap = build_cmap(3, is_binary=False)
 
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
     # MAIN LOOP
-    # ---------------------------------------------------------
-    for tile in tqdm(tiles, desc="Predicting"):
+    # ------------------------------------------------------------------
+    for tile in tqdm(test_tiles, desc="Predicting"):
 
         name = tile.name
-        base = pathlib.Path(name).stem
+        base = tile.stem
 
         x_full = np.load(tile)
         y_full = np.load(tile.parent / name.replace("tiff", "mask")).astype(np.uint8)
-
         invalid = (np.sum(x_full, axis=2) == 0) | (y_full == 255)
-        valid   = ~invalid
+        valid = ~invalid
 
         x_rgb = make_rgb_preview(x_full)
+        prob_path = preds_dir / f"{base}_probs.npy"
+        viz_path = preds_dir / f"{base}.png"
 
-        save_img_path  = preds_dir / f"{base}.png"
-        save_prob_path = preds_dir / f"{base}_probs.npy"
-
-        # -----------------------------------------------------
-        # SINGLE-MODEL PREDICTION
-        # -----------------------------------------------------
+        # ===============================================================
+        # SINGLE MODEL
+        # ===============================================================
         if has_ci ^ has_deb:
 
             frame = frame_ci if has_ci else frame_deb
-            probs = run_single_model(frame, x_full)  # (H,W,2)
+            model_class = 1 if has_ci else 2
+            model_name  = "CleanIce" if has_ci else "Debris"
+            thr = thr_ci if has_ci else thr_deb
 
-            if has_ci:
-                thr = thr_ci
-                class_id = 1
-                model_name = "CleanIce"
-            else:
-                thr = thr_deb
-                class_id = 2
-                model_name = "Debris"
+            probs = softmax_probs(frame, x_full)  # (H,W,2)
+            np.save(prob_path, probs)
 
             pred_bin = (probs[:, :, 1] >= thr).astype(np.uint8)
 
-            # Metrics (binary, class-specific)
+            # GT comparison
             tv = y_full[valid]
             pv = pred_bin[valid]
-            t_bin = (tv == class_id).astype(np.uint8)
+            t_bin = (tv == model_class).astype(np.uint8)
 
-            tp, fp, fn = get_tp_fp_fn(pv, t_bin)
-            P, R, I = get_PR_IoU(tp, fp, fn)
+            P, R, I, tp, fp, fn = get_pr_iou(pv, t_bin)
 
-            tot_tp += tp
-            tot_fp += fp
-            tot_fn += fn
+            # accumulate
+            if has_ci:
+                acc["ci_tp"] += tp; acc["ci_fp"] += fp; acc["ci_fn"] += fn
+            else:
+                acc["db_tp"] += tp; acc["db_fp"] += fp; acc["db_fn"] += fn
 
             df_rows.append([name, P, R, I])
 
-            np.save(save_prob_path, probs)
+            # Visualization label maps
+            y_gt = y_full.copy()
+            y_gt[invalid] = 255
 
-            # GT & Prediction label maps (0/BG, 1=CI, 2=Deb, 255=mask)
-            y_gt_vis = y_full.copy()
-            y_gt_vis[invalid] = 255
+            y_pred = np.zeros_like(y_full)
+            y_pred[valid & (pred_bin == 1)] = model_class
+            y_pred[valid & (pred_bin == 0)] = 0
+            y_pred[invalid] = 255
 
-            y_pred_vis = np.zeros_like(y_full, dtype=np.uint8)
-            y_pred_vis[valid & (pred_bin == 1)] = class_id
-            y_pred_vis[valid & (pred_bin == 0)] = 0
-            y_pred_vis[invalid] = 255
-
-            # TP/FP/FN relative to "class_id"
-            gt_pos   = (y_full == class_id) & valid
+            # TP/FP/FN masks
+            gt_pos   = (y_full == model_class) & valid
             pred_pos = (pred_bin == 1) & valid
-
             tp_mask = gt_pos & pred_pos
             fp_mask = (~gt_pos) & pred_pos
             fn_mask = gt_pos & (~pred_pos)
-
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-            # Confidence & Entropy
-            conf_map = probs[:, :, 1].copy()
-            conf_map[invalid] = 0.0
-            conf_rgb = make_confidence_map(conf_map, invalid_mask=invalid)
-
+            # Confidence & entropy
+            conf_rgb = make_confidence_map(probs[:, :, 1], invalid_mask=invalid)
             entropy_rgb = make_entropy_map(probs, invalid_mask=invalid)
 
-            metrics_text = f"{model_name}: P={P:.3f}  R={R:.3f}  IoU={I:.3f}"
+            metrics_text = f"{model_name}: P={P:.3f} R={R:.3f} IoU={I:.3f}"
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
-                gt_rgb=label_to_color(y_gt_vis, cmap_dataset),
-                pr_rgb=label_to_color(y_pred_vis, cmap_dataset),
+                gt_rgb=label_to_color(y_gt, cmap),
+                pr_rgb=label_to_color(y_pred, cmap),
                 conf_rgb=conf_rgb,
                 tp_rgb=tp_rgb,
                 fp_rgb=fp_rgb,
@@ -283,78 +259,50 @@ if __name__ == "__main__":
                 metrics_text=metrics_text,
             )
 
-            # Optional scaling for big images
-            if vis_mode == "scaled" and composite.shape[1] > vis_maxw:
-                scale = vis_maxw / composite.shape[1]
-                new_h = int(composite.shape[0] * scale)
-                composite = cv2.resize(
-                    composite, (vis_maxw, new_h), interpolation=cv2.INTER_AREA
-                )
-
-            cv2.imwrite(
-                str(save_img_path),
-                cv2.cvtColor(composite, cv2.COLOR_RGB2BGR),
-            )
-
-        # -----------------------------------------------------
-        # MERGED CI + DEBRIS MODEL
-        # -----------------------------------------------------
+        # ===============================================================
+        # MERGED CI + DEBRIS BINARY MODELS
+        # ===============================================================
         else:
-            prob_ci  = run_single_model(frame_ci,  x_full)
-            prob_deb = run_single_model(frame_deb, x_full)
+            prob_ci  = softmax_probs(frame_ci,  x_full)
+            prob_db  = softmax_probs(frame_deb, x_full)
 
-            merged, probs = merge_ci_debris(prob_ci, prob_deb, thr_ci, thr_deb)
-            np.save(save_prob_path, probs)
+            merged, probs = merge_ci_debris(prob_ci, prob_db, thr_ci, thr_deb)
+            np.save(prob_path, probs)
+
+            y_gt = y_full.copy()
+            y_gt[invalid] = 255
 
             merged_vis = merged.copy()
             merged_vis[invalid] = 255
 
-            tv = y_full[valid]
-            pv = merged[valid]
-
-            # CI metrics
-            p_ci = (pv == 1).astype(np.uint8)
-            t_ci = (tv == 1).astype(np.uint8)
-            tp_ci, fp_ci, fn_ci = get_tp_fp_fn(p_ci, t_ci)
-            acc["ci_tp"] += tp_ci
-            acc["ci_fp"] += fp_ci
-            acc["ci_fn"] += fn_ci
-            Pci, Rci, Ici = get_PR_IoU(tp_ci, fp_ci, fn_ci)
+            # CleanIce metrics
+            Pci, Rci, Ici, tp, fp, fn = get_pr_iou(
+                (merged[valid] == 1).astype(np.uint8),
+                (y_full[valid] == 1).astype(np.uint8)
+            )
+            acc["ci_tp"] += tp; acc["ci_fp"] += fp; acc["ci_fn"] += fn
 
             # Debris metrics
-            p_db = (pv == 2).astype(np.uint8)
-            t_db = (tv == 2).astype(np.uint8)
-            tp_db, fp_db, fn_db = get_tp_fp_fn(p_db, t_db)
-            acc["deb_tp"] += tp_db
-            acc["deb_fp"] += fp_db
-            acc["deb_fn"] += fn_db
-            Pdb, Rdb, Idb = get_PR_IoU(tp_db, fp_db, fn_db)
+            Pdb, Rdb, Idb, tp, fp, fn = get_pr_iou(
+                (merged[valid] == 2).astype(np.uint8),
+                (y_full[valid] == 2).astype(np.uint8)
+            )
+            acc["db_tp"] += tp; acc["db_fp"] += fp; acc["db_fn"] += fn
 
             df_rows.append([name, Pci, Rci, Ici, Pdb, Rdb, Idb])
 
-            # GT for visualization
-            y_gt_vis = y_full.copy()
-            y_gt_vis[invalid] = 255
-
-            # TP/FP/FN on full 3-class labels
-            gt_pos   = (y_full != 0) & (~invalid)
-            pred_pos = (merged != 0) & (~invalid)
-
-            tp_mask = (merged == y_full) & gt_pos
-            fp_mask = (merged != y_full) & pred_pos
-            fn_mask = (merged != y_full) & gt_pos
-
+            # TP/FP/FN full 3-class
+            tp_mask = (merged == y_full) & (~invalid) & (y_full != 0)
+            fp_mask = (merged != y_full) & (~invalid) & (merged != 0)
+            fn_mask = (merged != y_full) & (~invalid) & (y_full != 0)
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-            # Confidence = P(predicted class)
-            H, W = merged.shape
-            conf_map = np.zeros((H, W), dtype=np.float32)
-            for cls in [0, 1, 2]:
-                idx = (merged == cls)
-                conf_map[idx] = probs[idx, cls]
-            conf_map[invalid] = 0.0
+            # Confidence = prob of predicted class
+            conf_map = probs[np.arange(probs.shape[0])[:,None],
+                             np.arange(probs.shape[1])[None,:],
+                             merged]
+            conf_map[invalid] = 0
             conf_rgb = make_confidence_map(conf_map, invalid_mask=invalid)
-
             entropy_rgb = make_entropy_map(probs, invalid_mask=invalid)
 
             metrics_text = (
@@ -364,8 +312,8 @@ if __name__ == "__main__":
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
-                gt_rgb=label_to_color(y_gt_vis, cmap_dataset),
-                pr_rgb=label_to_color(merged_vis, cmap_dataset),
+                gt_rgb=label_to_color(y_gt, cmap),
+                pr_rgb=label_to_color(merged_vis, cmap),
                 conf_rgb=conf_rgb,
                 tp_rgb=tp_rgb,
                 fp_rgb=fp_rgb,
@@ -374,42 +322,54 @@ if __name__ == "__main__":
                 metrics_text=metrics_text,
             )
 
-            if vis_mode == "scaled" and composite.shape[1] > vis_maxw:
-                scale = vis_maxw / composite.shape[1]
-                new_h = int(composite.shape[0] * scale)
-                composite = cv2.resize(
-                    composite, (vis_maxw, new_h), interpolation=cv2.INTER_AREA
-                )
-
-            cv2.imwrite(
-                str(save_img_path),
-                cv2.cvtColor(composite, cv2.COLOR_RGB2BGR),
+        # ===============================================================
+        # Resize if needed
+        # ===============================================================
+        if vis_mode == "scaled" and composite.shape[1] > vis_maxw:
+            scale = vis_maxw / composite.shape[1]
+            composite = cv2.resize(
+                composite,
+                (vis_maxw, int(composite.shape[0] * scale)),
+                interpolation=cv2.INTER_AREA,
             )
 
-    # -----------------------------------------------------
-    # TOTAL METRICS
-    # -----------------------------------------------------
+        cv2.imwrite(str(viz_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+
+    # ------------------------------------------------------------------
+    # FINAL SUMMARY
+    # ------------------------------------------------------------------
     print("\n===== TEST SET SUMMARY =====")
 
     if has_ci and has_deb:
-        Pci, Rci, Ici = get_PR_IoU(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
-        Pdb, Rdb, Idb = get_PR_IoU(acc["deb_tp"], acc["deb_fp"], acc["deb_fn"])
+        Pci = precision(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
+        Rci = recall(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
+        Ici = IoU(acc["ci_tp"], acc["ci_fp"], acc["ci_fn"])
 
-        print(f"CleanIce: Precision={Pci:.4f}, Recall={Rci:.4f}, IoU={Ici:.4f}")
-        print(f"Debris:   Precision={Pdb:.4f}, Recall={Rdb:.4f}, IoU={Idb:.4f}")
+        Pdb = precision(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+        Rdb = recall(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+        Idb = IoU(acc["db_tp"], acc["db_fp"], acc["db_fn"])
+
+        print(f"CleanIce TOTAL: P={Pci:.4f} R={Rci:.4f} IoU={Ici:.4f}")
+        print(f"Debris   TOTAL: P={Pdb:.4f} R={Rdb:.4f} IoU={Idb:.4f}")
 
         df_rows.append(["TOTAL", Pci, Rci, Ici, Pdb, Rdb, Idb])
 
     else:
-        Ptot, Rtot, Itot = get_PR_IoU(tot_tp, tot_fp, tot_fn)
-        cname = "CleanIce" if has_ci else "Debris"
-        print(f"{cname}: Precision={Ptot:.4f}, Recall={Rtot:.4f}, IoU={Itot:.4f}")
-        df_rows.append(["TOTAL", Ptot, Rtot, Itot])
+        if has_ci:
+            tp = acc["ci_tp"]; fp = acc["ci_fp"]; fn = acc["ci_fn"]
+            cname = "CleanIce"
+        else:
+            tp = acc["db_tp"]; fp = acc["db_fp"]; fn = acc["db_fn"]
+            cname = "Debris"
+
+        P = precision(tp, fp, fn); R = recall(tp, fp, fn); I = IoU(tp, fp, fn)
+        print(f"{cname} TOTAL: P={P:.4f} R={R:.4f} IoU={I:.4f}")
+        df_rows.append(["TOTAL", P, R, I])
 
     df = pd.DataFrame(df_rows, columns=columns)
     df.to_csv(out_dir / "metrics.csv", index=False)
 
     print("\n✓ Prediction complete.")
     print("Metrics CSV:", out_dir / "metrics.csv")
-    print("Predictions + visuals:", preds_dir)
+    print("Visualization PNGs:", preds_dir)
 

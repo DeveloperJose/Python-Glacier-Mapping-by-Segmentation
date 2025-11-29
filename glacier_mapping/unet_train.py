@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Train a U-Net model using the new Framework.from_config() system.
+Train a U-Net model on the prepared glacier dataset.
+
+Includes:
+ - AMP + sigma-weighted custom loss
+ - OneCycleLR or ReduceLROnPlateau (configured in YAML)
+ - Dataset statistics (optional)
+ - Per-epoch metrics
+ - Full-tile evaluation with unified 8-panel visuals
+ - Best-epoch metrics printed at end
+ - notify-send desktop notification (Linux)
 """
 
 import gc
@@ -9,8 +18,8 @@ import json
 import logging
 import pathlib
 import random
-import warnings
 import subprocess
+import warnings
 from timeit import default_timer as timer
 
 import numpy as np
@@ -20,8 +29,8 @@ from addict import Dict
 from torch.utils.tensorboard import SummaryWriter
 
 import glacier_mapping.model.functions as fn
-from glacier_mapping.data.data import fetch_loaders
 from glacier_mapping.model.frame import Framework
+from glacier_mapping.data.data import fetch_loaders
 
 # ---------------------------------------------------------------------
 # Reproducibility
@@ -36,52 +45,53 @@ torch.backends.cudnn.benchmark = False
 warnings.filterwarnings("ignore")
 
 
+# ---------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
 
     # ------------------------------------------------------------
-    # Load config + build frame
+    # Load config
     # ------------------------------------------------------------
-    conf_path = "./conf/unet_train.yaml"
-    conf = Dict(yaml.safe_load(open(conf_path)))
+    conf = Dict(yaml.safe_load(open("./conf/unet_train.yaml")))
 
-    # Let Framework pick device using gpu_rank unless overridden
-    frame = Framework.from_config(conf_path)
-
-    run_name = frame.training_opts.run_name
-    output_dir = pathlib.Path(frame.training_opts.output_dir) / run_name
+    run_name: str = conf.training_opts.run_name
+    output_dir = pathlib.Path(conf.training_opts.output_dir) / run_name
     model_output_dir = output_dir / "models"
-    early_stopping = frame.training_opts.early_stopping
-    full_eval_every = int(getattr(frame.training_opts, "full_eval_every", 5))
+    early_stopping: int = conf.training_opts.early_stopping
 
-    # Sanity check
+    full_eval_every: int = int(getattr(conf.training_opts, "full_eval_every", 5))
+
+    # Sanity check: physics model
     if (
         "phys" in run_name
-        and frame.loader_opts.physics_channel not in frame.loader_opts.use_channels
+        and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels
     ):
-        raise ValueError("Training phys model without physics channel included.")
+        raise ValueError("Training a phys model but physics channel is missing.")
 
     # ------------------------------------------------------------
-    # Loaders
+    # Load dataset
     # ------------------------------------------------------------
-    train_loader, val_loader, test_loader = fetch_loaders(**frame.loader_opts)
+    train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
     # ------------------------------------------------------------
-    # Optional fine-tuning
+    # Create training framework
     # ------------------------------------------------------------
-    if frame.training_opts.fine_tune:
-        fn.log(logging.INFO, "Finetuning enabled")
+    frame = Framework.from_config("./conf/unet_train.yaml")
+
+    # Optional: fine-tuning
+    if conf.training_opts.fine_tune:
+        fn.log(logging.INFO, "Finetuning from previous final model…")
         final_model_path = output_dir / "models" / "model_final.pt"
-
         frame = Framework.from_checkpoint(
             final_model_path,
-            device=frame.device,
+            device=int(conf.training_opts.gpu_rank),
+            testing=False,
         )
         frame.freeze_layers()
 
-    # ------------------------------------------------------------
-    # Optional LR finder
-    # ------------------------------------------------------------
-    if frame.training_opts.find_lr:
+    # Optional: LR Finder
+    if conf.training_opts.find_lr:
         fn.find_lr(frame, train_loader, init_value=1e-9, final_value=1)
         raise SystemExit
 
@@ -92,69 +102,66 @@ if __name__ == "__main__":
     model_output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------
-    # TensorBoard logging
+    # TensorBoard
     # ------------------------------------------------------------
     writer = SummaryWriter(output_dir / "logs")
-    writer.add_text("Configuration Parameters", json.dumps(conf))
-    fn.print_conf(conf)
+    writer.add_text("Configuration", json.dumps(conf, indent=4))
 
+    fn.print_conf(conf)
     fn.log(
         logging.INFO,
-        f"# Train batches = {len(train_loader)}, # Val batches = {len(val_loader)}",
+        f"#Train={len(train_loader)}, #Val={len(val_loader)}, #Test={len(test_loader)}",
     )
 
+    # Save conf
     with open(output_dir / "conf.json", "w") as f:
-        json.dump(conf, f, sort_keys=True, indent=4)
+        json.dump(conf, f, indent=4, sort_keys=True)
 
-    # ------------------------------------------------------------
-    # Load normalization for image logging (same behavior as before)
-    # ------------------------------------------------------------
-    norm_path = pathlib.Path(frame.loader_opts.processed_dir) / "normalize_train.npy"
+    # Load normalization info for logging thumbnails
+    norm_path = pathlib.Path(conf.loader_opts.processed_dir) / "normalize_train.npy"
     _normalize = np.load(norm_path)
-
-    if frame.loader_opts.normalize == "min-max":
+    if conf.loader_opts.normalize == "min-max":
         _normalize = (
-            _normalize[2][frame.loader_opts.use_channels],
-            _normalize[3][frame.loader_opts.use_channels],
-        )
-    elif frame.loader_opts.normalize == "mean-std":
-        _normalize = (
-            np.append(_normalize[0], 0)[frame.loader_opts.use_channels],
-            np.append(_normalize[1], 1)[frame.loader_opts.use_channels],
+            _normalize[2][conf.loader_opts.use_channels],
+            _normalize[3][conf.loader_opts.use_channels],
         )
     else:
-        raise ValueError("Normalize must be min-max or mean-std")
+        _normalize = (
+            np.append(_normalize[0], 0)[conf.loader_opts.use_channels],
+            np.append(_normalize[1], 1)[conf.loader_opts.use_channels],
+        )
 
     # ------------------------------------------------------------
-    # TRAIN LOOP
+    # Training loop
     # ------------------------------------------------------------
     best_val_loss = np.inf
+    best_epoch = None
+    best_train_metric = None
+    best_val_metric = None
     epochs_without_improvement = 0
+
     start_time = timer()
 
-    for epoch in range(1, frame.training_opts.epochs + 1):
+    for epoch in range(1, conf.training_opts.epochs + 1):
 
-        # --------------------- Train ---------------------
+        # ------------------------ TRAIN ------------------------
         loss_train, train_metric, loss_alpha = fn.train_epoch(
             epoch, train_loader, frame
         )
         fn.log_metrics(writer, frame, train_metric, epoch, "train")
 
-        # --------------------- Validation ----------------
+        # ------------------------ VALIDATE ---------------------
         loss_val, val_metric = fn.validate(epoch, val_loader, frame, test=False)
         fn.log_metrics(writer, frame, val_metric, epoch, "val")
 
-        # --------------------- Scheduler epoch-step (if needed) -----
-        frame.val_operations(loss_val)
-
-        # --------------------- Image logging ----------------
+        # ------------------------ LOG IMAGES -------------------
         if (epoch - 1) % 5 == 0:
             fn.log_images(writer, frame, train_loader, epoch, "train", _normalize)
             fn.log_images(writer, frame, val_loader, epoch, "val", _normalize)
 
-        # --------------------- Full test tiles every N epochs ------
+        # ------------------------ FULL TILE EVAL ---------------
         if full_eval_every > 0 and epoch % full_eval_every == 0:
-            fn.log(logging.INFO, f"Running full test-tile evaluation at epoch {epoch}")
+            fn.log(logging.INFO, f"Full-tile eval at epoch {epoch}…")
             fn.evaluate_full_test_tiles(
                 frame=frame,
                 writer=writer,
@@ -162,7 +169,7 @@ if __name__ == "__main__":
                 output_dir=output_dir / "full_eval",
             )
 
-        # --------------------- Scalars ----------------------
+        # ------------------------ LOG SCALARS -------------------
         writer.add_scalar("loss_train", loss_train, epoch)
         writer.add_scalar("loss_val", loss_val, epoch)
         writer.add_scalar("lr", fn.get_current_lr(frame), epoch)
@@ -170,19 +177,22 @@ if __name__ == "__main__":
         for idx, sigma in enumerate(loss_alpha):
             writer.add_scalar(f"sigma/{idx + 1}", sigma, epoch)
 
-        # --------------------- Console summary --------------
+        # Print epoch summary
         fn.print_epoch_summary(
             epoch,
             train_metric=train_metric,
             val_metric=val_metric,
-            test_metric=None,
+            test_metric=val_metric,  # formatting only
             mask_names=frame.mask_names,
         )
 
-        # --------------------- Early stopping ----------------
+        # ------------------------ EARLY STOPPING ----------------
         if loss_val < best_val_loss:
-            frame.save(model_output_dir, "best")
             best_val_loss = float(loss_val)
+            best_epoch = epoch
+            best_train_metric = train_metric
+            best_val_metric = val_metric
+            frame.save(model_output_dir, "best")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -190,32 +200,57 @@ if __name__ == "__main__":
         if epochs_without_improvement >= early_stopping:
             fn.log(
                 logging.INFO,
-                f"Early stopping at epoch {epoch} "
-                f"| Best Val Loss = {best_val_loss:.4f}",
+                f"Early stopping at epoch {epoch} (best={best_val_loss:.4f})",
             )
             break
 
+        # housekeeping
         torch.cuda.empty_cache()
-        writer.flush()
         gc.collect()
+        writer.flush()
 
     # ------------------------------------------------------------
     # Save final model
     # ------------------------------------------------------------
     frame.save(model_output_dir, "final")
     writer.close()
+    elapsed = timer() - start_time
 
-    fn.log(
-        logging.INFO,
-        f"Finished training {run_name} "
-        f"| Training took {timer() - start_time:.2f} sec",
-    )
+    fn.log(logging.INFO, f"Finished training {run_name} in {elapsed:.2f}s")
 
+    # ------------------------------------------------------------
+    # Print BEST-EPOCH SUMMARY
+    # ------------------------------------------------------------
+    print("\n================ BEST EPOCH SUMMARY ================\n")
+    print(f"Best epoch: {best_epoch}")
+    print(f"Best validation loss: {best_val_loss:.6f}\n")
+
+    print("{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU"))
+    print("-" * 48)
+    for cname, (p, r, i) in zip(
+        frame.mask_names,
+        zip(
+            best_val_metric["precision"],
+            best_val_metric["recall"],
+            best_val_metric["IoU"],
+        ),
+    ):
+        print(f"{cname:<12} {p:.4f}     {r:.4f}     {i:.4f}")
+    print("-" * 48 + "\n")
+
+    # ------------------------------------------------------------
+    # Desktop Notification (Linux)
+    # ------------------------------------------------------------
     try:
-        subprocess.run(
-            ["notify-send", "Training Finished", f"Run {run_name} is done."],
-            check=False,
-        )
+        import shutil
+
+        if shutil.which("notify-send") is not None:
+            subprocess.run(
+                ["notify-send", "Training Completed", f"Run {run_name} finished."],
+                check=False,
+            )
     except Exception:
         pass
+
+    print(f"Training run complete: {run_name}")
 

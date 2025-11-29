@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Framework: wraps model, loss, optimizer, scheduler, and training utilities.
-
-Supports:
-- Construction from a YAML config: Framework.from_config(path, device=None)
-- Construction from a checkpoint: Framework.from_checkpoint(path, device=None, ...)
-- Schedulers configured via scheduler_opts in the YAML:
-    name: OneCycleLR | ReduceLROnPlateau | CosineAnnealingLR | None
-"""
 
 import math
 import os
@@ -20,77 +11,61 @@ import torch
 import yaml
 from addict import Dict
 from torch.cuda.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
 from tqdm import tqdm
 
-import glacier_mapping.model.functions as fn
-from glacier_mapping.model.metrics import tp_fp_fn
+from glacier_mapping.model.losses import customloss
+from glacier_mapping.model.metrics import (
+    tp_fp_fn,
+    precision,
+    recall,
+    IoU,
+)
 from glacier_mapping.model.unet import Unet
+from glacier_mapping.model.visualize import (
+    build_cmap,
+    make_rgb_preview,
+    label_to_color,
+    make_confidence_map,
+    make_entropy_map,
+    make_tp_fp_fn_masks,
+    make_eight_panel,
+)
 
 
 class Framework:
     """
-    Wraps model, loss, optimizer, scheduler, and all training utilities.
-
-    Typical use:
-      frame = Framework.from_config("conf/train.yaml", device="cuda:0")
-      # or
-      frame = Framework.from_checkpoint("runs/.../models/model_best.pt", device=0)
+    Wraps model, loss, optimizer, scheduler, and all training / inference utilities.
     """
 
     # ------------------------------------------------------------------
-    # Preferred constructors
+    # Constructors
     # ------------------------------------------------------------------
     @classmethod
-    def from_config(cls, config_path, device=None):
+    def from_config(cls, conf_path, device=None):
         """
-        Build a Framework from a YAML config file.
+        Build a Framework directly from a YAML config file.
 
-        device:
-          - if not None: overrides config gpu_rank
-          - if None: uses conf.gpu_rank or conf.training_opts.gpu_rank if present
+        conf_path: path to e.g. ./conf/unet_train.yaml
         """
-        config_path = Path(config_path)
-        with open(config_path, "r") as f:
-            raw = yaml.safe_load(f)
-        conf = Dict(raw)
+        conf_path = Path(conf_path)
+        conf = Dict(yaml.safe_load(open(conf_path)))
 
-        loss_opts = conf.get("loss_opts", None)
-        loader_opts = conf.loader_opts
-        model_opts = conf.model_opts
-        optimizer_opts = conf.get("optim_opts", conf.get("optimizer_opts", None))
-        reg_opts = conf.get("reg_opts", None)
-        metrics_opts = conf.get("metrics_opts", None)
-        scheduler_opts = conf.get("scheduler_opts", None)
-        training_opts = conf.get("training_opts", None)
+        gpu_rank = int(conf.training_opts.gpu_rank)
+        if device is None:
+            device = gpu_rank
 
-        # Resolve device
-        effective_device = device
-        if effective_device is None:
-            gpu_rank = conf.get("gpu_rank", None)
-            if gpu_rank is None and training_opts is not None and hasattr(
-                training_opts, "gpu_rank"
-            ):
-                gpu_rank = training_opts.gpu_rank
-            if gpu_rank is not None:
-                effective_device = int(gpu_rank)
-            else:
-                effective_device = "cpu"
-
-        frame = cls(
-            loss_opts=loss_opts,
-            loader_opts=loader_opts,
-            model_opts=model_opts,
-            optimizer_opts=optimizer_opts,
-            reg_opts=reg_opts,
-            metrics_opts=metrics_opts,
-            training_opts=training_opts,
-            scheduler_opts=scheduler_opts,
-            device=effective_device,
+        return cls(
+            loss_opts=conf.loss_opts,
+            loader_opts=conf.loader_opts,
+            model_opts=conf.model_opts,
+            optimizer_opts=conf.optim_opts,
+            reg_opts=getattr(conf, "reg_opts", None),
+            metrics_opts=conf.metrics_opts,
+            training_opts=conf.training_opts,
+            scheduler_opts=getattr(conf, "scheduler_opts", None),
+            device=device,
         )
-        # Keep full config for reproducibility
-        frame.conf = conf
-        return frame
 
     @staticmethod
     def from_checkpoint(
@@ -98,76 +73,59 @@ class Framework:
         device=None,
         new_data_path=None,
         testing=False,
-        override={},
+        override=None,
     ):
         """
         Load a Framework from a checkpoint file.
-
-        device: optional override, same semantics as __init__.
-        new_data_path: optional new processed_dir for loader_opts.
-        override: dict of top-level config pieces to override (loader_opts, etc.).
         """
+        if override is None:
+            override = {}
+
         checkpoint_path = Path(checkpoint_path)
         assert checkpoint_path.exists(), "checkpoint_path does not exist"
 
         with torch.serialization.safe_globals([Dict]):
-            if torch.cuda.is_available() and device not in ["cpu", torch.device("cpu")]:
+            if torch.cuda.is_available() and device != "cpu":
                 state = torch.load(checkpoint_path)
             else:
                 state = torch.load(checkpoint_path, map_location="cpu")
 
-        # Old checkpoints may not have 'conf' or 'scheduler_opts'
-        conf = state.get("conf", None)
-        if conf is not None and not isinstance(conf, Dict):
-            conf = Dict(conf)
-
-        if testing:
+        # Dropout tweak for test-time
+        if testing and "model_opts" in state:
             state["model_opts"].args.dropout = 1e-8
 
-        if len(override) > 0:
-            # Override top-level entries (e.g., loader_opts, training_opts, etc.)
-            for k, v in override.items():
-                state[k] = v
+        # Allow simple overrides
+        state.update(override)
 
+        # Optionally change dataset location
         if new_data_path is not None:
             new_data_path = Path(new_data_path)
             state["loader_opts"].processed_dir = new_data_path
 
-        loss_opts = state.get("loss_opts", None)
-        loader_opts = state["loader_opts"]
-        model_opts = state["model_opts"]
-        optimizer_opts = state["optimizer_opts"]
-        reg_opts = state.get("reg_opts", None)
-        metrics_opts = state["metrics_opts"]
-        training_opts = state.get("training_opts", None)
-        scheduler_opts = state.get("scheduler_opts", None)
-
         frame = Framework(
-            loss_opts=loss_opts,
-            loader_opts=loader_opts,
-            model_opts=model_opts,
-            optimizer_opts=optimizer_opts,
-            reg_opts=reg_opts,
-            metrics_opts=metrics_opts,
-            training_opts=training_opts,
-            scheduler_opts=scheduler_opts,
+            loss_opts=state["loss_opts"],
+            loader_opts=state["loader_opts"],
+            model_opts=state["model_opts"],
+            optimizer_opts=state["optimizer_opts"],
+            reg_opts=state["reg_opts"],
+            metrics_opts=state["metrics_opts"],
+            training_opts=state["training_opts"],
+            scheduler_opts=state.get("scheduler_opts", None),
             device=device,
         )
         frame.model.load_state_dict(state["state_dict"])
         frame.optimizer.load_state_dict(state["optimizer_state_dict"])
 
-        if "sigma1" in state.keys():  # older checkpoints
+        # Backwards compatibility with old sigma storage
+        if "sigma1" in state:
             frame.sigma_list = [state["sigma1"], state["sigma2"]]
         else:
             frame.sigma_list = state["sigma_list"]
 
-        if conf is not None:
-            frame.conf = conf
-
         return frame
 
     # ------------------------------------------------------------------
-    # Core initializer (usually not called directly)
+    # Core init
     # ------------------------------------------------------------------
     def __init__(
         self,
@@ -182,23 +140,27 @@ class Framework:
         device=None,
     ):
         self.scaler = GradScaler()
-        self.training_opts = training_opts
-        self.scheduler_opts = scheduler_opts
 
-        # -----------------------------------------
-        # Device
-        # -----------------------------------------
-        self.device = self._resolve_device(device)
+        # ------------------- Device -----------------------------------
+        if isinstance(device, int):
+            self.device = torch.device(
+                f"cuda:{device}" if torch.cuda.is_available() else "cpu"
+            )
+            if self.device.type == "cuda":
+                torch.cuda.set_device(self.device)
+                print(f"Using GPU {self.device}")
+        elif isinstance(device, str):
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cpu")
 
-        # -----------------------------------------
-        # Data-related options
-        # -----------------------------------------
+        # ------------------- Data-related opts -------------------------
         self.loader_opts = loader_opts
-        self.use_physics = getattr(loader_opts, "physics_channel", None) in loader_opts.use_channels
+        self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
         self.use_channels = loader_opts.use_channels
         output_classes = loader_opts.output_classes
 
-        # Slice metadata (for steps_per_epoch estimation)
+        # Slice metadata (for steps_per_epoch estimation etc.)
         self.df = pd.read_csv(Path(loader_opts.processed_dir) / "slice_meta.csv")
 
         # Binary vs multi-class
@@ -214,7 +176,7 @@ class Framework:
         if self.is_binary:
             self.binary_class_idx = loader_opts.output_classes[0]
 
-        # Normalization parameters
+        # Normalization parameters (subset to use_channels)
         self.normalization = loader_opts.normalize
         self.norm_arr_full = np.load(
             Path(loader_opts.processed_dir) / "normalize_train.npy"
@@ -222,187 +184,130 @@ class Framework:
         assert self.normalization in ["mean-std", "min-max"], "Invalid normalization"
         self.norm_arr = self.norm_arr_full[:, self.use_channels]
 
-        # -----------------------------------------
-        # Model
-        # -----------------------------------------
+        # ------------------- Model -------------------------------------
         self.model_opts = model_opts
         self.model_opts.args.inchannels = len(loader_opts.use_channels)
         self.model_opts.args.outchannels = self.num_classes
         self.model = Unet(**model_opts.args).to(self.device)
 
-        # -----------------------------------------
-        # Loss
-        # -----------------------------------------
+        # ------------------- Loss --------------------------------------
         self.loss_opts = loss_opts
-        self.loss_fn = fn.get_loss(self.num_classes, loss_opts).to(self.device)
+        self.loss_fn = self._build_loss(self.num_classes, loss_opts).to(self.device)
 
-        # -----------------------------------------
-        # Optimizer + sigma parameters
-        # -----------------------------------------
-        self.optimizer_opts = optimizer_opts
-        if optimizer_opts is None:
-            optimizer_opts = Dict({"name": "Adam", "args": {"lr": 0.001}})
-
-        opt_args = dict(optimizer_opts["args"])  # shallow copy
+        # ------------------- Optimizer + sigma -------------------------
+        self.optimizer_opts = optimizer_opts or Dict(
+            {"name": "Adam", "args": {"lr": 0.001}}
+        )
+        opt_args = dict(self.optimizer_opts["args"])
         if "lr" in opt_args:
             opt_args["lr"] = float(opt_args["lr"])
         if "weight_decay" in opt_args:
             opt_args["weight_decay"] = float(opt_args["weight_decay"])
 
+        # main model params
         _optimizer_params = [{"params": self.model.parameters(), **opt_args}]
 
-        # CustomLoss sigma list (uncertainty weighting)
+        # CustomLoss sigma list (uncertainty weighting; 2 terms: dice + boundary)
         self.sigma_list = []
         for _ in range(self.loss_fn.n_sigma):
             sigma = torch.tensor([1.0], requires_grad=True, device=self.device)
             self.sigma_list.append(sigma)
             _optimizer_params.append({"params": sigma, **opt_args})
 
-        optimizer_def = getattr(torch.optim, optimizer_opts["name"])
+        optimizer_def = getattr(torch.optim, self.optimizer_opts["name"])
         self.optimizer = optimizer_def(_optimizer_params)
 
-        # -----------------------------------------
-        # Scheduler
-        # -----------------------------------------
-        self.lrscheduler = None
+        # ------------------- Scheduler ---------------------------------
+        self.training_opts = training_opts
+        self.scheduler_opts = scheduler_opts
         self.scheduler_type = None
-        self._init_scheduler(opt_args)
+        self.lrscheduler = None
 
-        # -----------------------------------------
-        # Regularization & Metrics
-        # -----------------------------------------
+        if self.scheduler_opts is not None and self.scheduler_opts.get("name"):
+            self._init_scheduler(opt_args)
+
+        # ------------------- Regularization & Metrics ------------------
         self.reg_opts = reg_opts
         self.metrics_opts = metrics_opts
 
-    # ============================================================
-    # =====================  INTERNAL HELPERS  ====================
-    # ============================================================
-
-    def _resolve_device(self, device):
+    # ------------------------------------------------------------------
+    # Loss builder
+    # ------------------------------------------------------------------
+    def _build_loss(self, outchannels, opts=None):
         """
-        Resolve device considering:
-        - explicit device argument (int, str, torch.device)
-        - training_opts.gpu_rank if available
+        Only customloss is supported.
+        For binary (2 channels) we only count foreground channel 1 in the dice term.
+        For multi-class, we use classes 1..C-1 (ignore background).
         """
-        # explicit torch.device
-        if isinstance(device, torch.device):
-            d = device
-        elif isinstance(device, str):
-            if device.startswith("cuda") and torch.cuda.is_available():
-                d = torch.device(device)
-            else:
-                d = torch.device("cpu")
-        elif isinstance(device, int):
-            if torch.cuda.is_available():
-                d = torch.device(f"cuda:{device}")
-                torch.cuda.set_device(d)
-            else:
-                d = torch.device("cpu")
-        else:
-            # No explicit device: try training_opts.gpu_rank
-            if self.training_opts is not None and hasattr(self.training_opts, "gpu_rank"):
-                gpu_rank = int(self.training_opts.gpu_rank)
-                if torch.cuda.is_available():
-                    d = torch.device(f"cuda:{gpu_rank}")
-                    torch.cuda.set_device(d)
-                else:
-                    d = torch.device("cpu")
-            else:
-                d = torch.device("cpu")
+        if opts is None:
+            return customloss()
 
-        if d.type == "cuda":
-            print(f"Using GPU {d}")
-        else:
-            print("Using CPU")
+        ls = 0 if opts.label_smoothing == "None" else opts.label_smoothing
 
-        return d
+        fg_classes = [1] if outchannels == 2 else list(range(1, outchannels))
+        return customloss(
+            act=torch.nn.Softmax(dim=1),
+            smooth=1.0,
+            label_smoothing=ls,
+            foreground_classes=fg_classes,
+        )
 
+    # ------------------------------------------------------------------
+    # Scheduler init
+    # ------------------------------------------------------------------
     def _init_scheduler(self, opt_args):
-        """
-        Initialize scheduler based on scheduler_opts, or fall back to
-        the old OneCycleLR default if scheduler_opts is None but
-        training_opts is provided.
-        """
-        if self.training_opts is None:
-            self.lrscheduler = None
-            self.scheduler_type = None
-            return
+        name = self.scheduler_opts.name
+        self.scheduler_type = name
 
-        # Compute steps_per_epoch for schedulers that need it
-        num_samples = len(self.df)
-        batch_size = self.loader_opts.batch_size
-        steps_per_epoch = max(1, math.ceil(num_samples / batch_size))
+        if name == "OneCycleLR":
+            num_samples = len(self.df)
+            batch_size = self.loader_opts.batch_size
+            steps_per_epoch = math.ceil(num_samples / batch_size)
 
-        sch = self.scheduler_opts
-        if sch is not None:
-            name = sch.get("name", None)
-            if name in [None, "None"]:
-                self.lrscheduler = None
-                self.scheduler_type = None
-                return
+            kwargs = dict(self.scheduler_opts.args)
+            # max_lr often expressed relative to base lr; if missing, use 1.5x
+            if "max_lr" not in kwargs:
+                kwargs["max_lr"] = float(opt_args["lr"]) * 1.5
 
-            args = dict(sch.get("args", {}))
-
-            if name == "OneCycleLR":
-                # Fill required args if missing
-                if "steps_per_epoch" not in args:
-                    args["steps_per_epoch"] = steps_per_epoch
-                if "epochs" not in args:
-                    args["epochs"] = self.training_opts.epochs
-                # User should provide max_lr; we don't touch it.
-                print("Using scheduler: OneCycleLR")
-                self.lrscheduler = OneCycleLR(self.optimizer, **args)
-                self.scheduler_type = "OneCycleLR"
-
-            elif name == "ReduceLROnPlateau":
-                print("Using scheduler: ReduceLROnPlateau")
-                self.lrscheduler = ReduceLROnPlateau(self.optimizer, **args)
-                self.scheduler_type = "ReduceLROnPlateau"
-
-            elif name in ["CosineAnnealingLR"]:
-                if "T_max" not in args:
-                    args["T_max"] = self.training_opts.epochs
-                print("Using scheduler: CosineAnnealingLR")
-                self.lrscheduler = CosineAnnealingLR(self.optimizer, **args)
-                self.scheduler_type = "CosineAnnealingLR"
-
-            else:
-                raise ValueError(f"Unknown scheduler name: {name}")
-
-        else:
-            # Backward-compatible default: OneCycleLR (Debris-style settings)
-            print("Using default OneCycleLR scheduler (fallback)")
             self.lrscheduler = OneCycleLR(
                 self.optimizer,
-                max_lr=float(opt_args["lr"]) * 1.5,
                 steps_per_epoch=steps_per_epoch,
-                epochs=self.training_opts.epochs,
-                pct_start=0.4,
-                anneal_strategy="cos",
-                div_factor=10,
-                final_div_factor=500,
+                epochs=int(self.training_opts.epochs),
+                **kwargs,
             )
-            self.scheduler_type = "OneCycleLR"
 
-    # ============================================================
-    # =====================  TRAINING OPS  ========================
-    # ============================================================
+        elif name == "ReduceLROnPlateau":
+            kwargs = dict(self.scheduler_opts.args)
+            self.lrscheduler = ReduceLROnPlateau(
+                self.optimizer,
+                **kwargs,
+            )
 
+        elif name in ["None", None]:
+            self.scheduler_type = None
+            self.lrscheduler = None
+        else:
+            raise ValueError(f"Unknown scheduler: {name}")
+
+        if self.scheduler_type:
+            print(f"Using scheduler: {self.scheduler_type}")
+
+    # ================================================================
+    # TRAINING OPS
+    # ================================================================
     def optimize(self, x, y_onehot, y_int):
         """
         Forward + backward pass (no optimizer / scheduler step).
 
-        Args
-        ----
-        x        : (N,H,W,C) float32
-        y_onehot: (N,H,W,C_out) float32
-        y_int   : (N,H,W) int64
+        x        : (N,H,W,C)
+        y_onehot: (N,H,W,C_out)
+        y_int   : (N,H,W)
         """
         self.optimizer.zero_grad(set_to_none=True)
 
         x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
         y_onehot = y_onehot.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
-        y_int = y_int.to(self.device, non_blocking=True)  # (N,H,W)
+        y_int = y_int.to(self.device, non_blocking=True)
 
         with autocast(enabled=True):
             y_hat = self.model(x)
@@ -425,37 +330,28 @@ class Framework:
 
     def step(self):
         """
-        Optimizer + per-batch scheduler step (for OneCycleLR, etc.).
+        Optimizer update + per-batch scheduler update (for OneCycleLR).
         """
-        # Optimizer update
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # Scheduler update (per-batch only for OneCycleLR)
-        if self.lrscheduler is not None and self.scheduler_type == "OneCycleLR":
+        if self.scheduler_type == "OneCycleLR" and self.lrscheduler is not None:
             self.lrscheduler.step()
 
     def val_operations(self, val_loss):
         """
-        Called at the end of a validation epoch with avg val_loss.
-
-        Used for epoch-level schedulers like ReduceLROnPlateau and CosineAnnealingLR.
+        Per-epoch scheduler updates (e.g., ReduceLROnPlateau).
         """
-        if self.lrscheduler is None:
-            return
-
-        if self.scheduler_type == "ReduceLROnPlateau":
+        if self.scheduler_type == "ReduceLROnPlateau" and self.lrscheduler is not None:
             self.lrscheduler.step(val_loss)
-        elif self.scheduler_type == "CosineAnnealingLR":
-            self.lrscheduler.step()
-        # OneCycleLR: no epoch-level step
 
-    # ============================================================
-    # ===================  CHECKPOINT I/O  =======================
-    # ============================================================
-
+    # ================================================================
+    # CHECKPOINT I/O
+    # ================================================================
     def save(self, out_dir, epoch):
-        """Save frame as a checkpoint file (state dicts + config)."""
+        """
+        Save checkpoint (state dicts + configs).
+        """
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
 
@@ -473,28 +369,19 @@ class Framework:
             "training_opts": self.training_opts,
             "scheduler_opts": self.scheduler_opts,
         }
-
-        # Save full config if available
-        if hasattr(self, "conf"):
-            state["conf"] = self.conf
-
         model_path = Path(out_dir, f"model_{epoch}.pt")
         torch.save(state, model_path)
         print(f"Saved model {epoch}")
 
-    # ============================================================
-    # ===================  INFERENCE + LOSS  =====================
-    # ============================================================
-
+    # ================================================================
+    # INFERENCE + LOSS
+    # ================================================================
     def infer(self, x):
         """
         Inference with no grad.
 
-        Args:
-            x: (N,H,W,C)
-
-        Returns:
-            y_hat: (N,H,W,C) logits
+        x: (N,H,W,C)
+        Returns logits (N,H,W,C)
         """
         training = self.model.training
         x = x.permute(0, 3, 1, 2).to(self.device, non_blocking=True)
@@ -506,12 +393,11 @@ class Framework:
 
     def calc_loss(self, y_hat, y_onehot, y_int):
         """
-        Compute total loss including sigma weighting.
+        Compute total loss including sigma weighting and optional regularization.
 
-        Args:
-            y_hat:    (N,C,H,W) logits from model
-            y_onehot: (N,C,H,W) one-hot ground truth
-            y_int:    (N,H,W)    integer labels (0,1,2,255)
+        y_hat:    (N,C,H,W) logits
+        y_onehot: (N,C,H,W)
+        y_int:    (N,H,W)
         """
         y_hat = y_hat.to(self.device)
         y_onehot = y_onehot.to(self.device)
@@ -538,13 +424,13 @@ class Framework:
     def get_loss_alpha(self):
         return [sigma.item() for sigma in self.sigma_list]
 
-    # ============================================================
-    # ======================  METRICS  ==========================
-    # ============================================================
-
+    # ================================================================
+    # METRICS HELPERS (for training-time patch metrics)
+    # ================================================================
     def metrics(self, y_hat, y, mask, threshold):
         """
-        Original metric computation:
+        Original metric computation (patch-level):
+
          - y_hat: after activation (softmax), NHWC
          - y:     one-hot GT, NHWC
          - mask:  boolean ignore mask (H,W) per batch element
@@ -562,20 +448,18 @@ class Framework:
         y = np.argmax(y.cpu().numpy(), axis=3) + 1
         y[mask] = -1
 
-        tp, fp, fn = (
-            torch.zeros(n_classes),
-            torch.zeros(n_classes),
-            torch.zeros(n_classes),
-        )
+        tp_t = torch.zeros(n_classes)
+        fp_t = torch.zeros(n_classes)
+        fn_t = torch.zeros(n_classes)
         for i in range(0, n_classes):
             _y_hat = (y_hat == i + 1).astype(np.uint8)
             _y = (y == i + 1).astype(np.uint8)
             _tp, _fp, _fn = tp_fp_fn(_y_hat, _y)
-            tp[i] = _tp
-            fp[i] = _fp
-            fn[i] = _fn
+            tp_t[i] = _tp
+            fp_t[i] = _fp
+            fn_t[i] = _fn
 
-        return tp, fp, fn
+        return tp_t, fp_t, fn_t
 
     def segment(self, y_hat):
         if self.multi_class:
@@ -589,11 +473,12 @@ class Framework:
 
     def act(self, logits):
         if self.multi_class:
-            y_hat = torch.nn.Softmax(3)(logits)
-        else:
-            y_hat = torch.sigmoid(logits)
-        return y_hat
+            return torch.nn.Softmax(3)(logits)
+        return torch.sigmoid(logits)
 
+    # ================================================================
+    # OTHER UTILS
+    # ================================================================
     def freeze_layers(self, layers=None):
         for i, layer in enumerate(self.model.parameters()):
             if layers is None:
@@ -602,6 +487,9 @@ class Framework:
                 layer.requires_grad = False
 
     def find_lr(self, train_loader, init_value, final_value):
+        """
+        LR finder (unchanged logic).
+        """
         number_in_epoch = len(train_loader) - 1
         update_step = (final_value / init_value) ** (1 / number_in_epoch)
         lr = init_value
@@ -621,7 +509,7 @@ class Framework:
             inputs = inputs.permute(0, 3, 1, 2).to(self.device)
             labels = labels.permute(0, 3, 1, 2).to(self.device)
             outputs = self.model(inputs)
-            loss = self.calc_loss(outputs, labels, labels.argmax(dim=1))
+            loss = self.calc_loss(outputs, labels)
             if batch_num > 1 and loss > 4 * best_loss:
                 return log_lrs[10:-5], losses[10:-5]
             if loss < best_loss or batch_num == 1:
@@ -642,10 +530,9 @@ class Framework:
     def get_model_device(self):
         return self.model, self.device
 
-    # ============================================================
-    # ===================  PREDICTION HELPERS  ===================
-    # ============================================================
-
+    # ================================================================
+    # PREDICTION HELPERS
+    # ================================================================
     def normalize(self, x):
         if self.normalization == "mean-std":
             _mean, _std = self.norm_arr[0], self.norm_arr[1]
@@ -712,6 +599,7 @@ class Framework:
         _y = self.infer(_x).to(self.device)  # NHWC logits
 
         if self.multi_class:
+            # Softmax along channel axis (last dim)
             threshold = None
             _y = torch.nn.functional.softmax(_y, dim=3)
             _y = torch.squeeze(_y, dim=0)   # H,W,C
@@ -750,4 +638,194 @@ class Framework:
         if mask is not None:
             y_true[mask] = 0
         return y_true
+
+    # ================================================================
+    # FULL-TILE EVAL WITH 8-PANEL VIZ
+    # ================================================================
+    def evaluate_full_test_tiles(self, writer, epoch, output_dir, num_samples=4):
+        """
+        Full-tile evaluation with the unified 8-panel layout.
+        Writes a CSV and logs optional TensorBoard scalars + images.
+        """
+        import cv2
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        data_dir = Path(self.loader_opts.processed_dir)
+        test_tiles = sorted((data_dir / "test").glob("tiff*"))
+
+        n_classes = self.num_classes
+        is_binary = self.is_binary
+        classname = self.mask_names[-1] if is_binary else None
+        threshold = self.metrics_opts.threshold
+
+        rows = []
+        tp_sum = np.zeros(n_classes)
+        fp_sum = np.zeros(n_classes)
+        fn_sum = np.zeros(n_classes)
+
+        # ------------------- Loop over tiles ---------------------------
+        for x_path in tqdm(test_tiles, desc="Full-tile eval"):
+            x = np.load(x_path)
+            y_pred, invalid_mask = self.predict_slice(x, threshold)
+
+            y_true_raw = np.load(
+                x_path.with_name(x_path.name.replace("tiff", "mask"))
+            ).astype(np.uint8)
+
+            ignore = (y_true_raw == 255)
+            if invalid_mask is not None:
+                ignore |= invalid_mask
+
+            # Prepare GT for metrics (shift by +1 for classes)
+            y_true = y_true_raw.copy()
+            y_true[ignore] = 0
+            valid = ~ignore
+            y_true[valid] += 1
+
+            y_pred_valid = y_pred[valid]
+            y_true_valid = y_true[valid]
+
+            row = [x_path.name]
+            for ci in range(n_classes):
+                label = ci + 1
+                p = (y_pred_valid == label).astype(np.uint8)
+                t = (y_true_valid == label).astype(np.uint8)
+
+                tp_, fp_, fn_ = tp_fp_fn(
+                    torch.from_numpy(p),
+                    torch.from_numpy(t),
+                )
+                tp_sum[ci] += tp_
+                fp_sum[ci] += fp_
+                fn_sum[ci] += fn_
+
+                row += [
+                    precision(tp_, fp_, fn_),
+                    recall(tp_, fp_, fn_),
+                    IoU(tp_, fp_, fn_),
+                ]
+            rows.append(row)
+
+        # ------------------- CSV ---------------------------
+        cols = ["tile"]
+        for cname in self.mask_names:
+            cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
+
+        pd.DataFrame(rows, columns=cols).to_csv(
+            output_dir / f"full_eval_epoch{epoch}.csv",
+            index=False,
+        )
+
+        # ------------------- Summary metrics ----------------
+        totals = []
+        for ci in range(n_classes):
+            tp_, fp_, fn_ = tp_sum[ci], fp_sum[ci], fn_sum[ci]
+            prec = precision(tp_, fp_, fn_)
+            rec = recall(tp_, fp_, fn_)
+            iou = IoU(tp_, fp_, fn_)
+            totals.append((prec, rec, iou))
+
+        if writer is not None:
+            for (prec, rec, iou), cname in zip(totals, self.mask_names):
+                writer.add_scalar(f"fulltest_precision/{cname}", prec, epoch)
+                writer.add_scalar(f"fulltest_recall/{cname}", rec, epoch)
+                writer.add_scalar(f"fulltest_iou/{cname}", iou, epoch)
+
+        # ------------------- Sample viz ---------------------
+        cmap = build_cmap(n_classes, is_binary, classname)
+        num_samples = min(num_samples, len(test_tiles))
+
+        for idx, x_path in enumerate(test_tiles[:num_samples]):
+            x_full = np.load(x_path)
+
+            y_pred, invalid_mask = self.predict_slice(x_full, threshold)
+            y_true_raw = np.load(
+                x_path.with_name(x_path.name.replace("tiff", "mask"))
+            ).astype(np.uint8)
+
+            ignore = (y_true_raw == 255)
+            if invalid_mask is not None:
+                ignore |= invalid_mask
+
+            # Visualization label maps (0/1/2/255)
+            y_gt_vis = y_true_raw.copy()
+            y_gt_vis[ignore] = 255
+
+            y_pred_vis = y_pred.copy()
+            y_pred_vis[ignore] = 255
+
+            # Convert to RGB
+            x_rgb = make_rgb_preview(x_full)
+            gt_rgb = label_to_color(y_gt_vis, cmap)
+            pr_rgb = label_to_color(y_pred_vis, cmap)
+
+            # Confidence & entropy
+            yhat_full = self.act(
+                self.infer(
+                    torch.from_numpy(
+                        np.expand_dims(
+                            x_full[:, :, self.loader_opts.use_channels], 0
+                        )
+                    ).float()
+                )
+            ).cpu().numpy()[0]
+
+            if is_binary:
+                conf = yhat_full[..., 1]
+            else:
+                conf = np.max(yhat_full, axis=-1)
+
+            conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
+            entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
+
+            # TP / FP / FN (non-background)
+            tp_mask = (y_pred == y_true_raw) & (~ignore) & (y_true_raw != 0)
+            fp_mask = (y_pred != y_true_raw) & (~ignore) & (y_pred != 0)
+            fn_mask = (y_pred != y_true_raw) & (~ignore) & (y_true_raw != 0)
+
+            tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
+
+            # Per-class metrics string (for header)
+            metric_string_parts = []
+            for ci, cname in enumerate(self.mask_names):
+                pred_c = (y_pred == ci + 1).astype(np.uint8)
+                true_c = (y_true_raw == ci + 1).astype(np.uint8)
+
+                tp_, fp_, fn_ = tp_fp_fn(
+                    torch.from_numpy(pred_c),
+                    torch.from_numpy(true_c),
+                )
+
+                P = precision(tp_, fp_, fn_)
+                R = recall(tp_, fp_, fn_)
+                I = IoU(tp_, fp_, fn_)
+                metric_string_parts.append(
+                    f"{cname}: P={P:.3f} R={R:.3f} IoU={I:.3f}"
+                )
+
+            metrics_text = " | ".join(metric_string_parts)
+
+            composite = make_eight_panel(
+                x_rgb=x_rgb,
+                gt_rgb=gt_rgb,
+                pr_rgb=pr_rgb,
+                conf_rgb=conf_rgb,
+                tp_rgb=tp_rgb,
+                fp_rgb=fp_rgb,
+                fn_rgb=fn_rgb,
+                entropy_rgb=entropy_rgb,
+                metrics_text=metrics_text,
+            )
+
+            out_path = output_dir / f"fulltile_{idx}_epoch{epoch}.png"
+            cv2.imwrite(str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+
+            if writer is not None:
+                writer.add_image(
+                    f"fulltest/fulltile_{idx}",
+                    torch.tensor(composite).permute(2, 0, 1).float() / 255.0,
+                    epoch,
+                )
 
