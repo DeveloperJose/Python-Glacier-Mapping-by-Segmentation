@@ -26,30 +26,25 @@ def plot_image_and_mask(rgb, mask, title, out_path):
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
 
-    # mask is categorical — no normalization!
     mask = mask.astype(np.uint8)
 
-    # include IGNORE = 255
     cmap = mcolors.ListedColormap(["black", "cyan", "yellow", "magenta"])
     bounds = [0, 1, 2, 255, 256]
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
     fig, axs = plt.subplots(1, 2, figsize=(10, 5))
 
-    # Left: RGB
     rgb = rgb.astype(np.float32)
-    rgb /= max(1e-6, np.percentile(rgb, 99))  # safer normalization
+    rgb /= max(1e-6, np.percentile(rgb, 99))
     rgb = np.clip(rgb, 0, 1)
     axs[0].imshow(rgb)
     axs[0].set_title("RGB Image")
     axs[0].axis("off")
 
-    # Right: mask
     im = axs[1].imshow(mask, cmap=cmap, norm=norm)
     axs[1].set_title(title)
     axs[1].axis("off")
 
-    # colorbar
     cbar = fig.colorbar(
         im,
         ax=axs[1],
@@ -66,51 +61,19 @@ def plot_image_and_mask(rgb, mask, title, out_path):
 
 
 def read_shp(filename):
-    """
-    This function reads the shp file given
-    filename and returns the geopandas object
-    Parameters
-    ----------
-    filename : string
-    Returns
-    -------
-    geopandas dataframe
-
-    """
+    """Read shapefile and return geopandas dataframe."""
     shapefile = gpd.read_file(filename)
-
-    # Fix invalid geometries
-    # shapefile["geometry"] = shapefile["geometry"].apply(make_valid)
-
     return shapefile
 
 
 def read_tiff(filename):
-    """
-    This function reads the tiff file given
-    filename and returns the rasterio object
-    Parameters
-    ----------
-    filename : string
-    Returns
-    -------
-    rasterio tiff object
-
-    """
+    """Read GeoTIFF and return rasterio dataset."""
     dataset = rasterio.open(filename)
-
     return dataset
 
 
 def check_crs(crs_a, crs_b, verbose=False):
-    """
-    Verify that two CRS objects Match
-    :param crs_a: The first CRS to compare.
-        :type crs_a: rasterio.crs
-    :param crs_b: The second CRS to compare.
-        :type crs_b: rasterio.crs
-    :side-effects: Raises an error if the CRS's don't agree
-    """
+    """Verify that two CRS objects match. Raises ValueError if they don't agree."""
     if verbose:
         print("CRS 1: " + crs_a.to_string() + ", CRS 2: " + crs_b.to_string())
     if rasterio.crs.CRS.from_string(crs_a.to_string()) != rasterio.crs.CRS.from_string(
@@ -119,19 +82,8 @@ def check_crs(crs_a, crs_b, verbose=False):
         raise ValueError("Coordinate reference systems do not agree")
 
 
-# Clip shapefile
 def clip_shapefile(img_bounds, img_meta, shp):
-    """
-    Clip Shapefile Extents to Image Bounding Box
-    :param img_bounds: The rectangular lat/long bounding box associated with a
-        raster tiff.
-    :param img_meta: The metadata field associated with a geotiff. Expected to
-        contain transform (coordinate system), height, and width fields.
-    :param shps: A list of K geopandas shapefiles, used to build the mask.
-        Assumed to be in the same coordinate system as img_data.
-    :return result: The same shapefiles as shps, but with polygons that don't
-        overlap the img bounding box removed.
-    """
+    """Clip shapefile to image bounding box, removing non-overlapping polygons."""
     bbox = box(*img_bounds)
     bbox_poly = gpd.GeoDataFrame(
         {"geometry": bbox}, index=[0], crs=img_meta["crs"].data
@@ -139,12 +91,8 @@ def clip_shapefile(img_bounds, img_meta, shp):
     return shp.loc[shp.intersects(bbox_poly["geometry"][0])]
 
 
-# Generate polygon
 def poly_from_coord(polygon, transform):
-    """
-    Get a transformed polygon
-    https://lpsmlgeo.github.io/2019-09-22-binary_mask/
-    """
+    """Transform polygon coordinates using rasterio transform."""
     poly_pts = []
     poly = unary_union(polygon)
     for i in np.array(poly.exterior.coords):
@@ -155,17 +103,15 @@ def poly_from_coord(polygon, transform):
 
 def get_mask(tiff, shp, column="Glaciers"):
     """
-    This function reads the tiff filename and associated
-    shp filename given and returns the numpy array mask
-    of the labels
-    Parameters
-    ----------
-    tiff : rasterio.io.DatasetReader
-    shp : geopandas.geodataframe.GeoDataFrame
-    Returns
-    -------
-    numpy array of shape (channels * width * height)
+    Generate multi-class mask from shapefile labels.
 
+    Args:
+        tiff: Rasterio dataset or path to GeoTIFF
+        shp: Geopandas dataframe with label polygons
+        column: Column name for class labels
+
+    Returns:
+        Mask array of shape (height, width, num_classes)
     """
 
     if isinstance(tiff, (str, pathlib.Path)):
@@ -200,7 +146,6 @@ def get_mask(tiff, shp, column="Glaciers"):
         except Exception as e:
             print(f"Rasterization failed for class={key}: {e}")
             continue
-            # Already 0 if no mask
 
     return mask
 
@@ -340,7 +285,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         np.save(filename, arr)
 
     def get_pixel_count(tiff_slice, mask_slice):
-        # Work on a copy — avoid modifying original
         mask = mask_slice.copy()
 
         invalid = np.sum(tiff_slice, axis=2) == 0
@@ -370,15 +314,10 @@ def save_slices(filenum, fname, labels, savepath, **conf):
     slicenum = 0
     df_rows = []
     skipped_rows = []
-    # breakpoint()
-    # print(np.unique(mask, True))
     for row in range(0, tiff_np.shape[0], conf["window_size"][0] - conf["overlap"]):
         for column in range(
             0, tiff_np.shape[1], conf["window_size"][1] - conf["overlap"]
         ):
-            # ------------------------------
-            # Extract slices
-            # ------------------------------
             mask_slice = mask[
                 row : row + conf["window_size"][0],
                 column : column + conf["window_size"][1],
@@ -393,26 +332,15 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             ]
             tiff_slice = verify_slice_size(tiff_slice, conf)
 
-            # ------------------------------
-            # Identify invalid (all-zero) image pixels
-            # ------------------------------
             invalid = np.sum(tiff_slice, axis=2) == 0
-
-            # Assign IGNORE to mask immediately
             mask_slice[invalid] = IGNORE_LABEL
 
-            # ------------------------------
-            # Filter slice based on mask
-            # ------------------------------
             rgb_preview = tiff_np[
                 row : row + conf["window_size"][0],
                 column : column + conf["window_size"][1],
-                [2, 1, 0],  # true-color preview for debugging plots
+                [2, 1, 0],
             ]
 
-            # ------------------------------
-            # Prepare slice and compute stats (before filtering decision)
-            # ------------------------------
             final_save_slice = np.copy(tiff_slice)
             final_save_slice[invalid] = 0
 
@@ -421,9 +349,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             )
             total = bg + ci + deb + mas
 
-            # ------------------------------
-            # Filter slice based on mask
-            # ------------------------------
             keep = filter_percentage(
                 mask_slice,
                 conf["filter"],
@@ -433,7 +358,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             )
 
             if not keep:
-                # Track skipped slices
                 skipped_rows.append(
                     [
                         tiff_fname.name,
@@ -453,9 +377,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                 slicenum += 1
                 continue
 
-            # ------------------------------
-            # Record kept slice
-            # ------------------------------
             df_rows.append(
                 [
                     tiff_fname.name,
@@ -473,9 +394,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                 ]
             )
 
-            # ------------------------------
-            # Save slices
-            # ------------------------------
             mask_fname = f"mask_{filenum}_slice_{slicenum}"
             tiff_fname_out = f"tiff_{filenum}_slice_{slicenum}"
 
@@ -483,10 +401,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             save_slice(final_save_slice, savepath / tiff_fname_out)
 
             slicenum += 1
-
-    # ------------------------------
-    # Return final stats
-    # ------------------------------
     return (
         np.mean(tiff_np, axis=(0, 1)),
         np.std(tiff_np, axis=(0, 1)),

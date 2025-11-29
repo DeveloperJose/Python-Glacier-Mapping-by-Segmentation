@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-This program can take raw hyperspectral data in TIFF form, a label shapefile, split the data and then create and the arrays needed to train a neural network.
-"""
 
 import json
 import multiprocessing
@@ -23,7 +20,7 @@ import glacier_mapping.utils as utils
 
 import matplotlib
 
-matplotlib.use("Agg")  # ensures no GUI backend is used
+matplotlib.use("Agg")
 
 if __name__ == "__main__":
     random.seed(42)
@@ -32,39 +29,17 @@ if __name__ == "__main__":
 
     conf = Dict(yaml.safe_load(open("./conf/slice_and_preprocess.yaml")))
 
-    saved_df = pd.DataFrame(
-        columns=[
-            "Landsat ID",
-            "Image",
-            "Slice",
-            "Background",
-            "Clean Ice",
-            "Debris",
-            "Masked",
-            "Background Percentage",
-            "Clean Ice Percentage",
-            "Debris Percentage",
-            "Masked Percentage",
-            "split",
-        ]
-    )
+    saved_df = pd.DataFrame(columns=[
+        "Landsat ID", "Image", "Slice", "Background", "Clean Ice", "Debris", "Masked",
+        "Background Percentage", "Clean Ice Percentage", "Debris Percentage", 
+        "Masked Percentage", "split"
+    ])
 
-    skipped_df = pd.DataFrame(
-        columns=[
-            "Landsat ID",
-            "Image",
-            "Slice",
-            "Background",
-            "Clean Ice",
-            "Debris",
-            "Masked",
-            "Background Percentage",
-            "Clean Ice Percentage",
-            "Debris Percentage",
-            "Masked Percentage",
-            "split",
-        ]
-    )
+    skipped_df = pd.DataFrame(columns=[
+        "Landsat ID", "Image", "Slice", "Background", "Clean Ice", "Debris", "Masked",
+        "Background Percentage", "Clean Ice Percentage", "Debris Percentage", 
+        "Masked Percentage", "split"
+    ])
 
     images = sorted(os.listdir(Path(conf.image_dir)))
     idx = np.random.permutation(len(images))

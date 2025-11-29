@@ -40,9 +40,6 @@ class Framework:
     Wraps model, loss, optimizer, scheduler, and all training / inference utilities.
     """
 
-    # ------------------------------------------------------------------
-    # Constructors
-    # ------------------------------------------------------------------
     @classmethod
     def from_config(cls, conf_path, device=None):
         """
@@ -129,9 +126,6 @@ class Framework:
 
         return frame
 
-    # ------------------------------------------------------------------
-    # Core init
-    # ------------------------------------------------------------------
     def __init__(
         self,
         loss_opts=None,
@@ -146,7 +140,6 @@ class Framework:
     ):
         self.scaler = GradScaler()
 
-        # ------------------- Device -----------------------------------
         if isinstance(device, int):
             self.device = torch.device(
                 f"cuda:{device}" if torch.cuda.is_available() else "cpu"

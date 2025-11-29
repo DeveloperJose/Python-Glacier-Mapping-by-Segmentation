@@ -61,16 +61,12 @@ def fetch_loaders(
     """
     Build train/val/test dataloaders.
 
-    Args
-    ----
-    processed_dir : str or Path
-        Root of prepared dataset (contains train/val/test subfolders).
-    batch_size : int
-    use_channels : list[int]
-        Indices into BAND_NAMES.
-    output_classes : list[int]
-        0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls).
-    normalize : {"min-max","mean-std"}
+    Args:
+        processed_dir: Root of prepared dataset (contains train/val/test subfolders)
+        batch_size: Batch size for DataLoader
+        use_channels: Indices into BAND_NAMES
+        output_classes: 0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls)
+        normalize: "min-max" or "mean-std"
     """
     fn.log(
         logging.INFO,
@@ -210,20 +206,15 @@ class GlacierDataset(Dataset):
         elif self.normalize == "mean-std":
             data = (data - self.mean) / self.std
 
-        # Integer labels: 0=BG,1=CI,2=Debris,255=IGNORE
         label_int = np.load(self.mask_files[index]).astype(np.uint8)
-        label_int = np.expand_dims(label_int, axis=2)  # (H,W,1)
+        label_int = np.expand_dims(label_int, axis=2)
 
-        # Binary vs multi-class one-hot
         if len(self.output_classes) == 1:
-            # Binary classification: NOT~cls vs cls
             binary_class = self.output_classes[0]
-            # NOTE: ignore=255 => both False -> handled as "no class" in loss via target_int
             label = np.concatenate(
                 (label_int != binary_class, label_int == binary_class), axis=2
             )
         else:
-            # Multi-class: stacked one-hot maps for requested classes; ignore=255 => all False
             label = np.concatenate(
                 [label_int == x for x in self.output_classes], axis=2
             )
@@ -286,9 +277,7 @@ class Rot270(object):
 
 
 class DropoutChannels(object):
-    """
-    Random channel dropout augmentation.
-    """
+    """Random channel dropout augmentation."""
 
     def __init__(self, p):
         if (p < 0) or (p > 1):
@@ -306,9 +295,7 @@ class DropoutChannels(object):
 
 
 class ElasticDeform(object):
-    """
-    Apply elastic deformation (U-Net style).
-    """
+    """Elastic deformation augmentation."""
 
     def __init__(self, p):
         if (p < 0) or (p > 1):

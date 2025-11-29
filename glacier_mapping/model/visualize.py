@@ -14,9 +14,6 @@ import cv2
 from matplotlib import cm
 
 
-# ============================================================
-# GLOBAL COLORS (same scheme as training)
-# ============================================================
 COLOR_BG = np.array([181, 101, 29], dtype=np.uint8)  # Brown
 COLOR_CI = np.array([135, 206, 250], dtype=np.uint8)  # Light Blue
 COLOR_DEB = np.array([255, 0, 0], dtype=np.uint8)  # Red
@@ -30,9 +27,6 @@ GLOBAL_CMAP = {
 }
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
 def make_rgb_preview(x):
     """
     Convert multispectral tile (H,W,C) into an RGB preview.
@@ -57,11 +51,6 @@ def make_rgb_preview(x):
 
     rgb_uint8 = (rgb_norm * 255).clip(0, 255).astype(np.uint8)
     return rgb_uint8
-
-
-# ============================================================
-# COLORMAPS
-# ============================================================
 
 
 def build_cmap(num_classes, is_binary, classname=None):
@@ -130,11 +119,6 @@ def label_to_color(label_img, cmap):
     return out
 
 
-# ============================================================
-# CONTINUOUS MAPS (VIRIDIS)
-# ============================================================
-
-
 def _viridis_from_scalar(scalar_01):
     """Helper: scalar [0,1] → RGB via VIRIDIS."""
     vir = cm.get_cmap("viridis")
@@ -144,10 +128,7 @@ def _viridis_from_scalar(scalar_01):
 
 
 def make_confidence_map(prob, invalid_mask=None):
-    """
-    prob: (H,W) probability [0..1]
-    Returns an RGB VIRIDIS heatmap, with invalid masked to black if given.
-    """
+    """Convert probability map to RGB VIRIDIS heatmap."""
     rgb = _viridis_from_scalar(prob)
     if invalid_mask is not None:
         rgb[invalid_mask] = 0
@@ -155,15 +136,10 @@ def make_confidence_map(prob, invalid_mask=None):
 
 
 def make_entropy_map(prob_cube, invalid_mask=None):
-    """
-    Compute pixelwise entropy:
-        H = -sum(p * log(p)), then normalized to [0,1]
-    prob_cube: (H,W,C)
-    """
+    """Compute pixelwise entropy H = -sum(p * log(p)) and convert to RGB VIRIDIS heatmap."""
     p = np.clip(prob_cube, 1e-8, 1.0)
     entropy = -(p * np.log(p)).sum(axis=2)
 
-    # Normalize 0..1
     max_e = np.max(entropy) + 1e-8
     entropy_norm = entropy / max_e
 
@@ -171,11 +147,6 @@ def make_entropy_map(prob_cube, invalid_mask=None):
     if invalid_mask is not None:
         rgb[invalid_mask] = 0
     return rgb
-
-
-# ============================================================
-# TP / FP / FN MASKS (BOOLEAN → RGB)
-# ============================================================
 
 
 def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
@@ -189,16 +160,11 @@ def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
     fp_rgb = np.zeros_like(tp_rgb)
     fn_rgb = np.zeros_like(tp_rgb)
 
-    tp_rgb[tp_mask] = [0, 255, 0]  # green
-    fp_rgb[fp_mask] = [255, 0, 0]  # red
-    fn_rgb[fn_mask] = [255, 255, 0]  # yellow
+    tp_rgb[tp_mask] = [0, 255, 0]
+    fp_rgb[fp_mask] = [255, 0, 0]
+    fn_rgb[fn_mask] = [255, 255, 0]
 
     return tp_rgb, fp_rgb, fn_rgb
-
-
-# ============================================================
-# PANEL BUILDERS
-# ============================================================
 
 
 def pad_border(img, pad=4):
@@ -218,9 +184,7 @@ def concat_v(*imgs):
 
 
 def title_bar(text, width, height=32, font_scale=0.6):
-    """
-    Create a title strip above an image.
-    """
+    """Create a title strip with text."""
     bar = np.full((height, width, 3), 255, dtype=np.uint8)
     cv2.putText(
         bar,
@@ -240,11 +204,6 @@ def add_title(img, text, font_scale=0.6):
     return concat_v(bar, img)
 
 
-# ============================================================
-# MAJOR PANEL LAYOUTS
-# ============================================================
-
-
 def make_eight_panel(
     x_rgb,
     gt_rgb,
@@ -257,14 +216,10 @@ def make_eight_panel(
     metrics_text=None,
 ):
     """
-    2x4 dissertation layout:
-        TIFF | GT | Pred | Confidence
-        TP   | FP | FN   | Entropy
-
-    metrics_text: optional string (e.g., "CI: P=0.91 R=0.87 IoU=0.80")
-                  shown as a header bar across the full width.
+    Create 2x4 panel visualization:
+        Row 1: TIFF | GT | Pred | Confidence
+        Row 2: TP   | FP | FN   | Entropy
     """
-    # First row
     r1 = concat_h(
         add_title(x_rgb, "TIFF"),
         add_title(gt_rgb, "Ground Truth"),
@@ -272,7 +227,6 @@ def make_eight_panel(
         add_title(conf_rgb, "Confidence"),
     )
 
-    # Second row
     r2 = concat_h(
         add_title(tp_rgb, "True Positive"),
         add_title(fp_rgb, "False Positive"),
