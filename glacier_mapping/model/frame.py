@@ -1352,14 +1352,9 @@ class Framework:
             # Per-class metrics string
             metric_string_parts = []
             for ci, cname in enumerate(self.mask_names):
-                if self.is_binary:
-                    # For binary, use the visualization labels directly
-                    pred_c = (y_pred_vis == ci).astype(np.uint8)
-                    true_c = (y_gt_vis == ci).astype(np.uint8)
-                else:
-                    # For multi-class, use the original labels shifted by +1
-                    pred_c = (y_pred == ci + 1).astype(np.uint8)
-                    true_c = (y_true_raw == ci + 1).astype(np.uint8)
+                # Always use the visualization labels for consistency
+                pred_c = (y_pred_vis == ci).astype(np.uint8)
+                true_c = (y_gt_vis == ci).astype(np.uint8)
 
                 tp_, fp_, fn_ = tp_fp_fn(
                     torch.from_numpy(pred_c),
