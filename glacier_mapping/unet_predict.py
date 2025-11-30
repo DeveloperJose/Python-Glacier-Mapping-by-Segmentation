@@ -96,9 +96,11 @@ def get_checkpoint_paths(runs_dir, run_name, model_type):
     models_dir = runs_dir / run_name / "models"
 
     if model_type == "all":
-        # All model_*.pt files
+        # All model_*.pt files, but exclude "best" since it's a duplicate
         ckpts = sorted(models_dir.glob("model_*.pt"))
-        return [(ckpt, ckpt.stem.replace("model_", "")) for ckpt in ckpts]
+        ckpt_pairs = [(ckpt, ckpt.stem.replace("model_", "")) for ckpt in ckpts]
+        # Filter out "best" checkpoint
+        return [(path, name) for path, name in ckpt_pairs if name != "best"]
     else:
         # Single checkpoint
         ckpt = models_dir / f"model_{model_type}.pt"
@@ -127,6 +129,65 @@ def load_existing_checkpoint_results(comparison_csv_path):
         results[ckpt_name] = metrics
 
     return results
+
+
+def identify_best_checkpoint(results_df, has_ci, has_deb, metric_strategy="IoU"):
+    """
+    Identify the best checkpoint based on specified metric strategy.
+
+    Args:
+        results_df: DataFrame with checkpoint results
+        has_ci: bool, whether CleanIce model is included
+        has_deb: bool, whether Debris model is included
+        metric_strategy: str, metric to use for determining best checkpoint
+
+    Returns:
+        tuple: (best_checkpoint_name, best_metric_value)
+    """
+    if has_ci and has_deb:
+        # Merged CI + Debris case
+        if metric_strategy == "average_IoU":
+            # Use average of CI_IoU and Deb_IoU
+            best_idx = (results_df["CI_IoU"] + results_df["Deb_IoU"]).idxmax()
+            best_metric = (
+                results_df.loc[best_idx, "CI_IoU"] + results_df.loc[best_idx, "Deb_IoU"]
+            ) / 2
+        elif metric_strategy == "CI_IoU":
+            best_idx = results_df["CI_IoU"].idxmax()
+            best_metric = results_df.loc[best_idx, "CI_IoU"]
+        elif metric_strategy == "Deb_IoU":
+            best_idx = results_df["Deb_IoU"].idxmax()
+            best_metric = results_df.loc[best_idx, "Deb_IoU"]
+        elif metric_strategy == "CI_Precision":
+            best_idx = results_df["CI_P"].idxmax()
+            best_metric = results_df.loc[best_idx, "CI_P"]
+        elif metric_strategy == "Deb_Precision":
+            best_idx = results_df["Deb_P"].idxmax()
+            best_metric = results_df.loc[best_idx, "Deb_P"]
+        else:
+            # Default to average IoU
+            best_idx = (results_df["CI_IoU"] + results_df["Deb_IoU"]).idxmax()
+            best_metric = (
+                results_df.loc[best_idx, "CI_IoU"] + results_df.loc[best_idx, "Deb_IoU"]
+            ) / 2
+    else:
+        # Single model case
+        if metric_strategy == "IoU":
+            best_idx = results_df["IoU"].idxmax()
+            best_metric = results_df.loc[best_idx, "IoU"]
+        elif metric_strategy == "Precision":
+            best_idx = results_df["P"].idxmax()
+            best_metric = results_df.loc[best_idx, "P"]
+        elif metric_strategy == "Recall":
+            best_idx = results_df["R"].idxmax()
+            best_metric = results_df.loc[best_idx, "R"]
+        else:
+            # Default to IoU
+            best_idx = results_df["IoU"].idxmax()
+            best_metric = results_df.loc[best_idx, "IoU"]
+
+    best_checkpoint = results_df.loc[best_idx, "checkpoint"]
+    return best_checkpoint, best_metric
 
 
 # Prediction runner for a single checkpoint combination
@@ -420,13 +481,13 @@ if __name__ == "__main__":
     comparison_csv_path = out_root / run_base / "checkpoints_comparison.csv"
     existing_results = load_existing_checkpoint_results(comparison_csv_path)
 
-    if existing_results:
-        print(
-            f"\nFound existing results for {len(existing_results)} checkpoints in {comparison_csv_path}"
-        )
-        print(f"Will skip computation for already-processed checkpoints.\n")
-    else:
-        print("\nNo existing results found. Will compute all checkpoints.\n")
+    # if existing_results:
+    #     print(
+    #         f"\nFound existing results for {len(existing_results)} checkpoints in {comparison_csv_path}"
+    #     )
+    #     print(f"Will skip computation for already-processed checkpoints.\n")
+    # else:
+    #     print("\nNo existing results found. Will compute all checkpoints.\n")
 
     # ------------------------------------------------------------------
     # LOOP OVER ALL CHECKPOINT COMBINATIONS
@@ -447,9 +508,9 @@ if __name__ == "__main__":
 
             # Check if this checkpoint was already processed
             if ckpt_name in existing_results:
-                print(f"\n{'=' * 60}")
-                print(f"SKIPPING {ckpt_name} (already processed)")
-                print(f"{'=' * 60}")
+                # print(f"\n{'=' * 60}")
+                # print(f"SKIPPING {ckpt_name} (already processed)")
+                # print(f"{'=' * 60}")
 
                 # Load cached metrics
                 cached = existing_results[ckpt_name]
@@ -457,36 +518,36 @@ if __name__ == "__main__":
                 all_checkpoint_results.append(cached)
 
                 # Print cached results
-                if has_ci and has_deb:
-                    print(
-                        f"CleanIce: P={cached['CI_P']:.4f} R={cached['CI_R']:.4f} IoU={cached['CI_IoU']:.4f}"
-                    )
-                    print(
-                        f"Debris:   P={cached['Deb_P']:.4f} R={cached['Deb_R']:.4f} IoU={cached['Deb_IoU']:.4f}"
-                    )
-                else:
-                    print(
-                        f"P={cached['P']:.4f} R={cached['R']:.4f} IoU={cached['IoU']:.4f}"
-                    )
+                # if has_ci and has_deb:
+                #     print(
+                #         f"CleanIce: P={cached['CI_P']:.4f} R={cached['CI_R']:.4f} IoU={cached['CI_IoU']:.4f}"
+                #     )
+                #     print(
+                #         f"Debris:   P={cached['Deb_P']:.4f} R={cached['Deb_R']:.4f} IoU={cached['Deb_IoU']:.4f}"
+                #     )
+                # else:
+                #     print(
+                #         f"P={cached['P']:.4f} R={cached['R']:.4f} IoU={cached['IoU']:.4f}"
+                #     )
 
                 continue
 
             # Load models
-            print(f"\n{'=' * 60}")
-            print(f"PROCESSING {ckpt_name}")
-            print(f"{'=' * 60}")
+            # print(f"\n{'=' * 60}")
+            # print(f"PROCESSING {ckpt_name}")
+            # print(f"{'=' * 60}")
 
             frame_ci = None
             frame_deb = None
 
             if has_ci:
-                print(f"Loading CleanIce: {ci_ckpt_path}")
+                # print(f"Loading CleanIce: {ci_ckpt_path}")
                 frame_ci = Framework.from_checkpoint(
                     ci_ckpt_path, device=gpu, testing=True
                 )
 
             if has_deb:
-                print(f"Loading Debris: {deb_ckpt_path}")
+                # print(f"Loading Debris: {deb_ckpt_path}")
                 frame_deb = Framework.from_checkpoint(
                     deb_ckpt_path, device=gpu, testing=True
                 )
@@ -599,6 +660,40 @@ if __name__ == "__main__":
         print("=" * 80)
 
         summary_df = pd.DataFrame(all_checkpoint_results)
+
+        # Identify best checkpoint based on IoU
+        if has_ci and has_deb:
+            # Use average of CI_IoU and Deb_IoU for merged models
+            best_idx = (summary_df["CI_IoU"] + summary_df["Deb_IoU"]).idxmax()
+        else:
+            # Use IoU for single models
+            best_idx = summary_df["IoU"].idxmax()
+
+        best_checkpoint = summary_df.loc[best_idx, "checkpoint"]
+
+        # Sort so best checkpoint appears first
+        summary_df = summary_df.copy()
+        summary_df["_sort_key"] = summary_df["checkpoint"] == best_checkpoint
+        summary_df = summary_df.sort_values("_sort_key", ascending=False).drop(
+            "_sort_key", axis=1
+        )
+
+        # Reorder columns for better readability
+        if has_ci and has_deb:
+            column_order = [
+                "checkpoint",
+                "CI_P",
+                "CI_R",
+                "CI_IoU",
+                "Deb_P",
+                "Deb_R",
+                "Deb_IoU",
+            ]
+        else:
+            column_order = ["checkpoint", "P", "R", "IoU"]
+
+        summary_df = summary_df[column_order]
+
         summary_path = out_root / run_base / "checkpoints_comparison.csv"
         summary_df.to_csv(summary_path, index=False)
 
