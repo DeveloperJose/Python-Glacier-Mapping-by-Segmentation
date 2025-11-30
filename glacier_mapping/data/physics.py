@@ -7,13 +7,13 @@ import numba
 neighbor_offsets = np.array(
     [
         (-1, -1),
-        (-1,  0),
-        (-1,  1),
-        ( 0,  1),
-        ( 1,  1),
-        ( 1,  0),
-        ( 1, -1),
-        ( 0, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+        (1, 0),
+        (1, -1),
+        (0, -1),
     ],
     dtype=np.int32,
 )
@@ -227,7 +227,7 @@ def rolling_std_numba(arr, window):
     half = window // 2
 
     padded = np.zeros((rows + 2 * half, cols + 2 * half), dtype=arr.dtype)
-    padded[half:half + rows, half:half + cols] = arr
+    padded[half : half + rows, half : half + cols] = arr
 
     for i in range(rows):
         for j in range(cols):
@@ -360,10 +360,12 @@ def compute_phys_v4(elevation_full: np.ndarray, res=64, scale=1.0) -> np.ndarray
     curv = compute_plan_curvature(elevation)
 
     return np.stack(
-        [flow.astype(np.float32),
-         tpi.astype(np.float32),
-         rough.astype(np.float32),
-         curv.astype(np.float32)],
+        [
+            flow.astype(np.float32),
+            tpi.astype(np.float32),
+            rough.astype(np.float32),
+            curv.astype(np.float32),
+        ],
         axis=-1,
     )
 
@@ -379,4 +381,3 @@ if __name__ == "__main__":
 
     phys_output = compute_phys_v4(elevation, res=64, scale=0.3)
     print("Physics output shape:", phys_output.shape, "dtype:", phys_output.dtype)
-
