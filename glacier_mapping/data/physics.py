@@ -1,128 +1,257 @@
-import collections
-
 import numba
 import numpy as np
 from PIL import Image
 
+# ------------------------------------------------------------
+# Static neighbor offsets (Numba-optimized)
+# ------------------------------------------------------------
+neighbor_offsets = np.array(
+    [
+        (-1, -1),
+        (-1,  0),
+        (-1,  1),
+        ( 0,  1),
+        ( 1,  1),
+        ( 1,  0),
+        ( 1, -1),
+        ( 0, -1),
+    ],
+    dtype=np.int32,
+)
 
+# ------------------------------------------------------------
+# Optimized BFS (identical behavior, much faster)
+# ------------------------------------------------------------
 @numba.njit()
-def get_neighbors(im, coords):
-    r, c = coords
-    possible = [
-        (r - 1, c - 1),  # bot-left
-        (r - 1, c),  # down
-        (r - 1, c + 1),  # bot-right
-        (r, c + 1),  # right
-        (r + 1, c + 1),  # top-right
-        (r + 1, c),  # up
-        (r + 1, c - 1),  # top-left
-        (r, c - 1),  # left
-    ]
+def bfs_fast(im, water_allpath, source, queue_r, queue_c, visited):
+    rows, cols = im.shape
 
-    real = []
-    for tup in possible:
-        tr, tc = tup
-        if tr >= 0 and tr < im.shape[0] and tc >= 0 and tc < im.shape[1]:
-            real.append(tup)
+    # Reset visited mask (Numba-friendly looping)
+    for i in range(rows):
+        for j in range(cols):
+            visited[i, j] = False
 
-    return real
+    sr, sc = source
 
+    # Initialize BFS queue
+    queue_start = 0
+    queue_end = 1
+    queue_r[0] = sr
+    queue_c[0] = sc
+    visited[sr, sc] = True
 
-@numba.njit()
-def get_path(prev, v):
-    prev_tuple = prev[v]
-    if prev_tuple.sum() < 0:  # v is the origin
-        return [v]
-    return get_path(prev, (int(prev_tuple[0]), int(prev_tuple[1]))) + [v]
+    while queue_start < queue_end:
+        ur = queue_r[queue_start]
+        uc = queue_c[queue_start]
+        queue_start += 1
 
+        curr_elev = im[ur, uc]
 
-@numba.njit()
-def manhattan_cost(u, v):
-    rr = abs(u[0] - v[0])
-    cc = abs(u[1] - v[1])
-    return rr + cc
+        # Original accumulation rule: every visited cell except source gets +1
+        if not (ur == sr and uc == sc):
+            water_allpath[ur, uc] += 1.0
 
+        # Loop over 8 neighbors using static offsets
+        for k in range(8):
+            vr = ur + neighbor_offsets[k, 0]
+            vc = uc + neighbor_offsets[k, 1]
 
-def breadth_first_search_v2(im, water_allpath, source):
-    visited = set([source])
+            # Bounds check
+            if vr < 0 or vr >= rows or vc < 0 or vc >= cols:
+                continue
 
-    Q = collections.deque()
-    Q.append(source)
-
-    while len(Q) > 0:
-        u = Q.popleft()
-        curr_elev = im[u]
-
-        # Only accumulate water in neighbors
-        if u != source:
-            water_allpath[u] += 1  # manhattan_cost(u, source)
-
-        # Get only valid neighbors
-        for v in get_neighbors(im, u):
-            neigh_elev = im[v]
-            # Visit if not visited and if elevation is lower as water can only flow down
-            if v not in visited and neigh_elev < curr_elev:
-                visited.add(v)
-                Q.append(v)
+            # Downhill rule (unchanged)
+            if not visited[vr, vc] and im[vr, vc] < curr_elev:
+                visited[vr, vc] = True
+                queue_r[queue_end] = vr
+                queue_c[queue_end] = vc
+                queue_end += 1
 
     return water_allpath
 
-
+# ------------------------------------------------------------
+# Normalization helpers
+# ------------------------------------------------------------
 @numba.njit()
 def mean_std(im):
     return (im - im.mean()) / im.std()
 
-
 @numba.njit()
 def min_max(im):
-    return (im - im.min()) / im.max()
+    return (im - im.min()) / (im.max() - im.min() + 1e-8)
 
-
+# ------------------------------------------------------------
+# Resize helper with cv2 / skimage / PIL fallbacks
+# ------------------------------------------------------------
 def resize(arr, new_rows, new_cols):
-    arr = min_max(arr) * 255
-    arr = arr.astype(np.uint8).reshape(arr.shape[0], arr.shape[1])
-    arr = np.array(
-        Image.fromarray(arr).resize((new_cols, new_rows))
-    )  # , Image.LANCZOS))
-    arr = arr.astype(np.float32) / 255.0
-    return arr
+    try:
+        import cv2
+        arr_norm = min_max(arr)
+        arr_uint8 = (arr_norm * 255).astype(np.uint8)
+        resized = cv2.resize(arr_uint8, (new_cols, new_rows), interpolation=cv2.INTER_LINEAR)
+        return resized.astype(np.float32) / 255.0
 
+    except ImportError:
+        try:
+            from skimage.transform import resize as sk_resize
+            arr_norm = min_max(arr)
+            return sk_resize(arr_norm, (new_rows, new_cols), order=1, preserve_range=True).astype(np.float32)
 
+        except ImportError:
+            arr = min_max(arr) * 255
+            arr_uint8 = arr.astype(np.uint8)
+            img = Image.fromarray(arr_uint8)
+            resized = np.array(img.resize((new_cols, new_rows)))
+            return resized.astype(np.float32) / 255.0
+
+# ------------------------------------------------------------
+# Main phys_v2 computation (with fast BFS)
+# ------------------------------------------------------------
 def compute_phys_v2(elevation, res=64, scale=0.3):
-    # Downsize elevation map for faster computation. Also normalizes to [0,1]
-    original_shape = elevation.shape
+    # Extract elevation 2D
+    if len(elevation.shape) == 3:
+        elevation_2d = elevation[:, :, 0]
+    else:
+        elevation_2d = elevation
+
+    original_shape = elevation_2d.shape
+
+    # Downscale if needed
     if scale != 1:
-        new_rows = int(elevation.shape[0] * scale)
-        new_cols = int(elevation.shape[1] * scale)
-        elevation = resize(elevation, new_rows, new_cols)
-    # print(f'From {original_shape} to {elevation.shape}, {elevation.min()}, {elevation.max()}, {elevation.dtype}')
+        new_rows = int(original_shape[0] * scale)
+        new_cols = int(original_shape[1] * scale)
+        elevation_2d = resize(elevation_2d, new_rows, new_cols)
 
-    # Create an empty image where the water accumulation will be stored
-    water_allpath = np.zeros((elevation.shape[0], elevation.shape[1]), dtype=np.float32)
+    rows, cols = elevation_2d.shape
 
-    # Create the pairs that will be explored by BFS
-    pairs = []
-    step = 1 if res == "full" else complex(0, res)
-    for p in (
-        np.mgrid[0 : elevation.shape[0] - 1 : step, 0 : elevation.shape[1] - 1 : step]
-        .reshape(2, -1)
-        .T
-    ):
-        pairs.append((int(p[0]), int(p[1])))
+    # Water accumulation map
+    water_allpath = np.zeros((rows, cols), dtype=np.float32)
 
-    # Perform BFS
-    # for u,v in tqdm(pairs, position=2):
-    for u, v in pairs:
-        water_allpath = breadth_first_search_v2(elevation, water_allpath, (u, v))
+    # Allocate reusable BFS buffers ONCE
+    queue_r = np.zeros(rows * cols, dtype=np.int32)
+    queue_c = np.zeros(rows * cols, dtype=np.int32)
+    visited = np.zeros((rows, cols), dtype=np.bool_)
 
-    # Resize back to original elevation map size
+    # Perform BFS from sampled grid points
+    if res == "full":
+        res = 1
+
+    for i in range(0, rows, res):
+        for j in range(0, cols, res):
+            bfs_fast(elevation_2d, water_allpath, (i, j), queue_r, queue_c, visited)
+
+    # Upscale back to original resolution
     if scale != 1:
         water_allpath = resize(water_allpath, original_shape[0], original_shape[1])
 
-    # Expand last dimension for concatenation with other channels
+    # Normalize output and return as [H, W, 1]
+    water_allpath = min_max(water_allpath)
     return water_allpath.reshape(original_shape[0], original_shape[1], 1)
 
+# ------------------------------------------------------------
+# Additional terrain features
+# ------------------------------------------------------------
+def compute_slope_magnitude(dem_np):
+    slope_sin = dem_np[:, :, 1]
+    slope_rad = np.arcsin(np.clip(slope_sin, -1, 1))
+    slope_deg = slope_rad * 180.0 / np.pi
+    return np.clip(slope_deg / 90.0, 0, 1)
 
+@numba.njit()
+def uniform_filter_numba(arr, radius):
+    rows, cols = arr.shape
+    result = np.zeros_like(arr)
+    half = radius // 2
+
+    for i in range(rows):
+        for j in range(cols):
+            total = 0.0
+            count = 0
+            for di in range(-half, half + 1):
+                for dj in range(-half, half + 1):
+                    ni = i + di
+                    nj = j + dj
+                    if 0 <= ni < rows and 0 <= nj < cols:
+                        total += arr[ni, nj]
+                        count += 1
+            result[i, j] = total / count
+    return result
+
+def compute_tpi(elevation, radius=5):
+    try:
+        mean_elev = uniform_filter_numba(elevation, radius)
+    except Exception:
+        from scipy.ndimage import uniform_filter
+        mean_elev = uniform_filter(elevation, size=radius)
+
+    tpi = elevation - mean_elev
+    tpi_max = np.abs(tpi).max() + 1e-8
+    return (tpi / tpi_max + 1) / 2
+
+@numba.njit()
+def rolling_std_numba(arr, window):
+    rows, cols = arr.shape
+    result = np.zeros_like(arr)
+    half = window // 2
+
+    padded = np.zeros((rows + 2 * half, cols + 2 * half))
+    padded[half:half+rows, half:half+cols] = arr
+
+    for i in range(rows):
+        for j in range(cols):
+            vals = padded[i:i+window, j:j+window].flatten()
+            mean = 0.0
+            for v in vals:
+                mean += v
+            mean /= vals.size
+
+            var = 0.0
+            for v in vals:
+                diff = v - mean
+                var += diff * diff
+            var /= vals.size
+
+            result[i, j] = np.sqrt(var)
+    return result
+
+def compute_roughness(elevation, window=3):
+    try:
+        rough = rolling_std_numba(elevation, window)
+    except Exception:
+        from scipy.ndimage import generic_filter
+        rough = generic_filter(elevation, np.std, size=window)
+
+    return min_max(rough)
+
+def compute_plan_curvature(elevation):
+    dy, dx = np.gradient(elevation)
+    dxy, dxx = np.gradient(dx)
+    dyy, dyx = np.gradient(dy)
+
+    numerator = dxx * dy**2 - 2*dxy * dx * dy + dyy * dx**2
+    denominator = (dx**2 + dy**2 + 1e-8)**1.5 + 1e-8
+    curv = numerator / denominator
+
+    curv_norm = curv / (np.abs(curv).max() + 1e-8)
+    return (curv_norm + 1) / 2
+
+# ------------------------------------------------------------
+# Combined physics feature extractor
+# ------------------------------------------------------------
+def compute_phys_v3(elevation_full, dem_np, res=64, scale=1.0):
+    elevation = elevation_full[:, :, 0]
+
+    flow = compute_phys_v2(elevation_full, res, scale)[:, :, 0]
+    slope = compute_slope_magnitude(dem_np)
+    tpi = compute_tpi(elevation, radius=5)
+    roughness = compute_roughness(elevation, window=3)
+    curvature = compute_plan_curvature(elevation)
+
+    return np.stack([flow, slope, tpi, roughness, curvature], axis=-1)
+
+# ------------------------------------------------------------
+# Example usage
+# ------------------------------------------------------------
 if __name__ == "__main__":
     import slice as fn
 
@@ -135,7 +264,6 @@ if __name__ == "__main__":
     print(phys_output.shape)
 
     import matplotlib.pyplot as plt
-
-    plt.figure()
-    plt.imshow(phys_output, cmap="gray")
+    plt.imshow(phys_output[:, :, 0], cmap="gray")
     plt.savefig("physics_example.png")
+

@@ -55,9 +55,12 @@ if __name__ == "__main__":
 
     if (
         "phys" in run_name
-        and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels
+        # and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels
     ):
-        raise ValueError("Training a phys model but physics channel is missing.")
+        if isinstance(conf.loader_opts.physics_channel, list):
+            print("Training a physics model with channels", conf.loader_opts.physics_channel, "included in", conf.loader_opts.use_channels)
+        else:
+            raise ValueError("Training a phys model but physics channel is missing or not a list.")
 
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 

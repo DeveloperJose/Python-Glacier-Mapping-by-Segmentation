@@ -30,7 +30,11 @@ BAND_NAMES = np.array(
         "H",
         "S",
         "V",
-        "physics",
+        "flow_accumulation",
+        "slope_magnitude",
+        "tpi",
+        "roughness",
+        "plan_curvature",
     ]
 )
 

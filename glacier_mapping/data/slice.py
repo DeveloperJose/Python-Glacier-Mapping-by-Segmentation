@@ -196,12 +196,18 @@ def get_tiff_np(
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
 
     use_physics = (
-            isinstance(physics_res, (float, str, int))
-            and physics_res != "None"
-            and isinstance(physics_scale, (float, int))
-            )
+        isinstance(physics_res, (float, str, int))
+        and physics_res != "None"
+        and isinstance(physics_scale, (float, int))
+    )
     if use_physics and use_dem:
-        phys_np = physics.compute_phys_v2(dem_np[:, :, 0], physics_res, physics_scale)
+        # Use v3 with enhanced physics features (5 channels)
+        phys_np = physics.compute_phys_v3(
+            dem_np[:, :, 0:1],  # elevation as [H, W, 1]
+            dem_np,  # full DEM with slope [H, W, 2]
+            physics_res,
+            physics_scale,
+        )
         tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
 
     if verbose:
