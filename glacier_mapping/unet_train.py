@@ -53,15 +53,6 @@ if __name__ == "__main__":
     full_eval_every: int = int(getattr(conf.training_opts, "full_eval_every", 5))
     num_viz_samples: int = int(getattr(conf.training_opts, "num_viz_samples", 4))
 
-    if (
-        "phys" in run_name
-        # and conf.loader_opts.physics_channel not in conf.loader_opts.use_channels
-    ):
-        if isinstance(conf.loader_opts.physics_channel, list):
-            print("Training a physics model with channels", conf.loader_opts.physics_channel, "included in", conf.loader_opts.use_channels)
-        else:
-            raise ValueError("Training a phys model but physics channel is missing or not a list.")
-
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
     frame = Framework.from_config("./conf/unet_train.yaml")

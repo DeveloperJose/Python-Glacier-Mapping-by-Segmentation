@@ -152,10 +152,19 @@ def add_index(tiff_np, index1, index2):
 
 
 def compute_dems(dem_np):
-    elevation = dem_np[:, :, 0][:, :, None]
-    slope = dem_np[:, :, 1][:, :, None]
-    slope = np.sin(slope * np.pi / 180)
-    dem_np = np.concatenate((elevation, slope), axis=2)
+    """
+    From DEM product bands, build DEM features for the network.
+
+    Assumes:
+        dem_np[:, :, 0] = elevation (meters)
+        dem_np[:, :, 1] = slope (degrees)
+
+    Returns:
+        dem_feat : (H, W, 2) with [elevation_raw, slope_deg_raw]
+    """
+    elevation = dem_np[:, :, 0][:, :, None]  # raw meters
+    slope_deg = dem_np[:, :, 1][:, :, None]  # raw degrees from DEM
+    dem_np = np.concatenate((elevation, slope_deg), axis=2)
     return dem_np
 
 
@@ -175,11 +184,13 @@ def get_tiff_np(
     tiff_np = np.nan_to_num(tiff_np)
 
     use_dem = not (dem_fname is None or not dem_fname.exists())
+    dem_np = None
+
     if use_dem:
         dem = read_tiff(dem_fname)
         dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
         dem_np = np.nan_to_num(dem_np)
-        dem_np = compute_dems(dem_np)
+        dem_np = compute_dems(dem_np)  # [elevation_raw, slope_deg_raw]
         tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
 
     tiff_np = np.nan_to_num(tiff_np.astype(np.float32))
@@ -201,10 +212,10 @@ def get_tiff_np(
         and isinstance(physics_scale, (float, int))
     )
     if use_physics and use_dem:
-        # Use v3 with enhanced physics features (5 channels)
-        phys_np = physics.compute_phys_v3(
+        # Physics v4: 4-channel RAW physics tensor
+        #   [flow_raw, tpi_raw, roughness_raw, plan_curvature_raw]
+        phys_np = physics.compute_phys_v4(
             dem_np[:, :, 0:1],  # elevation as [H, W, 1]
-            dem_np,  # full DEM with slope [H, W, 2]
             physics_res,
             physics_scale,
         )
@@ -259,8 +270,6 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         frac = num_labels / num_valid
 
         if frac < percentage:
-            # print(f"Skipping {name}: frac={frac:.6f} valid={num_valid} labelled={num_labels}", os.path.basename(savepath))
-
             ci = np.sum(slice == 1)
             dci = np.sum(slice == 2)
             title = f"CI={ci}, DCI={dci}, labelled={num_labels}, valid={num_valid}, frac={frac:.6f}"
@@ -282,17 +291,17 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         np.save(filename, arr)
 
     def get_pixel_count(tiff_slice, mask_slice):
-        mask = mask_slice.copy()
+        mask_local = mask_slice.copy()
 
         invalid = np.sum(tiff_slice, axis=2) == 0
-        mask[invalid] = IGNORE_LABEL
+        mask_local[invalid] = IGNORE_LABEL
 
-        ci = np.sum(mask == 1)
-        deb = np.sum(mask == 2)
-        mas = np.sum(mask == IGNORE_LABEL)
-        bg = np.sum(mask == 0)
+        ci = np.sum(mask_local == 1)
+        deb = np.sum(mask_local == 2)
+        mas = np.sum(mask_local == IGNORE_LABEL)
+        bg = np.sum(mask_local == 0)
 
-        return bg, ci, deb, mas, mask
+        return bg, ci, deb, mas, mask_local
 
     os.makedirs(conf["out_dir"], exist_ok=True)
 
@@ -364,10 +373,10 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                         ci,
                         deb,
                         mas,
-                        bg / total,
-                        ci / total,
-                        deb / total,
-                        mas / total,
+                        bg / total if total > 0 else 0.0,
+                        ci / total if total > 0 else 0.0,
+                        deb / total if total > 0 else 0.0,
+                        mas / total if total > 0 else 0.0,
                         os.path.basename(savepath),
                     ]
                 )
@@ -383,10 +392,10 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                     ci,
                     deb,
                     mas,
-                    bg / total,
-                    ci / total,
-                    deb / total,
-                    mas / total,
+                    bg / total if total > 0 else 0.0,
+                    ci / total if total > 0 else 0.0,
+                    deb / total if total > 0 else 0.0,
+                    mas / total if total > 0 else 0.0,
                     os.path.basename(savepath),
                 ]
             )
@@ -398,6 +407,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             save_slice(final_save_slice, savepath / tiff_fname_out)
 
             slicenum += 1
+
     return (
         np.mean(tiff_np, axis=(0, 1)),
         np.std(tiff_np, axis=(0, 1)),
@@ -406,3 +416,4 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         df_rows,
         skipped_rows,
     )
+

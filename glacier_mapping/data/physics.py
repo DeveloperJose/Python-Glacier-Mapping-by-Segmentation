@@ -1,6 +1,5 @@
-import numba
 import numpy as np
-from PIL import Image
+import numba
 
 # ------------------------------------------------------------
 # Static neighbor offsets (Numba-optimized)
@@ -19,11 +18,21 @@ neighbor_offsets = np.array(
     dtype=np.int32,
 )
 
+
 # ------------------------------------------------------------
-# Optimized BFS (identical behavior, much faster)
+# Optimized BFS for flow accumulation
 # ------------------------------------------------------------
 @numba.njit()
 def bfs_fast(im, water_allpath, source, queue_r, queue_c, visited):
+    """
+    Single-source BFS over a DEM surface.
+
+    im            : 2D elevation array (float32)
+    water_allpath : 2D accumulation array (float32, updated in-place)
+    source        : (row, col) tuple
+    queue_r/c     : preallocated integer arrays of length rows * cols
+    visited       : 2D bool mask (reset at entry)
+    """
     rows, cols = im.shape
 
     # Reset visited mask (Numba-friendly looping)
@@ -47,7 +56,7 @@ def bfs_fast(im, water_allpath, source, queue_r, queue_c, visited):
 
         curr_elev = im[ur, uc]
 
-        # Original accumulation rule: every visited cell except source gets +1
+        # Every visited cell except source gets +1 to accumulation
         if not (ur == sr and uc == sc):
             water_allpath[ur, uc] += 1.0
 
@@ -60,7 +69,7 @@ def bfs_fast(im, water_allpath, source, queue_r, queue_c, visited):
             if vr < 0 or vr >= rows or vc < 0 or vc >= cols:
                 continue
 
-            # Downhill rule (unchanged)
+            # Downhill rule: strictly lower elevation
             if not visited[vr, vc] and im[vr, vc] < curr_elev:
                 visited[vr, vc] = True
                 queue_r[queue_end] = vr
@@ -69,94 +78,91 @@ def bfs_fast(im, water_allpath, source, queue_r, queue_c, visited):
 
     return water_allpath
 
-# ------------------------------------------------------------
-# Normalization helpers
-# ------------------------------------------------------------
-@numba.njit()
-def mean_std(im):
-    return (im - im.mean()) / im.std()
-
-@numba.njit()
-def min_max(im):
-    return (im - im.min()) / (im.max() - im.min() + 1e-8)
 
 # ------------------------------------------------------------
-# Resize helper with cv2 / skimage / PIL fallbacks
+# Resize helper (cv2 only, preserves raw numeric scale)
 # ------------------------------------------------------------
-def resize(arr, new_rows, new_cols):
-    try:
-        import cv2
-        arr_norm = min_max(arr)
-        arr_uint8 = (arr_norm * 255).astype(np.uint8)
-        resized = cv2.resize(arr_uint8, (new_cols, new_rows), interpolation=cv2.INTER_LINEAR)
-        return resized.astype(np.float32) / 255.0
+def resize(arr: np.ndarray, new_rows: int, new_cols: int) -> np.ndarray:
+    """
+    Resize a 2D float32 array to (new_rows, new_cols), preserving
+    the original numeric scale (no normalization).
 
-    except ImportError:
-        try:
-            from skimage.transform import resize as sk_resize
-            arr_norm = min_max(arr)
-            return sk_resize(arr_norm, (new_rows, new_cols), order=1, preserve_range=True).astype(np.float32)
+    Requires OpenCV (cv2).
+    """
+    import cv2  # type: ignore
 
-        except ImportError:
-            arr = min_max(arr) * 255
-            arr_uint8 = arr.astype(np.uint8)
-            img = Image.fromarray(arr_uint8)
-            resized = np.array(img.resize((new_cols, new_rows)))
-            return resized.astype(np.float32) / 255.0
+    arr = arr.astype(np.float32, copy=False)
+    resized = cv2.resize(arr, (new_cols, new_rows), interpolation=cv2.INTER_LINEAR)
+    return resized.astype(np.float32)
+
 
 # ------------------------------------------------------------
-# Main phys_v2 computation (with fast BFS)
+# Flow accumulation from elevation
 # ------------------------------------------------------------
-def compute_phys_v2(elevation, res=64, scale=0.3):
-    # Extract elevation 2D
-    if len(elevation.shape) == 3:
-        elevation_2d = elevation[:, :, 0]
+def compute_flow(elevation, res=64, scale=0.3):
+    """
+    Compute a simple flow-accumulation field via BFS over elevation.
+
+    Parameters
+    ----------
+    elevation : np.ndarray
+        Either (H, W) or (H, W, C). If 3D, only channel 0 is used
+        as elevation. Values are assumed to be in meters (raw).
+    res : int or "full"
+        Sampling step for BFS sources. "full" => 1 (every pixel).
+    scale : float
+        Optional downscale factor to accelerate BFS. Flow is then
+        upscaled back to original resolution.
+
+    Returns
+    -------
+    flow : np.ndarray
+        Raw flow accumulation array of shape (H, W), float32.
+    """
+    # Extract 2D elevation field
+    if elevation.ndim == 3:
+        elev_2d = elevation[:, :, 0].astype(np.float32)
     else:
-        elevation_2d = elevation
+        elev_2d = elevation.astype(np.float32)
 
-    original_shape = elevation_2d.shape
+    original_shape = elev_2d.shape
 
-    # Downscale if needed
-    if scale != 1:
+    # Downscale for speed if needed
+    if scale != 1.0:
         new_rows = int(original_shape[0] * scale)
         new_cols = int(original_shape[1] * scale)
-        elevation_2d = resize(elevation_2d, new_rows, new_cols)
+        elev_2d = resize(elev_2d, new_rows, new_cols)
 
-    rows, cols = elevation_2d.shape
+    rows, cols = elev_2d.shape
 
-    # Water accumulation map
+    # Accumulation map
     water_allpath = np.zeros((rows, cols), dtype=np.float32)
 
-    # Allocate reusable BFS buffers ONCE
+    # Allocate BFS buffers ONCE
     queue_r = np.zeros(rows * cols, dtype=np.int32)
     queue_c = np.zeros(rows * cols, dtype=np.int32)
     visited = np.zeros((rows, cols), dtype=np.bool_)
 
-    # Perform BFS from sampled grid points
+    # Interpret "full" as res = 1 (every pixel as a source)
     if res == "full":
         res = 1
 
-    for i in range(0, rows, res):
-        for j in range(0, cols, res):
-            bfs_fast(elevation_2d, water_allpath, (i, j), queue_r, queue_c, visited)
+    step = int(res)
 
-    # Upscale back to original resolution
-    if scale != 1:
+    for i in range(0, rows, step):
+        for j in range(0, cols, step):
+            bfs_fast(elev_2d, water_allpath, (i, j), queue_r, queue_c, visited)
+
+    # Upscale back to original resolution if we downscaled
+    if scale != 1.0:
         water_allpath = resize(water_allpath, original_shape[0], original_shape[1])
 
-    # Normalize output and return as [H, W, 1]
-    water_allpath = min_max(water_allpath)
-    return water_allpath.reshape(original_shape[0], original_shape[1], 1)
+    return water_allpath.astype(np.float32)
+
 
 # ------------------------------------------------------------
-# Additional terrain features
+# Numba-based uniform filter (for TPI)
 # ------------------------------------------------------------
-def compute_slope_magnitude(dem_np):
-    slope_sin = dem_np[:, :, 1]
-    slope_rad = np.arcsin(np.clip(slope_sin, -1, 1))
-    slope_deg = slope_rad * 180.0 / np.pi
-    return np.clip(slope_deg / 90.0, 0, 1)
-
 @numba.njit()
 def uniform_filter_numba(arr, radius):
     rows, cols = arr.shape
@@ -177,93 +183,200 @@ def uniform_filter_numba(arr, radius):
             result[i, j] = total / count
     return result
 
-def compute_tpi(elevation, radius=5):
+
+def compute_tpi(elevation: np.ndarray, radius: int = 5) -> np.ndarray:
+    """
+    Topographic Position Index (TPI):
+        TPI = elevation - local_mean(elevation)
+
+    Returns RAW TPI values (can be positive or negative),
+    with no normalization applied.
+
+    Parameters
+    ----------
+    elevation : np.ndarray
+        2D elevation array (H, W).
+    radius : int
+        Window "diameter" for local mean.
+
+    Returns
+    -------
+    tpi : np.ndarray
+        (H, W) float32 array of TPI.
+    """
+    elevation = elevation.astype(np.float32, copy=False)
+
     try:
         mean_elev = uniform_filter_numba(elevation, radius)
     except Exception:
-        from scipy.ndimage import uniform_filter
+        from scipy.ndimage import uniform_filter  # type: ignore
+
         mean_elev = uniform_filter(elevation, size=radius)
 
     tpi = elevation - mean_elev
-    tpi_max = np.abs(tpi).max() + 1e-8
-    return (tpi / tpi_max + 1) / 2
+    return tpi.astype(np.float32)
 
+
+# ------------------------------------------------------------
+# Numba-based rolling std (for roughness)
+# ------------------------------------------------------------
 @numba.njit()
 def rolling_std_numba(arr, window):
     rows, cols = arr.shape
     result = np.zeros_like(arr)
     half = window // 2
 
-    padded = np.zeros((rows + 2 * half, cols + 2 * half))
-    padded[half:half+rows, half:half+cols] = arr
+    padded = np.zeros((rows + 2 * half, cols + 2 * half), dtype=arr.dtype)
+    padded[half:half + rows, half:half + cols] = arr
 
     for i in range(rows):
         for j in range(cols):
-            vals = padded[i:i+window, j:j+window].flatten()
-            mean = 0.0
-            for v in vals:
-                mean += v
-            mean /= vals.size
+            # Extract local window
+            wsum = 0.0
+            count = 0
+            for di in range(window):
+                for dj in range(window):
+                    v = padded[i + di, j + dj]
+                    wsum += v
+                    count += 1
+            mean = wsum / count
 
             var = 0.0
-            for v in vals:
-                diff = v - mean
-                var += diff * diff
-            var /= vals.size
+            for di in range(window):
+                for dj in range(window):
+                    v = padded[i + di, j + dj]
+                    diff = v - mean
+                    var += diff * diff
+            var /= count
 
             result[i, j] = np.sqrt(var)
+
     return result
 
-def compute_roughness(elevation, window=3):
+
+def compute_roughness(elevation: np.ndarray, window: int = 3) -> np.ndarray:
+    """
+    Roughness defined as local standard deviation of elevation
+    in a sliding window.
+
+    Returns RAW std-dev values, no normalization.
+
+    Parameters
+    ----------
+    elevation : np.ndarray
+        2D elevation array (H, W).
+    window : int
+        Window size for rolling std.
+
+    Returns
+    -------
+    rough : np.ndarray
+        (H, W) float32 array of local std.
+    """
+    elevation = elevation.astype(np.float32, copy=False)
+
     try:
         rough = rolling_std_numba(elevation, window)
     except Exception:
-        from scipy.ndimage import generic_filter
+        from scipy.ndimage import generic_filter  # type: ignore
+
         rough = generic_filter(elevation, np.std, size=window)
 
-    return min_max(rough)
+    return rough.astype(np.float32)
 
-def compute_plan_curvature(elevation):
+
+# ------------------------------------------------------------
+# Plan curvature
+# ------------------------------------------------------------
+def compute_plan_curvature(elevation: np.ndarray) -> np.ndarray:
+    """
+    Plan curvature derived from second derivatives of elevation.
+
+    Returns RAW curvature values (can be positive or negative),
+    no normalization.
+
+    Parameters
+    ----------
+    elevation : np.ndarray
+        2D elevation array (H, W).
+
+    Returns
+    -------
+    curv : np.ndarray
+        (H, W) float32 array of plan curvature.
+    """
+    elevation = elevation.astype(np.float32, copy=False)
+
     dy, dx = np.gradient(elevation)
     dxy, dxx = np.gradient(dx)
     dyy, dyx = np.gradient(dy)
 
-    numerator = dxx * dy**2 - 2*dxy * dx * dy + dyy * dx**2
-    denominator = (dx**2 + dy**2 + 1e-8)**1.5 + 1e-8
+    numerator = dxx * dy**2 - 2.0 * dxy * dx * dy + dyy * dx**2
+    denominator = (dx**2 + dy**2 + 1e-8) ** 1.5 + 1e-8
     curv = numerator / denominator
 
-    curv_norm = curv / (np.abs(curv).max() + 1e-8)
-    return (curv_norm + 1) / 2
+    return curv.astype(np.float32)
+
 
 # ------------------------------------------------------------
 # Combined physics feature extractor
 # ------------------------------------------------------------
-def compute_phys_v3(elevation_full, dem_np, res=64, scale=1.0):
-    elevation = elevation_full[:, :, 0]
+def compute_phys_v4(elevation_full: np.ndarray, res=64, scale=1.0) -> np.ndarray:
+    """
+    Build a 4-channel physics tensor from elevation:
 
-    flow = compute_phys_v2(elevation_full, res, scale)[:, :, 0]
-    slope = compute_slope_magnitude(dem_np)
+        [ flow_raw, tpi_raw, roughness_raw, plan_curvature_raw ]
+
+    All channels are RAW (no 0-1 scaling, no mean/std).
+    Any normalization should be applied later in the data
+    preprocessing / dataloader pipeline.
+
+    Parameters
+    ----------
+    elevation_full : np.ndarray
+        (H, W, C) or (H, W) array; channel 0 is assumed to be elevation.
+    res : int or "full"
+        Sampling step for BFS sources in flow computation.
+    scale : float
+        Optional downscale factor for flow computation.
+
+    Returns
+    -------
+    phys : np.ndarray
+        (H, W, 4) array:
+            0: flow accumulation
+            1: TPI
+            2: roughness
+            3: plan curvature
+    """
+    if elevation_full.ndim == 3:
+        elevation = elevation_full[:, :, 0].astype(np.float32)
+    else:
+        elevation = elevation_full.astype(np.float32)
+
+    flow = compute_flow(elevation, res=res, scale=scale)
     tpi = compute_tpi(elevation, radius=5)
-    roughness = compute_roughness(elevation, window=3)
-    curvature = compute_plan_curvature(elevation)
+    rough = compute_roughness(elevation, window=3)
+    curv = compute_plan_curvature(elevation)
 
-    return np.stack([flow, slope, tpi, roughness, curvature], axis=-1)
+    return np.stack(
+        [flow.astype(np.float32),
+         tpi.astype(np.float32),
+         rough.astype(np.float32),
+         curv.astype(np.float32)],
+        axis=-1,
+    )
 
-# ------------------------------------------------------------
-# Example usage
-# ------------------------------------------------------------
+
 if __name__ == "__main__":
-    import slice as fn
+    # Minimal self-test (you can adapt paths as needed)
+    import glacier_mapping.data.slice as fn  # adjust import if necessary
 
     dem = fn.read_tiff("/data/baryal/HKH/DEM/image1.tif")
     dem_np = np.transpose(dem.read(), (1, 2, 0)).astype(np.float32)
     dem_np = np.nan_to_num(dem_np)
     elevation = dem_np[:, :, 0][:, :, None]
 
-    phys_output = compute_phys_v2(elevation, res=64)
-    print(phys_output.shape)
-
-    import matplotlib.pyplot as plt
-    plt.imshow(phys_output[:, :, 0], cmap="gray")
-    plt.savefig("physics_example.png")
+    phys_output = compute_phys_v4(elevation, res=64, scale=0.3)
+    print("Physics output shape:", phys_output.shape, "dtype:", phys_output.dtype)
 

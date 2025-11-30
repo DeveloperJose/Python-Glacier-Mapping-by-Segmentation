@@ -97,7 +97,7 @@ if __name__ == "__main__":
 
             pbar.set_description(f"Processing dataset {split}")
             pbar.reset(len(meta))
-            with multiprocessing.Pool(10) as pool:
+            with multiprocessing.Pool(5) as pool:
                 for result in utils.istarmap(pool, fn_process, enumerate(meta)):
                     mu, s, mi, ma, df_rows, skipped_rows = result
                     means.append(mu)
@@ -183,12 +183,12 @@ if __name__ == "__main__":
         print(f"  Images: {statistics[split]['images']}")
         print(f"  Slices: {statistics[split]['slices']}")
         print(f"  Total pixels: {total_all:,}")
-        print(f"\n  Pixel Distribution (all pixels):")
+        print("\n  Pixel Distribution (all pixels):")
         print(f"    Background:        {total_bg:12,} ({pct_bg:5.2f}%)")
         print(f"    Clean Ice:         {total_ci:12,} ({pct_ci:5.2f}%)")
         print(f"    Debris Ice:        {total_debris:12,} ({pct_debris:5.2f}%)")
         print(f"    Masked/Invalid:    {total_masked:12,} ({pct_masked:5.2f}%)")
-        print(f"\n  Pixel Distribution (valid pixels only):")
+        print("\n  Pixel Distribution (valid pixels only):")
         print(f"    Background:        {pct_bg_valid:5.2f}%")
         print(f"    Clean Ice:         {pct_ci_valid:5.2f}%")
         print(f"    Debris Ice:        {pct_debris_valid:5.2f}%")
@@ -256,12 +256,12 @@ if __name__ == "__main__":
         print(f"\n{split.upper()} SET (SKIPPED):")
         print(f"  Skipped slices: {len(split_skipped_df)}")
         print(f"  Total pixels: {total_all:,}")
-        print(f"\n  Pixel Distribution (all pixels):")
+        print("\n  Pixel Distribution (all pixels):")
         print(f"    Background:        {total_bg:12,} ({pct_bg:5.2f}%)")
         print(f"    Clean Ice:         {total_ci:12,} ({pct_ci:5.2f}%)")
         print(f"    Debris Ice:        {total_debris:12,} ({pct_debris:5.2f}%)")
         print(f"    Masked/Invalid:    {total_masked:12,} ({pct_masked:5.2f}%)")
-        print(f"\n  Pixel Distribution (valid pixels only):")
+        print("\n  Pixel Distribution (valid pixels only):")
         print(f"    Background:        {pct_bg_valid:5.2f}%")
         print(f"    Clean Ice:         {pct_ci_valid:5.2f}%")
         print(f"    Debris Ice:        {pct_debris_valid:5.2f}%")
@@ -329,5 +329,5 @@ if __name__ == "__main__":
     print(
         f"  Skipped slices metadata: {Path(conf['out_dir']) / 'skipped_slices_meta.csv'}"
     )
-    print(f"\nProcessing completed successfully!")
+    print("\nProcessing completed successfully!")
     print("=" * 80)

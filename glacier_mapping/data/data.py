@@ -14,27 +14,26 @@ import glacier_mapping.model.functions as fn
 
 BAND_NAMES = np.array(
     [
-        "B1",
-        "B2",
-        "B3",
-        "B4",
-        "B5",
-        "B6_VCID1",
-        "B6_VCID2",
-        "B7",
-        "elevation",
-        "slope",
-        "NDVI",
-        "NDWI",
-        "NDSI",
-        "H",
-        "S",
-        "V",
-        "flow_accumulation",
-        "slope_magnitude",
-        "tpi",
-        "roughness",
-        "plan_curvature",
+        "B1",  # 0
+        "B2",  # 1
+        "B3",  # 2
+        "B4",  # 3
+        "B5",  # 4
+        "B6_VCID1",  # 5
+        "B6_VCID2",  # 6
+        "B7",  # 7
+        "elevation",  # 8  (raw meters)
+        "slope_deg",  # 9  (raw degrees)
+        "NDVI",  # 10
+        "NDWI",  # 11
+        "NDSI",  # 12
+        "H",  # 13
+        "S",  # 14
+        "V",  # 15
+        "flow_accumulation",  # 16
+        "tpi",  # 17
+        "roughness",  # 18
+        "plan_curvature",  # 19
     ]
 )
 
@@ -45,8 +44,7 @@ def fetch_loaders(
     use_channels=[3, 2, 1],
     output_classes=[1],
     class_names=["BG", "CleanIce", "Debris"],
-    physics_channel=10,
-    normalize=False,
+    normalize="mean-std",
     train_folder="train",
     val_folder="val",
     test_folder="test",
@@ -75,7 +73,6 @@ def fetch_loaders(
         processed_dir / train_folder,
         use_channels,
         output_classes,
-        physics_channel,
         normalize,
         transforms=transforms.Compose(
             [
@@ -91,14 +88,12 @@ def fetch_loaders(
         processed_dir / val_folder,
         use_channels,
         output_classes,
-        physics_channel,
         normalize,
     )
     test_dataset = GlacierDataset(
         processed_dir / test_folder,
         use_channels,
         output_classes,
-        physics_channel,
         normalize,
     )
 
@@ -152,7 +147,6 @@ class GlacierDataset(Dataset):
         folder_path,
         use_channels,
         output_classes,
-        physics_channel,
         normalize,
         transforms=None,
     ):
@@ -161,9 +155,6 @@ class GlacierDataset(Dataset):
         self.output_classes = np.array(output_classes, dtype=np.uint8)
         self.normalize = normalize
         self.transforms = transforms
-
-        self.physics_channel = physics_channel
-        self.use_physics = physics_channel in use_channels
 
         if isinstance(self.folder_path, str):
             self.folder_path = pathlib.Path(self.folder_path)

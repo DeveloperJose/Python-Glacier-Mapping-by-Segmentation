@@ -144,7 +144,6 @@ class Framework:
             self.device = torch.device("cpu")
 
         self.loader_opts = loader_opts
-        self.use_physics = loader_opts.physics_channel in loader_opts.use_channels
         self.use_channels = loader_opts.use_channels
         output_classes = loader_opts.output_classes
 
