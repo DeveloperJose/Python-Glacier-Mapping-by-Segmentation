@@ -51,6 +51,7 @@ if __name__ == "__main__":
     early_stopping: int = conf.training_opts.early_stopping
 
     full_eval_every: int = int(getattr(conf.training_opts, "full_eval_every", 5))
+    num_viz_samples: int = int(getattr(conf.training_opts, "num_viz_samples", 4))
 
     if (
         "phys" in run_name
@@ -137,8 +138,12 @@ if __name__ == "__main__":
 
         # ------------------------ LOG IMAGES -------------------
         if (epoch - 1) % 5 == 0:
-            frame.log_images(writer, train_loader, epoch, "train", _normalize)
-            frame.log_images(writer, val_loader, epoch, "val", _normalize)
+            frame.log_images(
+                writer, train_loader, epoch, "train", _normalize, num_viz_samples
+            )
+            frame.log_images(
+                writer, val_loader, epoch, "val", _normalize, num_viz_samples
+            )
 
         # ------------------------ FULL TILE EVAL ---------------
         if epoch % full_eval_every == 0:
@@ -243,7 +248,7 @@ if __name__ == "__main__":
         precision_vals = to_float(val_metric["precision"])
         recall_vals = to_float(val_metric["recall"])
         iou_vals = to_float(val_metric["IoU"])
-        
+
         # Use first class values for summary display
         if isinstance(precision_vals, list):
             p = precision_vals[0]
@@ -283,12 +288,33 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     # Save checkpoints summary
     # ------------------------------------------------------------
+    def convert_tensors_to_python(obj):
+        """Recursively convert tensors in nested dicts/lists to Python types."""
+        if isinstance(obj, torch.Tensor):
+            if obj.numel() == 1:
+                return float(obj.detach().cpu().item())
+            else:
+                return obj.detach().cpu().tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_tensors_to_python(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_tensors_to_python(item) for item in obj]
+        else:
+            return obj
+
+    # Convert all tensors in improvement_checkpoints to Python types
+    serializable_checkpoints = [
+        convert_tensors_to_python(checkpoint) for checkpoint in improvement_checkpoints
+    ]
+
     checkpoints_summary = {
         "total_epochs_trained": final_epoch,
         "best_epoch": best_epoch,
-        "best_val_loss": best_val_loss,
+        "best_val_loss": float(best_val_loss)
+        if isinstance(best_val_loss, torch.Tensor)
+        else best_val_loss,
         "total_improvements": len(improvement_checkpoints),
-        "improvement_checkpoints": improvement_checkpoints,
+        "improvement_checkpoints": serializable_checkpoints,
     }
     with open(output_dir / "checkpoints_summary.json", "w") as f:
         json.dump(checkpoints_summary, f, indent=4)

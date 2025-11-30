@@ -813,152 +813,202 @@ class Framework:
             print("-" * 25)
         print("")
 
-    def log_images(self, writer, batch, epoch, stage, normalize):
+    def log_images(self, writer, loader, epoch, stage, normalize, num_samples=4):
         """
-        Logs the SAME 8-panel composite used in predictor:
+        Logs multiple 8-panel composites with samples containing most target class pixels:
         TIFF | GT | PRED | CONF | TP | FP | FN | ENTROPY
 
         Includes a metrics header (precision/recall/IoU).
+
+        Args:
+            loader: DataLoader to sample from
+            num_samples: Number of sample visualizations to generate (default 4)
         """
 
         # ------------------------------------
-        # 1. Fetch batch sample
+        # 1. Collect samples and score by target class pixels
         # ------------------------------------
-        x, y_onehot, y_int = next(iter(batch))
-        x = x.to(self.device)
-        y_onehot = y_onehot.to(self.device)
+        batch_data = []
+        max_samples_to_collect = (
+            num_samples * 5
+        )  # Collect more to ensure good selection
 
-        # Forward pass
-        with torch.no_grad():
-            y_hat = self.act(self.infer(x))
+        for batch in loader:
+            x, y_onehot, y_int = batch
+            batch_size = x.shape[0]
 
-        # Convert to NumPy
-        x_np = x.cpu().numpy()[0]
-        yhat_np = y_hat.cpu().numpy()[0]
-        y_gt = torch.argmax(y_onehot, dim=-1).cpu().numpy()[0]
+            # Score each sample by target class pixel count
+            for i in range(batch_size):
+                y_int_sample = y_int[i].cpu().numpy().squeeze()
 
-        # Generate predictions - use threshold for binary, argmax for multi-class
-        is_binary = self.is_binary
-        if is_binary:
-            # For binary models, threshold channel 1 (foreground class)
-            threshold = (
-                self.metrics_opts.threshold[0]
-                if isinstance(self.metrics_opts.threshold, list)
-                else self.metrics_opts.threshold
+                if self.is_binary:
+                    # Count pixels of target class in GT
+                    gt_labels = torch.argmax(y_onehot[i], dim=-1).cpu().numpy()
+                    class_pixels = (gt_labels == 1).sum()  # 1 = foreground class
+                else:
+                    # Count all foreground pixels
+                    class_pixels = ((y_int_sample > 0) & (y_int_sample != 255)).sum()
+
+                batch_data.append(
+                    (
+                        x[i : i + 1],
+                        y_onehot[i : i + 1],
+                        y_int[i : i + 1],
+                        int(class_pixels),
+                    )
+                )
+
+            if len(batch_data) >= max_samples_to_collect:
+                break
+
+        # Sort by class pixel count (descending) and take top num_samples
+        batch_data.sort(key=lambda item: item[3], reverse=True)
+        selected_samples = batch_data[:num_samples]
+
+        # ------------------------------------
+        # 2. Generate visualization for each selected sample
+        # ------------------------------------
+        for sample_idx, (x, y_onehot, y_int, class_pixels) in enumerate(
+            selected_samples
+        ):
+            x = x.to(self.device)
+            y_onehot = y_onehot.to(self.device)
+
+            # Forward pass
+            with torch.no_grad():
+                y_hat = self.act(self.infer(x))
+
+            # Convert to NumPy
+            x_np = x.cpu().numpy()[0]
+            yhat_np = y_hat.cpu().numpy()[0]
+            y_gt = torch.argmax(y_onehot, dim=-1).cpu().numpy()[0]
+
+            # Generate predictions - use threshold for binary, argmax for multi-class
+            is_binary = self.is_binary
+            if is_binary:
+                # For binary models, threshold channel 1 (foreground class)
+                threshold = (
+                    self.metrics_opts.threshold[0]
+                    if isinstance(self.metrics_opts.threshold, list)
+                    else self.metrics_opts.threshold
+                )
+                y_pred = (yhat_np[..., 1] >= threshold).astype(np.uint8)
+            else:
+                # For multi-class, use argmax across all classes
+                y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
+
+            # Ignore mask
+            ignore_mask = (y_int.cpu().numpy()[0] == 255).squeeze()
+
+            # ------------------------------------
+            # 2. Categorical styling
+            # ------------------------------------
+
+            # For binary models, ensure proper label mapping for visualization
+            if is_binary:
+                # Binary: 0=NOT~class (brown), 1=class (blue/red), 255=mask (black)
+                y_gt_vis = y_gt.copy()
+                y_pred_vis = y_pred.copy()
+                y_gt_vis[ignore_mask] = 255
+                y_pred_vis[ignore_mask] = 255
+            else:
+                # Multi-class: 0=BG (brown), 1=CI (blue), 2=DCI (red), 255=mask (black)
+                y_gt_vis = y_gt.copy()
+                y_pred_vis = y_pred.copy()
+                y_gt_vis[ignore_mask] = 255
+                y_pred_vis[ignore_mask] = 255
+
+            cmap = build_cmap_from_mask_names(self.mask_names)
+
+            x_rgb = make_rgb_preview(x_np)
+            gt_rgb = label_to_color(y_gt_vis, cmap)
+            pr_rgb = label_to_color(y_pred_vis, cmap)
+
+            # ------------------------------------
+            # 3. Confidence & entropy maps
+            # ------------------------------------
+            if is_binary:
+                conf = yhat_np[..., 1]
+            else:
+                conf = np.max(yhat_np, axis=-1)
+
+            conf_rgb = make_confidence_map(conf, invalid_mask=ignore_mask)
+            entropy_rgb = make_entropy_map(yhat_np, invalid_mask=ignore_mask)
+
+            # ------------------------------------
+            # 4. TP / FP / FN
+            # ------------------------------------
+            # Use the visualization labels for consistency
+            tp_mask = (
+                (y_pred_vis == y_gt_vis)
+                & (~ignore_mask)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
             )
-            y_pred = (yhat_np[..., 1] >= threshold).astype(np.uint8)
-        else:
-            # For multi-class, use argmax across all classes
-            y_pred = torch.argmax(y_hat.cpu(), dim=-1).numpy()[0]
-
-        # Ignore mask
-        ignore_mask = (y_int.cpu().numpy()[0] == 255).squeeze()
-
-        # ------------------------------------
-        # 2. Categorical styling
-        # ------------------------------------
-
-        # For binary models, ensure proper label mapping for visualization
-        if is_binary:
-            # Binary: 0=NOT~class (brown), 1=class (blue/red), 255=mask (black)
-            y_gt_vis = y_gt.copy()
-            y_pred_vis = y_pred.copy()
-            y_gt_vis[ignore_mask] = 255
-            y_pred_vis[ignore_mask] = 255
-        else:
-            # Multi-class: 0=BG (brown), 1=CI (blue), 2=DCI (red), 255=mask (black)
-            y_gt_vis = y_gt.copy()
-            y_pred_vis = y_pred.copy()
-            y_gt_vis[ignore_mask] = 255
-            y_pred_vis[ignore_mask] = 255
-
-        cmap = build_cmap_from_mask_names(self.mask_names)
-
-        x_rgb = make_rgb_preview(x_np)
-        gt_rgb = label_to_color(y_gt_vis, cmap)
-        pr_rgb = label_to_color(y_pred_vis, cmap)
-
-        # ------------------------------------
-        # 3. Confidence & entropy maps
-        # ------------------------------------
-        if is_binary:
-            conf = yhat_np[..., 1]
-        else:
-            conf = np.max(yhat_np, axis=-1)
-
-        conf_rgb = make_confidence_map(conf, invalid_mask=ignore_mask)
-        entropy_rgb = make_entropy_map(yhat_np, invalid_mask=ignore_mask)
-
-        # ------------------------------------
-        # 4. TP / FP / FN
-        # ------------------------------------
-        # Use the visualization labels for consistency
-        tp_mask = (
-            (y_pred_vis == y_gt_vis)
-            & (~ignore_mask)
-            & (y_gt_vis != 0)
-            & (y_gt_vis != 255)
-        )
-        fp_mask = (
-            (y_pred_vis != y_gt_vis)
-            & (~ignore_mask)
-            & (y_pred_vis != 0)
-            & (y_pred_vis != 255)
-        )
-        fn_mask = (
-            (y_pred_vis != y_gt_vis)
-            & (~ignore_mask)
-            & (y_gt_vis != 0)
-            & (y_gt_vis != 255)
-        )
-
-        tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
-
-        # ------------------------------------
-        # 5. Metrics header
-        # ------------------------------------
-        from glacier_mapping.model import metrics as model_metrics
-
-        metric_string_parts = []
-
-        for ci, cname in enumerate(self.mask_names):
-            pred_c = (y_pred_vis == ci).astype(np.uint8)
-            true_c = (y_gt_vis == ci).astype(np.uint8)
-
-            tp, fp, fn = model_metrics.tp_fp_fn(
-                torch.from_numpy(pred_c),
-                torch.from_numpy(true_c),
+            fp_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore_mask)
+                & (y_pred_vis != 0)
+                & (y_pred_vis != 255)
             )
-            P_val = model_metrics.precision(tp, fp, fn)
-            R_val = model_metrics.recall(tp, fp, fn)
-            I_val = model_metrics.IoU(tp, fp, fn)
-
-            metric_string_parts.append(
-                f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
+            fn_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore_mask)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
             )
 
-        metrics_text = " | ".join(metric_string_parts)
+            tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-        # ------------------------------------
-        # 6. Assemble panel
-        # ------------------------------------
-        composite = make_eight_panel(
-            x_rgb=x_rgb,
-            gt_rgb=gt_rgb,
-            pr_rgb=pr_rgb,
-            conf_rgb=conf_rgb,
-            tp_rgb=tp_rgb,
-            fp_rgb=fp_rgb,
-            fn_rgb=fn_rgb,
-            entropy_rgb=entropy_rgb,
-            metrics_text=metrics_text,
-        )
+            # ------------------------------------
+            # 5. Metrics header
+            # ------------------------------------
+            from glacier_mapping.model import metrics as model_metrics
 
-        # ------------------------------------
-        # 7. Log to TensorBoard
-        # ------------------------------------
-        img_tensor = torch.tensor(composite).permute(2, 0, 1).float() / 255.0
-        writer.add_image(f"{stage}/visualization", img_tensor, epoch)
+            metric_string_parts = []
+
+            for ci, cname in enumerate(self.mask_names):
+                pred_c = (y_pred_vis == ci).astype(np.uint8)
+                true_c = (y_gt_vis == ci).astype(np.uint8)
+
+                tp, fp, fn = model_metrics.tp_fp_fn(
+                    torch.from_numpy(pred_c),
+                    torch.from_numpy(true_c),
+                )
+                P_val = model_metrics.precision(tp, fp, fn)
+                R_val = model_metrics.recall(tp, fp, fn)
+                I_val = model_metrics.IoU(tp, fp, fn)
+
+                metric_string_parts.append(
+                    f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
+                )
+
+            metrics_text = " | ".join(metric_string_parts)
+
+            # ------------------------------------
+            # 6. Assemble panel
+            # ------------------------------------
+            composite = make_eight_panel(
+                x_rgb=x_rgb,
+                gt_rgb=gt_rgb,
+                pr_rgb=pr_rgb,
+                conf_rgb=conf_rgb,
+                tp_rgb=tp_rgb,
+                fp_rgb=fp_rgb,
+                fn_rgb=fn_rgb,
+                entropy_rgb=entropy_rgb,
+                metrics_text=metrics_text,
+            )
+
+            # ------------------------------------
+            # 7. Log to TensorBoard
+            # ------------------------------------
+            img_tensor = torch.tensor(composite).permute(2, 0, 1).float() / 255.0
+            writer.add_image(
+                f"{stage}/visualization_sample{sample_idx}_classpx{class_pixels}",
+                img_tensor,
+                epoch,
+            )
 
     def get_model_device(self):
         return self.model, self.device
@@ -1075,6 +1125,44 @@ class Framework:
     # ================================================================
     # FULL-TILE EVAL WITH 8-PANEL VIZ
     # ================================================================
+    def _select_informative_tiles(self, tile_paths, num_samples):
+        """
+        Select tiles with most target class pixels for visualization.
+
+        Args:
+            tile_paths: List of paths to tile files
+            num_samples: Number of tiles to select
+
+        Returns:
+            List of selected tile paths, sorted by class pixel count (descending)
+        """
+        tile_class_counts = []
+
+        for x_path in tile_paths:
+            mask_path = x_path.with_name(x_path.name.replace("tiff", "mask"))
+            mask = np.load(mask_path)
+
+            if self.is_binary:
+                # Count pixels of the target class (1=CI, 2=Debris)
+                class_pixels = (mask == self.binary_class_idx).sum()
+            else:
+                # Count all foreground pixels (non-background, non-masked)
+                class_pixels = ((mask > 0) & (mask != 255)).sum()
+
+            tile_class_counts.append((x_path, int(class_pixels)))
+
+        # Sort by class pixel count (descending)
+        tile_class_counts.sort(key=lambda x: x[1], reverse=True)
+
+        # Select top N tiles with target class pixels
+        selected = [path for path, count in tile_class_counts if count > 0]
+
+        if len(selected) < num_samples:
+            # Fall back to all tiles if not enough with target class
+            selected = [path for path, count in tile_class_counts]
+
+        return selected[:num_samples]
+
     def evaluate_full_test_tiles(self, writer, epoch, output_dir, num_samples=4):
         """
         Full-tile evaluation with the unified 8-panel layout.
@@ -1089,7 +1177,10 @@ class Framework:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         data_dir = Path(self.loader_opts.processed_dir)
-        test_tiles = sorted((data_dir / "test").glob("tiff*"))
+        test_tiles_all = sorted((data_dir / "test").glob("tiff*"))
+
+        # Select most informative tiles for visualization (with target class pixels)
+        test_tiles = self._select_informative_tiles(test_tiles_all, num_samples)
 
         n_classes = self.num_classes
         threshold = self.metrics_opts.threshold
@@ -1100,7 +1191,8 @@ class Framework:
         fp_sum = np.zeros(n_classes)
         fn_sum = np.zeros(n_classes)
 
-        for x_path in tqdm(test_tiles, desc="Full-tile eval"):
+        # Compute metrics on ALL test tiles
+        for x_path in tqdm(test_tiles_all, desc="Full-tile metrics (all tiles)"):
             x = np.load(x_path)
             y_pred, invalid_mask = self.predict_slice(x, threshold)
 
@@ -1167,12 +1259,13 @@ class Framework:
                 writer.add_scalar(f"fulltest_iou/{cname}", iou, epoch)
 
         # ------------------- Sample visualizations ---------------------
-        num_samples = min(num_samples, len(test_tiles))
+        # Visualize the selected informative tiles (already filtered above)
+        num_viz = min(num_samples, len(test_tiles))
 
         # Get normalization parameters
         norm_type = self.loader_opts.normalize
 
-        for idx, x_path in enumerate(test_tiles[:num_samples]):
+        for idx, x_path in enumerate(test_tiles[:num_viz]):
             x_full = np.load(x_path)
 
             y_pred, invalid_mask = self.predict_slice(x_full, threshold)

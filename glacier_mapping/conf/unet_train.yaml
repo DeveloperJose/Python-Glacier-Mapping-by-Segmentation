@@ -8,6 +8,7 @@ training_opts:
   find_lr: False
   early_stopping: 150 # Epochs to wait for improvement
   full_eval_every: 10
+  num_viz_samples: 4
 loader_opts:
   processed_dir: "/home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1/"
   batch_size: 8 # 8 (original paper), 12 (debian 512x512) or 46-48 (debian 256x256)
