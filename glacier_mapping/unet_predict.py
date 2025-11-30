@@ -492,9 +492,18 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # LOOP OVER ALL CHECKPOINT COMBINATIONS
     # ------------------------------------------------------------------
-    print(
-        f"Running predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n"
-    )
+    if has_ci and has_deb:
+        print(
+            f"Running predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n"
+        )
+    elif has_ci:
+        print(
+            f"Running predictions for {len(ci_checkpoints)} CleanIce checkpoint combinations\n"
+        )
+    else:
+        print(
+            f"Running predictions for {len(deb_checkpoints)} Debris checkpoint combinations\n"
+        )
 
     for ci_ckpt_path, ci_ckpt_name in ci_checkpoints:
         for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
