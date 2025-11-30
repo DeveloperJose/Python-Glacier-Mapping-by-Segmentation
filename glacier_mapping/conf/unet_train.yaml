@@ -2,7 +2,7 @@ gpu_rank: 0
 
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_bibek_debrisice_all_channels"
+  run_name: "replicate_bibek_debrisice_all_channels_v2"
   epochs: 500
   fine_tune: False
   find_lr: False
@@ -38,20 +38,21 @@ model_opts:
     spatial: True
     first_channel_output: 32
 optim_opts:
-  name: "Adam" # Adam for CI, AdamW for DCI
+  name: "AdamW" # Adam for CI, AdamW for DCI
   args:
-    lr: 0.0003 # 0.0003 for CI
-    # weight_decay: 5e-5 # Comment out for CI
+    lr: 0.0003 # 0.0003 for CI, starting LR for OneCycleLR
+    weight_decay: 5e-5 # Helps with debris ice generalization
 scheduler_opts:
-  name: "ReduceLROnPlateau" # OneCycleLR | ReduceLROnPlateau | Cosine | None
+  name: "OneCycleLR" # OneCycleLR | ReduceLROnPlateau | Cosine | None
   args:
-    mode: "min"
-    factor: 0.1
-    patience: 15
-    min_lr: 1e-9
+    max_lr: 0.001 # Peak LR (3.3x base lr)
+    pct_start: 0.3 # 30% warmup, 70% annealing
+    anneal_strategy: "cos"
+# ALTERNATIVE: More patient ReduceLROnPlateau
 # scheduler_opts:
-#   name: "OneCycleLR"
+#   name: "ReduceLROnPlateau"
 #   args:
-#     max_lr: 0.00045
-#     pct_start: 0.4
-#     anneal_strategy: "cos"
+#     mode: "min"
+#     factor: 0.3 # Less aggressive: 0.3 instead of 0.1
+#     patience: 35 # More patient: 35 instead of 15
+#     min_lr: 1e-6 # Higher floor: 1e-6 instead of 1e-9
