@@ -1267,11 +1267,35 @@ class Framework:
 
         for idx, x_path in enumerate(test_tiles[:num_viz]):
             x_full = np.load(x_path)
-
-            y_pred, invalid_mask = self.predict_slice(x_full, threshold)
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
             ).astype(np.uint8)
+
+            # ----------- UNIFIED PREDICTION PIPELINE (like unet_predict.py) -----------
+            # Use single consistent method for both prediction and confidence/entropy
+            use_ch = self.loader_opts.use_channels
+            x = x_full[:, :, use_ch]
+            x_norm = self.normalize(x)
+
+            inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float().to(self.device)
+            logits = self.infer(inp)
+
+            if self.is_binary:
+                # Binary: use sigmoid for consistency
+                probs = torch.sigmoid(logits)[0].cpu().numpy()  # (H,W,2)
+                y_pred = (probs[..., 1] >= threshold[0]).astype(np.uint8)
+                conf = probs[..., 1]
+            else:
+                # Multi-class: use softmax
+                probs = (
+                    torch.nn.functional.softmax(logits, dim=3)[0].cpu().numpy()
+                )  # (H,W,C)
+                y_pred = np.argmax(probs, axis=2).astype(np.uint8) + 1  # 1..C
+                conf = np.max(probs, axis=-1)
+
+            # Invalid mask from data
+            invalid_mask = np.sum(x, axis=2) == 0
+            y_pred[invalid_mask] = 0
 
             ignore = y_true_raw == 255
             if invalid_mask is not None:
@@ -1299,33 +1323,9 @@ class Framework:
 
             x_rgb = make_rgb_preview(x_full)
 
-            # ----------- Apply same normalization as training -----------
-            x_use = x_full[..., self.loader_opts.use_channels].astype(np.float32)
-
-            if norm_type == "mean-std":
-                mean = self.norm_arr[0].astype(np.float32)
-                std = self.norm_arr[1].astype(np.float32)
-                x_norm = (x_use - mean) / (std + 1e-6)
-
-            elif norm_type == "min-max":
-                minv = self.norm_arr[2].astype(np.float32)
-                maxv = self.norm_arr[3].astype(np.float32)
-                x_norm = (x_use - minv) / (maxv - minv + 1e-6)
-
-            else:
-                x_norm = x_use
-
-            t_in = torch.from_numpy(x_norm[None, ...]).float().to(self.device)
-            yhat_full = self.act(self.infer(t_in)).cpu().numpy()[0]
-
-            # Confidence / entropy
-            if self.is_binary:
-                conf = yhat_full[..., 1]
-            else:
-                conf = np.max(yhat_full, axis=-1)
-
+            # Confidence / entropy using same probs
             conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
-            entropy_rgb = make_entropy_map(yhat_full, invalid_mask=ignore)
+            entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
 
             # TP / FP / FN masks - use visualization labels for consistency
             tp_mask = (

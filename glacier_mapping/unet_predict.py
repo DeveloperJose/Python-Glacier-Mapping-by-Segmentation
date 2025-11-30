@@ -107,6 +107,28 @@ def get_checkpoint_paths(runs_dir, run_name, model_type):
         return [(ckpt, model_type)]
 
 
+def load_existing_checkpoint_results(comparison_csv_path):
+    """
+    Load existing checkpoint results from checkpoints_comparison.csv.
+
+    Returns:
+        dict: Mapping from checkpoint name to metrics dict, or empty dict if file doesn't exist
+    """
+    if not comparison_csv_path.exists():
+        return {}
+
+    df = pd.read_csv(comparison_csv_path)
+    results = {}
+
+    for _, row in df.iterrows():
+        ckpt_name = row["checkpoint"]
+        metrics = row.to_dict()
+        del metrics["checkpoint"]
+        results[ckpt_name] = metrics
+
+    return results
+
+
 # Prediction runner for a single checkpoint combination
 
 
@@ -386,21 +408,79 @@ if __name__ == "__main__":
     all_checkpoint_results = []
 
     # ------------------------------------------------------------------
+    # Load existing checkpoint results if available
+    # ------------------------------------------------------------------
+    if has_ci and not has_deb:
+        run_base = conf.cleanice.run_name
+    elif has_deb and not has_ci:
+        run_base = conf.debris.run_name
+    else:
+        run_base = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
+
+    comparison_csv_path = out_root / run_base / "checkpoints_comparison.csv"
+    existing_results = load_existing_checkpoint_results(comparison_csv_path)
+
+    if existing_results:
+        print(
+            f"\nFound existing results for {len(existing_results)} checkpoints in {comparison_csv_path}"
+        )
+        print(f"Will skip computation for already-processed checkpoints.\n")
+    else:
+        print("\nNo existing results found. Will compute all checkpoints.\n")
+
+    # ------------------------------------------------------------------
     # LOOP OVER ALL CHECKPOINT COMBINATIONS
     # ------------------------------------------------------------------
     print(
-        f"\nRunning predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n"
+        f"Running predictions for {len(ci_checkpoints)} CI × {len(deb_checkpoints)} Debris checkpoint combinations\n"
     )
 
     for ci_ckpt_path, ci_ckpt_name in ci_checkpoints:
         for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
+            # Determine checkpoint name
+            if has_ci and not has_deb:
+                ckpt_name = ci_ckpt_name
+            elif has_deb and not has_ci:
+                ckpt_name = deb_ckpt_name
+            else:
+                ckpt_name = f"ci_{ci_ckpt_name}__db_{deb_ckpt_name}"
+
+            # Check if this checkpoint was already processed
+            if ckpt_name in existing_results:
+                print(f"\n{'=' * 60}")
+                print(f"SKIPPING {ckpt_name} (already processed)")
+                print(f"{'=' * 60}")
+
+                # Load cached metrics
+                cached = existing_results[ckpt_name]
+                cached["checkpoint"] = ckpt_name
+                all_checkpoint_results.append(cached)
+
+                # Print cached results
+                if has_ci and has_deb:
+                    print(
+                        f"CleanIce: P={cached['CI_P']:.4f} R={cached['CI_R']:.4f} IoU={cached['CI_IoU']:.4f}"
+                    )
+                    print(
+                        f"Debris:   P={cached['Deb_P']:.4f} R={cached['Deb_R']:.4f} IoU={cached['Deb_IoU']:.4f}"
+                    )
+                else:
+                    print(
+                        f"P={cached['P']:.4f} R={cached['R']:.4f} IoU={cached['IoU']:.4f}"
+                    )
+
+                continue
+
             # Load models
+            print(f"\n{'=' * 60}")
+            print(f"PROCESSING {ckpt_name}")
+            print(f"{'=' * 60}")
 
             frame_ci = None
             frame_deb = None
 
             if has_ci:
-                print(f"\nLoading CleanIce: {ci_ckpt_path}")
+                print(f"Loading CleanIce: {ci_ckpt_path}")
                 frame_ci = Framework.from_checkpoint(
                     ci_ckpt_path, device=gpu, testing=True
                 )
@@ -420,17 +500,6 @@ if __name__ == "__main__":
             test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
 
             # Create output directory for this checkpoint
-
-            if has_ci and not has_deb:
-                ckpt_name = ci_ckpt_name
-                run_base = conf.cleanice.run_name
-            elif has_deb and not has_ci:
-                ckpt_name = deb_ckpt_name
-                run_base = conf.debris.run_name
-            else:
-                ckpt_name = f"ci_{ci_ckpt_name}__db_{deb_ckpt_name}"
-                run_base = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
-
             out_dir = out_root / run_base / ckpt_name
             preds_dir = out_dir / "preds"
             preds_dir.mkdir(parents=True, exist_ok=True)
