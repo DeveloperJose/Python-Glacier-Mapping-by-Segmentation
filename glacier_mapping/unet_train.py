@@ -216,7 +216,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     # Print IMPROVEMENTS SUMMARY
     # ------------------------------------------------------------
-    print(f"\n================ CHECKPOINT IMPROVEMENTS ================\n")
+    print("\n================ CHECKPOINT IMPROVEMENTS ================\n")
     print(f"Best epoch: {best_epoch}")
     print(f"Best validation loss: {best_val_loss:.6f}")
     print(f"Total improvements saved: {len(improvement_checkpoints)}\n")
@@ -229,7 +229,10 @@ if __name__ == "__main__":
 
     def to_float(x):
         if isinstance(x, torch.Tensor):
-            return float(x.detach().cpu().item())
+            if x.numel() == 1:
+                return float(x.detach().cpu().item())
+            else:
+                return x.detach().cpu().tolist()
         return float(x)
 
     for checkpoint in improvement_checkpoints:
@@ -237,14 +240,19 @@ if __name__ == "__main__":
         val_loss = checkpoint["val_loss"]
         val_metric = checkpoint["val_metric"]
 
-        if isinstance(val_metric["precision"], list):
-            p = to_float(val_metric["precision"][0])
-            r = to_float(val_metric["recall"][0])
-            iou = to_float(val_metric["IoU"][0])
+        precision_vals = to_float(val_metric["precision"])
+        recall_vals = to_float(val_metric["recall"])
+        iou_vals = to_float(val_metric["IoU"])
+        
+        # Use first class values for summary display
+        if isinstance(precision_vals, list):
+            p = precision_vals[0]
+            r = recall_vals[0]
+            iou = iou_vals[0]
         else:
-            p = to_float(val_metric["precision"])
-            r = to_float(val_metric["recall"])
-            iou = to_float(val_metric["IoU"])
+            p = precision_vals
+            r = recall_vals
+            iou = iou_vals
 
         print(f"{epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {iou:<10.4f}")
     print("-" * 58 + "\n")
@@ -266,7 +274,10 @@ if __name__ == "__main__":
                 best_val_metric["IoU"],
             ),
         ):
-            print(f"{cname:<12} {p:.4f}     {r:.4f}     {i:.4f}")
+            p_float = float(p.detach().cpu().item())
+            r_float = float(r.detach().cpu().item())
+            i_float = float(i.detach().cpu().item())
+            print(f"{cname:<12} {p_float:.4f}     {r_float:.4f}     {i_float:.4f}")
         print("-" * 48 + "\n")
 
     # ------------------------------------------------------------

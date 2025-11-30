@@ -6,7 +6,7 @@ training_opts:
   epochs: 500
   fine_tune: False
   find_lr: False
-  early_stopping: 251 # Epochs to wait for improvement
+  early_stopping: 150 # Epochs to wait for improvement
   full_eval_every: 10
 loader_opts:
   processed_dir: "/home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1/"
@@ -15,10 +15,11 @@ loader_opts:
   # [0="B1", 1="B2", 2="B3", 3="B4", 4="B5", 5="B6_VCID1", 6="B6_VCID2", 7="B7"] derived from Landsat-7 TIFF
   # [8="elevation", 9="slope"] derived from DEM
   # [10="NDVI", 11="NDWI", 12="NDSI", 13="H", 14="S", 15="V"] spectral indices + HSV
-  # [16="physics"] physics-derived features (not in use_channels yet)
+  # [16="physics"]
   output_classes: [2] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
-  physics_channel: 16
+  # physics_channel: 16
+  physics_channel: None
   class_names: ["BG", "CleanIce", "Debris"] # All class names in the dataset (No need to change)
 metrics_opts:
   metrics: ["IoU", "precision", "recall"]

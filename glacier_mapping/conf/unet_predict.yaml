@@ -7,12 +7,12 @@ visualization:
   mode: "scaled" # "scaled" (Option C) or "fullres" (Option B)
   max_width: 2400 # Only used when mode="scaled"
 
-cleanice:
-  run_name: "replicate_bibek_cleanice_all_channels"
-  threshold: 0.5
-  model_type: "all" # "best" or "final" or "all"
-
-# debris:
-#   run_name: "replicate_baseline_debrisice3"
+# cleanice:
+#   run_name: "replicate_bibek_cleanice_all_channels"
 #   threshold: 0.5
-#   model_type: "top09_epoch0010_val1.004838"
+#   model_type: "all" # "best" or "final" or "all"
+
+debris:
+  run_name: "replicate_bibek_debrisice_all_channels"
+  threshold: 0.5
+  model_type: "best"
