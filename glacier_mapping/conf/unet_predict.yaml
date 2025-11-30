@@ -13,6 +13,6 @@ visualization:
 #   model_type: "all" # "best" or "final" or "all"
 
 debris:
-  run_name: "replicate_bibek_debrisice_all_channels_v2"
+  run_name: "replicate_bibek_debrisice_all_channels_v2_phys64"
   threshold: 0.5
-  model_type: "all"
+  model_type: "best"
