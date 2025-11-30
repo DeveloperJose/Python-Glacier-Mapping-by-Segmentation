@@ -2,7 +2,7 @@ gpu_rank: 0
 
 training_opts:
   output_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-  run_name: "replicate_bibek_debrisice_all_channels_v2_phys64"
+  run_name: "replicate_bibek_cleanice_all_channels_v2"
   epochs: 500
   fine_tune: False
   find_lr: False
@@ -10,16 +10,16 @@ training_opts:
   full_eval_every: 10
   num_viz_samples: 4
 loader_opts:
-  processed_dir: "/home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1_phys64/"
+  processed_dir: "/home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1/"
   batch_size: 8 # 8 (original paper), 12 (debian 512x512) or 46-48 (debian 256x256)
-  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
   # [0="B1", 1="B2", 2="B3", 3="B4", 4="B5", 5="B6_VCID1", 6="B6_VCID2", 7="B7"] derived from Landsat-7 TIFF
   # [8="elevation", 9="slope"] derived from DEM
   # [10="NDVI", 11="NDWI", 12="NDSI", 13="H", 14="S", 15="V"] spectral indices + HSV
   # [16="physics"] physics-informed data augmented channel
-  output_classes: [2] # 0=BG, 1=CI, 2=Debris
+  output_classes: [1] # 0=BG, 1=CI, 2=Debris
   normalize: "mean-std" # "min-max" or "mean-std"
-  physics_channel: 16
+  physics_channel: None # 16
   class_names: ["BG", "CleanIce", "Debris"] # All class names in the dataset (No need to change)
 metrics_opts:
   metrics: ["IoU", "precision", "recall"]

@@ -1204,21 +1204,31 @@ class Framework:
             if invalid_mask is not None:
                 ignore |= invalid_mask
 
-            # Prepare GT for metrics (shift by +1 for classes)
-            y_true = y_true_raw.copy()
-            y_true[ignore] = 0
             valid = ~ignore
-            y_true[valid] += 1
-
             y_pred_valid = y_pred[valid]
-            y_true_valid = y_true[valid]
+            y_true_valid_raw = y_true_raw[valid]
 
             # Per-tile metrics row
             row = [x_path.name]
             for ci in range(n_classes):
-                label = ci + 1
-                p = (y_pred_valid == label).astype(np.uint8)
-                t = (y_true_valid == label).astype(np.uint8)
+                # For binary models: GT uses raw class indices (0,1,2), pred uses (1,2)
+                # For multi-class: both use shifted indices (1,2,3,...)
+                if self.is_binary:
+                    # ci=0: NOT~class (all pixels != binary_class_idx)
+                    # ci=1: class (pixels == binary_class_idx)
+                    pred_label = ci + 1  # prediction uses 1=NOT~class, 2=class
+                    p = (y_pred_valid == pred_label).astype(np.uint8)
+                    if ci == 0:
+                        # NOT~class: all GT pixels that are NOT the target class
+                        t = (y_true_valid_raw != self.binary_class_idx).astype(np.uint8)
+                    else:
+                        # Target class: GT pixels matching the target class
+                        t = (y_true_valid_raw == self.binary_class_idx).astype(np.uint8)
+                else:
+                    # Multi-class: shift GT by +1 to match prediction labels
+                    label = ci + 1
+                    p = (y_pred_valid == label).astype(np.uint8)
+                    t = (y_true_valid_raw + 1 == label).astype(np.uint8)
 
                 tp_, fp_, fn_ = tp_fp_fn(
                     torch.from_numpy(p),
