@@ -1,9 +1,12 @@
 analyze_training_run.py
 dissertation/
 original_code/
+netcdf4-glacier-code
 **output/
 **pred_runs/
-**runs/
+runs/**
+**tmp**
+**temp**
 **debug/
 newruns/
 .ruff_cache/

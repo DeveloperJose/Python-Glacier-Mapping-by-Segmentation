@@ -15,6 +15,7 @@ Also produces:
  - summary printout
 """
 
+import argparse
 import yaml
 import pathlib
 import numpy as np
@@ -662,10 +663,40 @@ def run_prediction(
 
 
 # Main
+def load_config_with_server_paths(config_path, server_name="desktop"):
+    """Load prediction config and construct paths from servers.yaml"""
+    config = Dict(yaml.safe_load(open(config_path)))
+
+    # Get script directory to find servers.yaml
+    script_dir = pathlib.Path(__file__).parent
+    servers_path = script_dir / "conf" / "servers.yaml"
+    servers_cfg = Dict(yaml.safe_load(open(servers_path)))
+    server = servers_cfg[server_name]
+
+    # Auto-generate prediction name from model runs
+    cleanice_run = config.cleanice.run_name
+    debris_run = config.debris.run_name
+    prediction_name = f"{cleanice_run}_{debris_run}"
+
+    # Construct paths
+    config.runs_dir = f"{server.code_path}/output/runs"
+    config.output_dir = f"{server.code_path}/output/predictions/{prediction_name}"
+
+    return config
+
+
 if __name__ == "__main__":
-    conf = Dict(yaml.safe_load(open("./conf/unet_predict.yaml")))
-    # gpu = int(conf.get("gpu_rank", 0))
-    gpu = conf.get("gpu_rank")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server", default="desktop", choices=["desktop", "bilbo"])
+    args = parser.parse_args()
+
+    # Load config with server paths
+    script_dir = pathlib.Path(__file__).parent
+    config_path = script_dir / "conf" / "unet_predict.yaml"
+    conf = load_config_with_server_paths(config_path, args.server)
+
+    # Get GPU device
+    gpu = int(conf.get("gpu_rank", 0))
 
     runs_dir = pathlib.Path(conf.runs_dir)
     out_root = pathlib.Path(conf.output_dir)

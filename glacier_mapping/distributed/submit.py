@@ -3,8 +3,8 @@
 Create a new experiment config with server metadata.
 
 Usage:
-  uv run python experiments/submit.py --server bilbo --gpu 0 --conf my_experiment.yaml
-  uv run python experiments/submit.py --server desktop --gpu 0
+  uv run python -m glacier_mapping.distributed.submit --server bilbo --gpu 0 --conf my_experiment.yaml
+  uv run python -m glacier_mapping.distributed.submit --server desktop --gpu 0
 """
 
 import argparse
@@ -15,9 +15,10 @@ import yaml
 
 def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) -> None:
     """Create an experiment config with server metadata."""
-    repo_root = Path(__file__).parent.parent
-    servers_path = repo_root / "conf" / "servers.yaml"
-    experiments_dir = repo_root / "experiments"
+    # Paths from glacier_mapping/ working directory
+    servers_path = Path("conf/servers.yaml")
+    experiments_conf_dir = Path("conf/experiments")
+    template_path = Path("conf/unet_train.yaml")
 
     # Validate server exists
     servers = yaml.safe_load(servers_path.read_text())
@@ -28,8 +29,7 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
         )
 
     # Generate experiment ID
-    conf_dir = experiments_dir / "conf"
-    existing_exps = list(conf_dir.glob("exp_*.yaml"))
+    existing_exps = list(experiments_conf_dir.glob("exp_*.yaml"))
     if existing_exps:
         existing_nums = [
             int(f.stem.split("_")[1])
@@ -40,29 +40,31 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
     else:
         next_num = 1
     exp_id = f"exp_{next_num:03d}"
+    if not template_path.exists():
+        raise FileNotFoundError(
+            f"Template not found: {template_path}\n"
+            f"Please ensure glacier_mapping/conf/unet_train.yaml exists"
+        )
+    exp_config = yaml.safe_load(template_path.read_text())
+
+    # Extract run_name for filename generation
+    run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+    safe_run_name = run_name.replace("/", "_").replace(" ", "_")
 
     # Default config name if not provided
     if conf_name is None:
-        conf_name = f"{exp_id}.yaml"
+        conf_name = f"{exp_id}_{safe_run_name}.yaml"
 
-    exp_conf_path = conf_dir / conf_name
+    exp_conf_path = experiments_conf_dir / conf_name
 
     # Check if config already exists
     if exp_conf_path.exists():
         # If it exists, just add server metadata to it
-        print(f"Config already exists: experiments/{conf_name}")
+        print(f"Config already exists: glacier_mapping/conf/experiments/{conf_name}")
         print(f"Adding server metadata: {server}")
         exp_config = yaml.safe_load(exp_conf_path.read_text())
     else:
-        # Create from template
-        template_path = repo_root / "glacier_mapping" / "conf" / "unet_train.yaml"
-        if not template_path.exists():
-            raise FileNotFoundError(
-                f"Template not found: {template_path}\n"
-                f"Please ensure glacier_mapping/conf/unet_train.yaml exists"
-            )
-        exp_config = yaml.safe_load(template_path.read_text())
-        print(f"Created new config: experiments/{conf_name}")
+        print(f"Created new config: glacier_mapping/conf/experiments/{conf_name}")
 
     # Add server metadata at top level
     exp_config["server"] = server
@@ -72,20 +74,12 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
     servers_cfg = yaml.safe_load(servers_path.read_text())
     server_cfg = servers_cfg[server]
 
-    # Update output_dir to use server's path
-    if "training_opts" in exp_config and "output_dir" in exp_config["training_opts"]:
-        desktop_output_dir = exp_config["training_opts"]["output_dir"]
-        desktop_cfg = servers_cfg["desktop"]
-        desktop_base = desktop_cfg["output_path"]
-        server_base = server_cfg["output_path"]
-
-        if desktop_output_dir.startswith(desktop_base):
-            # Replace desktop base with server base
-            relative_path = desktop_output_dir[len(desktop_base) :].lstrip("/")
-            exp_config["training_opts"]["output_dir"] = f"{server_base}/{exp_id}"
-        else:
-            # Fallback: use server base + exp_id
-            exp_config["training_opts"]["output_dir"] = f"{server_base}/{exp_id}"
+    # Update output_dir to use server's consolidated path
+    if "training_opts" in exp_config:
+        run_name = exp_config["training_opts"]["run_name"]
+        exp_config["training_opts"]["output_dir"] = (
+            f"{server_cfg['code_path']}/output/runs/{run_name}"
+        )
 
     # Update processed_dir to use server's paths
     if "loader_opts" in exp_config and "processed_dir" in exp_config["loader_opts"]:
@@ -102,9 +96,7 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
             )
         # Note: If processed_dir doesn't start with desktop_base, leave as-is (user custom path)
 
-    # Update run_name to match experiment ID
-    if "training_opts" in exp_config:
-        exp_config["training_opts"]["run_name"] = exp_id
+    # Note: run_name is preserved from template, not replaced with exp_id
 
     # Save config
     exp_conf_path.write_text(
@@ -112,14 +104,14 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
     )
 
     print(f"✓ Created {exp_id} for {server} GPU {gpu_rank}")
-    print(f"  Config: experiments/conf/{conf_name}")
+    print(f"  Config: glacier_mapping/conf/experiments/{conf_name}")
     print(f"\nNext steps:")
-    print(f"  1. Edit config: vim experiments/conf/{conf_name}")
-    print(f"  2. Commit: git add experiments/conf/{conf_name}")
+    print(f"  1. Edit config: vim glacier_mapping/conf/experiments/{conf_name}")
+    print(f"  2. Commit: git add glacier_mapping/conf/experiments/{conf_name}")
     print(f"  3. Push: git commit -m 'Add {exp_id}' && git push")
     if server != "desktop":
         print(
-            f"  4. On {server}: git pull && uv run python experiments/worker.py --server {server} --gpu {gpu_rank} --once"
+            f"  4. On {server}: git pull && uv run python -m glacier_mapping.distributed.worker --server {server} --gpu {gpu_rank} --once"
         )
 
 

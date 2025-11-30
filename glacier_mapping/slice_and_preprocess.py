@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 import json
 import multiprocessing
 import os
@@ -22,12 +23,43 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+
+def load_config_with_server_paths(config_path, server_name="desktop"):
+    """Load config and construct absolute paths from servers.yaml"""
+    # Load slice config
+    slice_config = Dict(yaml.safe_load(open(config_path)))
+
+    # Load server paths
+    servers_cfg = Dict(yaml.safe_load(Path("conf/servers.yaml").read_text()))
+    server = servers_cfg[server_name]  # defaults to desktop
+
+    # Use absolute paths directly from servers.yaml
+    slice_config.image_dir = server.image_dir
+    slice_config.dem_dir = server.dem_dir
+    slice_config.labels_dir = server.labels_dir
+    slice_config.out_dir = f"{server.processed_data_path}/{slice_config.output_name}"
+
+    return slice_config
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Slice and preprocess glacier data")
+    parser.add_argument(
+        "--server",
+        default="desktop",
+        choices=["desktop", "bilbo"],
+        help="Server name (default: desktop)",
+    )
+    args = parser.parse_args()
+
     random.seed(42)
     np.random.seed(42)
     warnings.filterwarnings("ignore")
 
-    conf = Dict(yaml.safe_load(open("./conf/slice_and_preprocess.yaml")))
+    # Load config with server paths
+    conf = load_config_with_server_paths(
+        "./conf/slice_and_preprocess.yaml", args.server
+    )
 
     saved_df = pd.DataFrame(
         columns=[

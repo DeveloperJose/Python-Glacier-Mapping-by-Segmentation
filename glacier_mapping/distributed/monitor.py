@@ -3,9 +3,9 @@
 Monitor experiment status across all servers.
 
 Usage:
-  uv run python experiments/monitor.py
-  uv run python experiments/monitor.py --detailed
-  uv run python experiments/monitor.py --server bilbo
+  uv run python -m glacier_mapping.distributed.monitor
+  uv run python -m glacier_mapping.distributed.monitor --detailed
+  uv run python -m glacier_mapping.distributed.monitor --server bilbo
 """
 
 import argparse
@@ -20,7 +20,7 @@ def get_experiment_status(exp_id: str, server_name: str, gpu_rank: int) -> str:
 
     Returns: 'pending' | 'running' | 'completed' | 'failed'
     """
-    results_dir = Path("experiments/results") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+    results_dir = Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
 
     if not results_dir.exists():
         return "pending"
@@ -101,9 +101,7 @@ def monitor_experiments(
 
                 # Show results path if exists
                 gpu = exp_config.get("gpu_rank", 0)
-                results_path = (
-                    Path("experiments/results") / f"{exp_id}_{server}_gpu{gpu}"
-                )
+                results_path = Path("output/runs") / f"{exp_id}_{server}_gpu{gpu}"
                 if results_path.exists():
                     line += f"\n    Results: {results_path}"
 

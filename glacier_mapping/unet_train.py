@@ -13,6 +13,7 @@ Includes:
  - notify-send desktop notification (Linux)
 """
 
+import argparse
 import gc
 import json
 import logging
@@ -42,11 +43,39 @@ torch.backends.cudnn.benchmark = False
 warnings.filterwarnings("ignore")
 
 
+def load_config_with_server_paths(config_path, server_name="desktop"):
+    """Load training config and construct paths from servers.yaml"""
+    config = Dict(yaml.safe_load(open(config_path)))
+
+    # Get script directory to find servers.yaml
+    script_dir = pathlib.Path(__file__).parent
+    servers_path = script_dir / "conf" / "servers.yaml"
+    servers_cfg = Dict(yaml.safe_load(open(servers_path)))
+    server = servers_cfg[server_name]
+
+    # Construct paths
+    config.loader_opts.processed_dir = (
+        f"{server.processed_data_path}/{config.training_opts.dataset_name}"
+    )
+    config.training_opts.output_dir = (
+        f"{server.code_path}/output/runs/{config.training_opts.run_name}"
+    )
+
+    return config
+
+
 if __name__ == "__main__":
-    conf = Dict(yaml.safe_load(open("./conf/unet_train.yaml")))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server", default="desktop", choices=["desktop", "bilbo"])
+    args = parser.parse_args()
+
+    # Load config with server paths
+    script_dir = pathlib.Path(__file__).parent
+    config_path = script_dir / "conf" / "unet_train.yaml"
+    conf = load_config_with_server_paths(config_path, args.server)
 
     run_name: str = conf.training_opts.run_name
-    output_dir = pathlib.Path(conf.training_opts.output_dir) / run_name
+    output_dir = pathlib.Path(conf.training_opts.output_dir)
     model_output_dir = output_dir / "models"
     early_stopping: int = conf.training_opts.early_stopping
 
@@ -55,7 +84,7 @@ if __name__ == "__main__":
 
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
-    frame = Framework.from_config("./conf/unet_train.yaml")
+    frame = Framework.from_config(config_path)
 
     if conf.training_opts.fine_tune:
         fn.log(logging.INFO, "Finetuning from previous final model…")
@@ -285,10 +314,7 @@ if __name__ == "__main__":
     def convert_tensors_to_python(obj):
         """Recursively convert tensors in nested dicts/lists to Python types."""
         if isinstance(obj, torch.Tensor):
-            if obj.numel() == 1:
-                return float(obj.detach().cpu().item())
-            else:
-                return obj.detach().cpu().tolist()
+            return float(obj.detach().cpu().item())
         elif isinstance(obj, dict):
             return {k: convert_tensors_to_python(v) for k, v in obj.items()}
         elif isinstance(obj, list):

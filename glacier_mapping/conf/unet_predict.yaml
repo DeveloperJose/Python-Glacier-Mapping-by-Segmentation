@@ -1,34 +1,14 @@
-runs_dir: "/home/devj/local-debian/glacier_mapping/debian-runs/"
-output_dir: "/home/devj/local-debian/glacier_mapping/debian-pred-runs/"
-# gpu_rank: "cpu"
+# Prediction configuration
 gpu_rank: 0
-
 visualization:
-  mode: "scaled" # "scaled" (Option C) or "fullres" (Option B)
-  max_width: 2400 # Only used when mode="scaled"
+  mode: "scaled"
+  max_width: 2400
 
-# model_type can be a specific checkpoint, "best", "final", or "all"
-
+# Model references
 cleanice:
-  # run_name: "replicate_bibek_cleanice_all_channels_v2"
+  run_name: "replicate_bibek_cleanice_all_channels_v2"
+  threshold: 0.5
+
+debris:
   run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
   threshold: 0.5
-  # model_type: "epoch0143_val0.224681"
-  model_type: "all"
-
-# debris:
-#   # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v3"
-#   # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64"
-#   # run_name: "replicate_bibek_debrisice_all_channels_v2"
-#   run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
-#   threshold: 0.5
-#   model_type: "all"
-#   # model_type: "epoch0089_val0.456658"
-
-# Feature Importance (Gradient-Based Saliency)
-feature_importance:
-  enabled: false # Set to true to compute feature importance
-  num_samples: null # Number of test samples to use (null = use all)
-  target_class: 1 # Class index to analyze (1 for binary models, 1=CI/2=Debris for 3-class)
-  save_spatial_maps: false # Save per-sample saliency heatmaps (experimental)
-  max_spatial_samples: 10 # Max number of spatial maps to save

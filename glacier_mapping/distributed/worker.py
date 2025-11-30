@@ -5,14 +5,14 @@ Finds and runs pending experiments assigned to this server and GPU.
 
 Usage on server:
   # One-shot (check once and exit) - runs on GPU 0
-  uv run python experiments/worker.py --server bilbo --gpu 0 --once
+  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --once
 
   # Loop mode (check every N seconds, default 60s = 1min)
-  uv run python experiments/worker.py --server bilbo --gpu 0 --loop 60
+  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --loop 60
 
   # Run workers for both GPUs on bilbo (in separate terminals)
-  uv run python experiments/worker.py --server bilbo --gpu 0 --loop 60
-  uv run python experiments/worker.py --server bilbo --gpu 1 --loop 60
+  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --loop 60
+  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 1 --loop 60
 """
 
 import argparse
@@ -72,12 +72,12 @@ def test_experiment_memory(
 
         # Fetch loaders (simulates data loading)
         train_loader, val_loader, test_loader = fetch_loaders(
-            processed_dir=exp_config["loader_opts"]["processed_dir"],
-            batch_size=exp_config["loader_opts"]["batch_size"],
-            use_channels=exp_config["loader_opts"]["use_channels"],
-            output_classes=exp_config["loader_opts"]["output_classes"],
-            class_names=exp_config["loader_opts"]["class_names"],
-            normalize=exp_config["loader_opts"]["normalize"],
+            processed_dir=str(exp_config["loader_opts"]["processed_dir"]),
+            batch_size=int(exp_config["loader_opts"]["batch_size"]),
+            use_channels=list(exp_config["loader_opts"]["use_channels"]),
+            output_classes=list(exp_config["loader_opts"]["output_classes"]),
+            class_names=list(exp_config["loader_opts"]["class_names"]),
+            normalize=str(exp_config["loader_opts"]["normalize"]),
         )
 
         # Test one training step
@@ -131,7 +131,7 @@ def get_experiment_status(exp_id: str, server_name: str, gpu_rank: int) -> str:
 
     Returns: 'pending' | 'running' | 'completed' | 'failed'
     """
-    results_dir = Path("experiments/results") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+    results_dir = Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
 
     if not results_dir.exists():
         return "pending"
@@ -180,40 +180,15 @@ def run_experiment(
     servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
     server = servers_cfg[server_name]
 
-    # Update paths for this server
-    output_dir = f"{server['output_path']}/{exp_id}"
-    exp_config["training_opts"]["output_dir"] = output_dir
-    exp_config["training_opts"]["run_name"] = exp_id
-
-    # Update processed_dir to use server's paths
-    desktop_cfg = servers_cfg["desktop"]
-    desktop_base = desktop_cfg["processed_data_path"]
-    server_base = server["processed_data_path"]
-
-    original_processed_dir = exp_config["loader_opts"]["processed_dir"]
-    if original_processed_dir.startswith(desktop_base):
-        # Replace desktop base with server base
-        relative_path = original_processed_dir[len(desktop_base) :].lstrip("/")
-        exp_config["loader_opts"]["processed_dir"] = f"{server_base}/{relative_path}"
-    else:
-        print(
-            f"WARNING: processed_dir doesn't start with expected desktop base: {original_processed_dir}"
-        )
-
-    # Write updated config to glacier_mapping/conf/unet_train.yaml
-    local_config = Path(server["code_path"]) / "glacier_mapping/conf/unet_train.yaml"
-    local_config.write_text(
-        yaml.dump(exp_config, sort_keys=False, default_flow_style=False)
-    )
+    # Update paths for this server - use consolidated output structure
+    # The config already has correct paths from submit.py, just use as-is
+    # No need to modify paths since submit.py already set them correctly
 
     print(f"\n[{exp_id}] Starting training on {server_name} GPU {gpu_rank}...")
-    print(f"[{exp_id}] Output: {output_dir}")
-    print(f"[{exp_id}] Config written to: {local_config}")
+    print(f"[{exp_id}] Output: {exp_config['training_opts']['output_dir']}")
 
     # Create marker to show running status
-    results_marker = (
-        Path("experiments/results") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
-    )
+    results_marker = Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
     results_marker.mkdir(parents=True, exist_ok=True)
     (results_marker / "RUNNING").write_text(f"Started: {datetime.now().isoformat()}\n")
 
@@ -223,8 +198,8 @@ def run_experiment(
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_rank)
 
         result = subprocess.run(
-            ["uv", "run", "python", "glacier_mapping/unet_train.py"],
-            cwd=server["code_path"],
+            ["uv", "run", "python", "unet_train.py", "--server", server_name],
+            cwd=server["code_path"] + "/glacier_mapping",
             env=env,
             check=True,
             capture_output=False,
@@ -294,7 +269,7 @@ def git_pull() -> None:
     """Pull latest changes from git."""
     try:
         subprocess.run(
-            ["git", "pull", "origin", "main"],
+            ["git", "pull", "origin", "master"],
             check=True,
             capture_output=True,
             text=True,
@@ -379,7 +354,7 @@ def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) ->
                         )
                         # Mark as failed
                         results_marker = (
-                            Path("experiments/results")
+                            Path("output/runs")
                             / f"{exp_id}_{server_name}_gpu{gpu_rank}"
                         )
                         results_marker.mkdir(parents=True, exist_ok=True)
@@ -392,8 +367,7 @@ def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) ->
                     print(f"[{exp_id}] Memory test failed: {message}")
                     # Mark as failed
                     results_marker = (
-                        Path("experiments/results")
-                        / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+                        Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
                     )
                     results_marker.mkdir(parents=True, exist_ok=True)
                     (results_marker / "FAILED").write_text(
