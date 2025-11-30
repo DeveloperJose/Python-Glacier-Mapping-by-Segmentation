@@ -25,6 +25,8 @@ from tqdm import tqdm
 import torch
 import cv2
 from scipy.ndimage import binary_fill_holes
+import matplotlib.pyplot as plt
+import matplotlib
 
 from glacier_mapping.model.frame import Framework
 from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
@@ -37,6 +39,10 @@ from glacier_mapping.model.visualize import (
     make_tp_fp_fn_masks,
     make_eight_panel,
 )
+from glacier_mapping.data.data import BAND_NAMES
+
+# Use non-interactive backend for plotting
+matplotlib.use("Agg")
 
 
 # Helpers
@@ -81,6 +87,266 @@ def get_pr_iou(pred, true):
     true_t = torch.from_numpy(true.astype(np.uint8))
     tp, fp, fn = tp_fp_fn(pred_t, true_t)
     return (precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn), tp, fp, fn)
+
+
+# ========================================================================
+# FEATURE IMPORTANCE (GRADIENT-BASED SALIENCY)
+# ========================================================================
+
+
+def compute_feature_importance(
+    frame,
+    test_tiles,
+    target_class_idx,
+    num_samples=None,
+    save_spatial=False,
+    max_spatial=10,
+    output_dir=None,
+):
+    """
+    Compute gradient-based feature importance for input channels.
+
+    Uses backpropagation to measure how much each input channel contributes
+    to the prediction of a target class. Higher gradient magnitude indicates
+    higher importance.
+
+    Args:
+        frame: Framework instance with loaded model
+        test_tiles: List of test tile paths
+        target_class_idx: Class index to compute gradients for (0-indexed in model output)
+        num_samples: Number of samples to use (None = all)
+        save_spatial: Whether to save spatial saliency heatmaps
+        max_spatial: Max number of spatial maps to save
+        output_dir: Directory to save spatial maps (if save_spatial=True)
+
+    Returns:
+        channel_gradients: np.array of shape (num_channels,) with importance scores
+        spatial_maps: List of (tile_name, saliency_map) tuples
+    """
+    frame.model.eval()
+    device = frame.device
+    use_channels = frame.loader_opts.use_channels
+    num_channels = len(use_channels)
+
+    # Select subset of tiles if requested
+    if num_samples is not None and num_samples < len(test_tiles):
+        tiles_to_use = test_tiles[:num_samples]
+    else:
+        tiles_to_use = test_tiles
+
+    print(f"Computing feature importance using {len(tiles_to_use)} test samples...")
+    print(f"Target class index: {target_class_idx}")
+
+    # Accumulate gradients across all samples
+    channel_gradients = np.zeros(num_channels, dtype=np.float64)
+    spatial_maps = []
+
+    for idx, tile_path in enumerate(tqdm(tiles_to_use, desc="Computing saliency")):
+        # Load tile
+        x_full = np.load(tile_path)
+        x = x_full[:, :, use_channels]
+
+        # Normalize
+        x_norm = frame.normalize(x)
+
+        # Convert to tensor with gradient tracking
+        x_tensor = torch.from_numpy(x_norm).float().to(device).unsqueeze(0)
+        x_tensor = x_tensor.permute(0, 3, 1, 2)  # NHWC -> NCHW
+        x_tensor.requires_grad_(True)
+
+        # Forward pass
+        logits = frame.model(x_tensor)
+        probs = torch.nn.functional.softmax(logits, dim=1)
+
+        # Get mean activation for target class
+        target_prob = probs[0, target_class_idx, :, :].mean()
+
+        # Backward pass to compute gradients
+        target_prob.backward()
+
+        # Extract per-channel gradient magnitude
+        grads = x_tensor.grad.data.abs()  # (1, C, H, W)
+        channel_grad = (
+            grads.sum(dim=(2, 3)).cpu().numpy()[0]
+        )  # Sum over spatial dims -> (C,)
+
+        # Accumulate
+        channel_gradients += channel_grad
+
+        # Save spatial map if requested
+        if save_spatial and idx < max_spatial and output_dir is not None:
+            spatial_maps.append((tile_path.name, grads[0].cpu().numpy()))  # (C, H, W)
+
+        # Clear gradients to free memory
+        x_tensor.grad = None
+        del x_tensor, logits, probs, grads
+
+    # Average across samples
+    channel_gradients /= len(tiles_to_use)
+
+    # Save spatial maps if requested
+    if save_spatial and spatial_maps and output_dir is not None:
+        spatial_dir = output_dir / "spatial_maps"
+        spatial_dir.mkdir(parents=True, exist_ok=True)
+        save_spatial_saliency_maps(
+            spatial_maps, BAND_NAMES[use_channels], spatial_dir, top_k=6
+        )
+
+    return channel_gradients, spatial_maps
+
+
+def save_feature_importance_results(importance_scores, channel_names, output_dir):
+    """
+    Save feature importance scores as CSV and bar plot visualization.
+
+    Args:
+        importance_scores: np.array of shape (num_channels,)
+        channel_names: List or array of channel name strings
+        output_dir: pathlib.Path to output directory
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Normalize scores to sum to 1
+    total = importance_scores.sum()
+    normalized = importance_scores / total if total > 0 else importance_scores
+
+    # Create DataFrame
+    df = pd.DataFrame(
+        {
+            "channel_idx": range(len(channel_names)),
+            "channel_name": channel_names,
+            "importance_score": importance_scores,
+            "normalized_score": normalized,
+        }
+    )
+
+    # Sort by importance (descending)
+    df = df.sort_values("importance_score", ascending=False).reset_index(drop=True)
+
+    # Save CSV
+    csv_path = output_dir / "channel_importance.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved feature importance CSV: {csv_path}")
+
+    # Print ALL channels (not just top 10)
+    print(f"\n{'=' * 70}")
+    print("CHANNEL IMPORTANCE RANKING (ALL CHANNELS)")
+    print(f"{'=' * 70}")
+    print(
+        f"{'Rank':<6}{'Idx':<6}{'Channel':<20}{'Raw Score':<15}{'Norm. Score':<15}{'Bar'}"
+    )
+    print("-" * 70)
+
+    for i, row in df.iterrows():
+        bar_length = int(row["normalized_score"] * 50)
+        bar = "█" * bar_length
+        print(
+            f"{i + 1:<6}{row['channel_idx']:<6}{row['channel_name']:<20}"
+            f"{row['importance_score']:<15.2f}{row['normalized_score']:<15.4f}{bar}"
+        )
+
+    # Create bar plot
+    plot_path = output_dir / "channel_importance_barplot.png"
+    plot_channel_importance(
+        df["channel_name"].values,
+        df["channel_idx"].values,
+        df["normalized_score"].values,
+        plot_path,
+    )
+    print(f"\nSaved feature importance plot: {plot_path}")
+
+
+def plot_channel_importance(channel_names, channel_indices, scores, save_path):
+    """
+    Create horizontal bar plot of channel importance.
+
+    Args:
+        channel_names: Array of channel name strings
+        channel_indices: Array of channel indices
+        scores: Array of normalized importance scores
+        save_path: pathlib.Path to save plot
+    """
+    fig, ax = plt.subplots(figsize=(10, max(6, len(channel_names) * 0.35)))
+
+    y_pos = np.arange(len(channel_names))
+    colors = plt.cm.viridis(scores / scores.max() if scores.max() > 0 else scores)
+
+    ax.barh(y_pos, scores, color=colors, edgecolor="black", linewidth=0.5)
+    ax.set_yticks(y_pos)
+
+    # Create labels with both index and name (e.g., "[12] NDSI")
+    labels = [f"[{idx}] {name}" for idx, name in zip(channel_indices, channel_names)]
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()  # Highest importance at top
+    ax.set_xlabel("Normalized Importance Score", fontsize=11, fontweight="bold")
+    ax.set_title(
+        "Channel Importance (Gradient-Based Saliency)",
+        fontsize=13,
+        fontweight="bold",
+        pad=15,
+    )
+    ax.grid(axis="x", alpha=0.3, linestyle="--")
+    ax.set_xlim(0, scores.max() * 1.1 if scores.max() > 0 else 1)
+
+    # Add value labels on bars
+    for i, (score, color) in enumerate(zip(scores, colors)):
+        ax.text(
+            score + scores.max() * 0.01,
+            i,
+            f"{score:.4f}",
+            va="center",
+            fontsize=8,
+            color="black",
+        )
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def save_spatial_saliency_maps(spatial_maps, channel_names, output_dir, top_k=6):
+    """
+    Save spatial saliency heatmaps for top-K most important channels.
+
+    Args:
+        spatial_maps: List of (tile_name, saliency_array) tuples
+        channel_names: Array of channel names
+        output_dir: Directory to save maps
+        top_k: Number of top channels to visualize per sample
+    """
+    for tile_name, saliency in spatial_maps:
+        # saliency shape: (C, H, W)
+        # Compute per-channel total importance
+        channel_totals = saliency.sum(axis=(1, 2))
+        top_indices = np.argsort(channel_totals)[::-1][:top_k]
+
+        # Create grid visualization
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        axes = axes.flatten()
+
+        for i, ch_idx in enumerate(top_indices):
+            ax = axes[i]
+            heatmap = saliency[ch_idx]
+            im = ax.imshow(heatmap, cmap="hot", interpolation="nearest")
+            ax.set_title(
+                f"{channel_names[ch_idx]}\n(Score: {channel_totals[ch_idx]:.1f})",
+                fontsize=10,
+            )
+            ax.axis("off")
+            plt.colorbar(im, ax=ax, fraction=0.046)
+
+        # Hide unused subplots
+        for i in range(len(top_indices), len(axes)):
+            axes[i].axis("off")
+
+        fig.suptitle(
+            f"Spatial Saliency Maps: {tile_name}", fontsize=14, fontweight="bold"
+        )
+        plt.tight_layout()
+
+        save_path = output_dir / f"{pathlib.Path(tile_name).stem}_saliency.png"
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
 
 
 def get_checkpoint_paths(runs_dir, run_name, model_type):
@@ -478,6 +744,8 @@ if __name__ == "__main__":
     else:
         run_base = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
 
+    print("Run", run_base)
+
     comparison_csv_path = out_root / run_base / "checkpoints_comparison.csv"
     existing_results = load_existing_checkpoint_results(comparison_csv_path)
 
@@ -661,13 +929,96 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
+    # FEATURE IMPORTANCE ANALYSIS (if enabled)
+    # ------------------------------------------------------------------
+    if conf.get("feature_importance", {}).get("enabled", False):
+        fi_conf = conf.feature_importance
+
+        print(f"\n{'=' * 80}")
+        print("FEATURE IMPORTANCE ANALYSIS")
+        print(f"{'=' * 80}")
+
+        # Determine which checkpoint to use for saliency
+        # Use the first checkpoint from the appropriate model
+        saliency_frame = None
+        saliency_label = ""
+
+        if has_ci and not has_deb:
+            ci_ckpt_path = ci_checkpoints[0][0]
+            print(f"Loading CleanIce checkpoint for saliency: {ci_ckpt_path.name}")
+            saliency_frame = Framework.from_checkpoint(
+                ci_ckpt_path, device=gpu, testing=True
+            )
+            saliency_label = "CleanIce"
+            target_class = 1  # Binary: foreground class
+        elif has_deb and not has_ci:
+            deb_ckpt_path = deb_checkpoints[0][0]
+            print(f"Loading Debris checkpoint for saliency: {deb_ckpt_path.name}")
+            saliency_frame = Framework.from_checkpoint(
+                deb_ckpt_path, device=gpu, testing=True
+            )
+            saliency_label = "Debris"
+            target_class = 1  # Binary: foreground class
+        else:
+            # For merged models, use cleanice frame
+            ci_ckpt_path = ci_checkpoints[0][0]
+            print(f"Loading CleanIce checkpoint for saliency: {ci_ckpt_path.name}")
+            saliency_frame = Framework.from_checkpoint(
+                ci_ckpt_path, device=gpu, testing=True
+            )
+            target_class = fi_conf.get("target_class", 1)
+            saliency_label = f"Class_{target_class}"
+
+        # Get test tiles
+        data_dir = pathlib.Path(saliency_frame.loader_opts.processed_dir)
+        test_tiles_for_saliency = sorted(data_dir.glob("test/tiff*"))
+
+        print(f"Model: {saliency_label}")
+        print(f"Total test tiles available: {len(test_tiles_for_saliency)}")
+
+        # Compute feature importance
+        fi_output_dir = out_root / run_base / "feature_importance"
+        fi_output_dir.mkdir(parents=True, exist_ok=True)
+
+        importance_scores, spatial_maps = compute_feature_importance(
+            saliency_frame,
+            test_tiles_for_saliency,
+            target_class_idx=target_class,
+            num_samples=fi_conf.get("num_samples"),
+            save_spatial=fi_conf.get("save_spatial_maps", False),
+            max_spatial=fi_conf.get("max_spatial_samples", 10),
+            output_dir=fi_output_dir,
+        )
+
+        # Get channel names
+        use_channels = saliency_frame.loader_opts.use_channels
+        channel_names = BAND_NAMES[use_channels]
+
+        # Save results
+        save_feature_importance_results(importance_scores, channel_names, fi_output_dir)
+
+        print("\n✓ Feature importance analysis complete.")
+        print(f"  Results saved to: {fi_output_dir}")
+
+        # Free GPU memory
+        del saliency_frame
+        torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------------
     # FINAL SUMMARY ACROSS ALL CHECKPOINTS
     # ------------------------------------------------------------------
     if len(all_checkpoint_results) > 1:
-        print("\n" + "=" * 80)
-        print("SUMMARY ACROSS ALL CHECKPOINTS")
-        print("=" * 80)
+        if has_ci and has_deb:
+            mode = "CleanIce+DebrisIce"
+        elif has_ci:
+            mode = "CleanIce"
+        elif has_deb:
+            mode = "DebrisIce"
+        else:
+            mode = "???"
 
+        print(f"SUMMARY ACROSS ALL {mode} CHECKPOINTS")
+        print("=" * 80)
         summary_df = pd.DataFrame(all_checkpoint_results)
 
         # Identify best checkpoint based on IoU
@@ -680,12 +1031,16 @@ if __name__ == "__main__":
 
         best_checkpoint = summary_df.loc[best_idx, "checkpoint"]
 
-        # Sort so best checkpoint appears first
-        summary_df = summary_df.copy()
-        summary_df["_sort_key"] = summary_df["checkpoint"] == best_checkpoint
-        summary_df = summary_df.sort_values("_sort_key", ascending=False).drop(
-            "_sort_key", axis=1
-        )
+        # Sort by IoU in descending order (best checkpoint will naturally be first)
+        if has_ci and has_deb:
+            # Sort by average of CI_IoU and Deb_IoU
+            summary_df["_avg_iou"] = (summary_df["CI_IoU"] + summary_df["Deb_IoU"]) / 2
+            summary_df = summary_df.sort_values("_avg_iou", ascending=False).drop(
+                "_avg_iou", axis=1
+            )
+        else:
+            # Sort by IoU
+            summary_df = summary_df.sort_values("IoU", ascending=False)
 
         # Reorder columns for better readability
         if has_ci and has_deb:
