@@ -1,3 +1,4 @@
+server: desktop # desktop | bilbo
 gpu_rank: 0
 
 training_opts:

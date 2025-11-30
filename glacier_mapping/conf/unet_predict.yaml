@@ -9,20 +9,21 @@ visualization:
 
 # model_type can be a specific checkpoint, "best", "final", or "all"
 
-# cleanice:
-#   run_name: "replicate_bibek_cleanice_all_channels_v2"
-#   threshold: 0.5
-#   # model_type: "epoch0143_val0.224681"
-#   model_type: "all"
-
-debris:
-  # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v3"
-  # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64"
-  # run_name: "replicate_bibek_debrisice_all_channels_v2"
+cleanice:
+  # run_name: "replicate_bibek_cleanice_all_channels_v2"
   run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
   threshold: 0.5
+  # model_type: "epoch0143_val0.224681"
   model_type: "all"
-  # model_type: "epoch0089_val0.456658"
+
+# debris:
+#   # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v3"
+#   # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64"
+#   # run_name: "replicate_bibek_debrisice_all_channels_v2"
+#   run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
+#   threshold: 0.5
+#   model_type: "all"
+#   # model_type: "epoch0089_val0.456658"
 
 # Feature Importance (Gradient-Based Saliency)
 feature_importance:
