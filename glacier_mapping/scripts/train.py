@@ -47,14 +47,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
-        required=True,
         help="Path to experiment config YAML (e.g., conf/experiments/exp_001_baseline_ci_v2.yaml)",
+    )
+    parser.add_argument(
+        "--config-dict",
+        help="Config dict as JSON string (alternative to --config)",
     )
     args = parser.parse_args()
 
-    # Load experiment config directly (paths already set by submit.py)
-    config_path = args.config
-    conf = Dict(yaml.safe_load(open(config_path)))
+    # Load experiment config from file or dict
+    if args.config_dict:
+        conf = Dict(json.loads(args.config_dict))
+    elif args.config:
+        config_path = args.config
+        conf = Dict(yaml.safe_load(open(config_path)))
+    else:
+        parser.error("Either --config or --config-dict must be provided")
 
     run_name: str = conf.training_opts.run_name
     output_dir = pathlib.Path(conf.training_opts.output_dir)
@@ -67,7 +75,10 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
     # Initialize framework from experiment config
-    frame = Framework.from_config(config_path)
+    if args.config_dict:
+        frame = Framework.from_dict(conf)
+    else:
+        frame = Framework.from_config(args.config)
 
     if conf.training_opts.fine_tune:
         fn.log(logging.INFO, "Finetuning from previous final model…")

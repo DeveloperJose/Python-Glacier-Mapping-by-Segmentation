@@ -14,6 +14,7 @@ Usage on server:
 
 import argparse
 import gc
+import json
 import os
 import re
 import shutil
@@ -44,9 +45,7 @@ class ExperimentState:
     def __init__(self, exp_id: str):
         self.exp_id = exp_id
         self.process: Optional[subprocess.Popen] = None
-        self.status = (
-            "pending"  # pending, running, stopped, completed, failed, oom_waiting
-        )
+        self.status = "pending"  # pending, running, stopped, completed, failed, oom_waiting, error_waiting
         self.start_time: Optional[datetime] = None
         self.stop_time: Optional[datetime] = None
         self.retry_count = 0
@@ -58,6 +57,12 @@ class ExperimentState:
         self.current_epoch = 0
         self.current_loss = 0.0
         self.log_file: Optional[Path] = None
+        # New fields for universal error handling
+        self.error_type: Optional[str] = (
+            None  # "oom", "cuda", "data", "import", "config", "unknown"
+        )
+        self.is_recoverable: bool = False
+        self.error_wait_start: Optional[datetime] = None
         self.last_log_pos = 0
 
 
@@ -298,12 +303,15 @@ class InteractiveWorker:
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_rank)
         env["GLACIER_MAPPING_DEVICE_OVERRIDE"] = "0"
 
-        # Convert experiment config path
-        exp_file_from_root = Path("glacier_mapping") / exp_file
-
         try:
             # Open log file for writing
             log_f = open(log_file, "w")
+
+            # Prepare config dict with output_dir injection
+            exp_config_with_output = exp_config.copy()
+            exp_config_with_output.setdefault("training_opts", {})["output_dir"] = str(
+                log_dir.parent
+            )
 
             process = subprocess.Popen(
                 [
@@ -312,8 +320,8 @@ class InteractiveWorker:
                     "python",
                     "-m",
                     "glacier_mapping.scripts.train",
-                    "--config",
-                    str(exp_file_from_root),
+                    "--config-dict",
+                    json.dumps(exp_config_with_output),
                 ],
                 cwd=self.server["code_path"],
                 env=env,
@@ -344,6 +352,76 @@ class InteractiveWorker:
             print(f"[{exp_id}] Failed to launch: {e}")
             return False
 
+    def _detect_error_in_log(self, log_file: Path) -> Tuple[str, str, bool]:
+        """
+        Detect and categorize errors from log file.
+
+        Returns:
+        - error_type: "oom", "cuda", "data", "import", "config", "unknown"
+        - error_message: Full error details for display
+        - is_recoverable: Whether this error should be retried
+        """
+        if not log_file or not log_file.exists():
+            return "unknown", "Log file not found", False
+
+        error_patterns = [
+            # OOM errors - recoverable
+            (r"torch\.OutOfMemoryError", "oom", True, "Out of GPU memory"),
+            (r"CUDA out of memory", "oom", True, "CUDA out of memory"),
+            # CUDA/driver errors - recoverable
+            (
+                r"RuntimeError.*?CUDA.*?device-side assert",
+                "cuda",
+                True,
+                "CUDA device assertion",
+            ),
+            (r"RuntimeError.*?CUDA", "cuda", True, "CUDA runtime error"),
+            (r"CUDA error.*?no kernel image", "cuda", True, "CUDA kernel error"),
+            # Data loading errors - recoverable
+            (r"FileNotFoundError", "data", True, "File not found"),
+            (r"PermissionError", "data", True, "Permission denied"),
+            (r"IsADirectoryError", "data", True, "Path is directory"),
+            # Import/module errors - not recoverable
+            (r"ModuleNotFoundError", "import", False, "Module not found"),
+            (r"ImportError", "import", False, "Import error"),
+            # Configuration errors - not recoverable
+            (r"KeyError", "config", False, "Configuration key error"),
+            (r"TypeError.*?argument", "config", False, "Type error"),
+            (r"ValueError", "config", False, "Value error"),
+            # Network/IO errors - recoverable
+            (r"ConnectionError", "data", True, "Connection error"),
+            (r"TimeoutError", "data", True, "Timeout error"),
+            (r"URLError", "data", True, "URL error"),
+            # Memory allocation errors (non-OOM) - recoverable
+            (r"RuntimeError.*?memory", "cuda", True, "Memory allocation error"),
+            (r"alloc.*?failed", "cuda", True, "Memory allocation failed"),
+        ]
+
+        try:
+            with open(log_file, "r") as f:
+                log_content = f.read()
+
+            # Look for error traceback
+            for pattern, error_type, is_recoverable, description in error_patterns:
+                match = re.search(pattern, log_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    # Extract surrounding context for better error message
+                    start = max(0, match.start() - 100)
+                    end = min(len(log_content), match.end() + 200)
+                    context = log_content[start:end].strip()
+                    return error_type, context, is_recoverable
+
+            # Fallback: grab last few lines of log for unknown errors
+            lines = log_content.strip().split("\n")
+            if len(lines) > 5:
+                context = "\n".join(lines[-5:])
+                return "unknown", context, False
+
+            return "unknown", log_content, False
+
+        except Exception as e:
+            return "unknown", f"Failed to read log: {str(e)}", False
+
     def cleanup_finished_experiments(self):
         """Check and clean up finished processes."""
         for exp_id, exp_state in list(self.experiments.items()):
@@ -355,10 +433,36 @@ class InteractiveWorker:
                     exp_state.status = "completed"
                     print(f"[{exp_id}] ✓ Completed successfully")
                 else:
-                    exp_state.status = "failed"
-                    exp_state.last_error = f"Exit code: {return_code}"
+                    # Use universal error detection to categorize the failure
+                    if exp_state.log_file:
+                        error_type, error_message, is_recoverable = (
+                            self._detect_error_in_log(exp_state.log_file)
+                        )
+                    else:
+                        error_type, error_message, is_recoverable = (
+                            "unknown",
+                            "No log file available",
+                            False,
+                        )
+
+                    exp_state.error_type = error_type
+                    exp_state.is_recoverable = is_recoverable
+                    exp_state.last_error = error_message
                     exp_state.last_error_time = datetime.now()
-                    print(f"[{exp_id}] ✗ Failed with exit code {return_code}")
+
+                    if is_recoverable:
+                        exp_state.status = "error_waiting"
+                        exp_state.error_wait_start = datetime.now()
+                        print(
+                            f"[{exp_id}] ⚠️ {error_type.upper()} error - waiting to retry"
+                        )
+                        print(f"[{exp_id}] Error: {error_message[:100]}...")
+                    else:
+                        exp_state.status = "failed"
+                        print(
+                            f"[{exp_id}] ✗ {error_type.upper()} error - not recoverable"
+                        )
+                        print(f"[{exp_id}] Error: {error_message[:100]}...")
 
                 exp_state.stop_time = datetime.now()
                 exp_state.process = None
@@ -377,6 +481,45 @@ class InteractiveWorker:
                     (results_marker / "FAILED").write_text(
                         f"Failed: {datetime.now().isoformat()}\n{exp_state.last_error}\n"
                     )
+
+    def handle_error_waiting_experiments(self):
+        """Handle all recoverable errors - retry when conditions improve."""
+        for exp_id, exp_state in self.experiments.items():
+            if exp_state.status == "error_waiting":
+                if exp_state.error_wait_start is None:
+                    exp_state.error_wait_start = datetime.now()
+
+                wait_time = datetime.now() - exp_state.error_wait_start
+
+                # Periodically retry (every 60s)
+                if wait_time.total_seconds() % 60 < REFRESH_INTERVAL:
+                    can_launch, reason = self.can_launch_experiment(exp_id)
+                    if can_launch:
+                        exp_state.status = "pending"
+                        exp_state.error_wait_start = None
+                        exp_state.error_type = None
+                        print(f"[{exp_id}] Issue resolved - ready to launch")
+                        continue
+
+                # Hard timeout after 2 hours
+                if wait_time.total_seconds() > OOM_MAX_WAIT_HOURS * 3600:
+                    waiting_count = len(
+                        [
+                            s
+                            for s in self.experiments.values()
+                            if s.status in ["error_waiting", "pending"]
+                        ]
+                    )
+                    running_count = len(
+                        [s for s in self.experiments.values() if s.status == "running"]
+                    )
+
+                    if waiting_count == 1 and running_count == 0:
+                        exp_state.status = "failed"
+                        exp_state.last_error = (
+                            f"Timeout after {OOM_MAX_WAIT_HOURS}h waiting"
+                        )
+                        print(f"[{exp_id}] Failed: error wait timeout")
 
     def handle_oom_experiments(self):
         """Handle OOM experiments - retry when memory frees."""
@@ -426,6 +569,7 @@ class InteractiveWorker:
             "running": [],
             "pending": [],
             "oom_waiting": [],
+            "error_waiting": [],
             "stopped": [],
             "failed": [],
             "completed": [],
@@ -478,6 +622,22 @@ class InteractiveWorker:
         elif exp_state.status == "stopped":
             line += " Stopped by user"
 
+        elif exp_state.status == "error_waiting":
+            if exp_state.error_wait_start:
+                wait_time = datetime.now() - exp_state.error_wait_start
+                hours, remainder = divmod(int(wait_time.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                line += f" Waiting: {hours:02d}:{minutes:02d}:{seconds:02d}"
+            line += f" (max: {OOM_MAX_WAIT_HOURS:02d}:00:00)"
+
+            # Show error type and brief message
+            if exp_state.error_type:
+                error_msg = (
+                    exp_state.last_error[:50] + "..."
+                    if exp_state.last_error and len(exp_state.last_error) > 50
+                    else exp_state.last_error or "Unknown error"
+                )
+                line += f" [{exp_state.error_type.upper()}: {error_msg}]"
         elif exp_state.status == "failed":
             if exp_state.last_error:
                 error_msg = (
@@ -485,7 +645,10 @@ class InteractiveWorker:
                     if len(exp_state.last_error) > 50
                     else exp_state.last_error
                 )
-                line += f" [Error: {error_msg}]"
+                if exp_state.error_type:
+                    line += f" [{exp_state.error_type.upper()}: {error_msg}]"
+                else:
+                    line += f" [Error: {error_msg}]"
             if exp_state.retry_count > 0:
                 line += f" Retries: {exp_state.retry_count}/{OTHER_MAX_RETRIES}"
 
@@ -506,7 +669,8 @@ class InteractiveWorker:
         status_line += (
             f" ({len(groups['running'])} active, {len(groups['pending'])} pending"
         )
-        status_line += f", {len(groups['oom_waiting'])} OOM-waiting)"
+        status_line += f", {len(groups['oom_waiting'])} OOM-waiting"
+        status_line += f", {len(groups['error_waiting'])} error-waiting)"
 
         self.print_raw("=" * LINE_WIDTH)
         self.print_raw(
@@ -521,6 +685,7 @@ class InteractiveWorker:
             "running",
             "pending",
             "oom_waiting",
+            "error_waiting",
             "stopped",
             "failed",
             "completed",
@@ -529,6 +694,7 @@ class InteractiveWorker:
             "running": "RUNNING",
             "pending": "PENDING",
             "oom_waiting": "OOM-WAITING",
+            "error_waiting": "ERROR-WAITING",
             "stopped": "STOPPED",
             "failed": "FAILED",
             "completed": "COMPLETED",
@@ -852,7 +1018,10 @@ class InteractiveWorker:
                 # Clean up finished processes
                 self.cleanup_finished_experiments()
 
-                # Handle OOM experiments
+                # Handle all waiting errors (not just OOM)
+                self.handle_error_waiting_experiments()
+
+                # Handle OOM experiments (legacy)
                 self.handle_oom_experiments()
 
                 # Try to launch new experiments

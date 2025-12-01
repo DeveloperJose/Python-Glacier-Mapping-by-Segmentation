@@ -46,7 +46,23 @@ class Framework:
         """
         conf_path = Path(conf_path)
         conf = Dict(yaml.safe_load(open(conf_path)))
+        return cls._from_config_dict(conf, device)
 
+    @classmethod
+    def from_dict(cls, conf_dict, device=None):
+        """
+        Build a Framework directly from a config dictionary.
+
+        conf_dict: configuration dictionary (e.g., from addict.Dict)
+        """
+        conf = Dict(conf_dict)
+        return cls._from_config_dict(conf, device)
+
+    @classmethod
+    def _from_config_dict(cls, conf, device=None):
+        """
+        Internal method to build Framework from a config dictionary.
+        """
         gpu_rank = int(
             conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0))
         )
