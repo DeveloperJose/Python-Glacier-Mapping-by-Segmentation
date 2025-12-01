@@ -32,13 +32,17 @@ import torch
 import yaml
 
 # Configuration constants
-OOM_MAX_WAIT_HOURS = 2
+OOM_RETRY_INTERVAL_MINUTES = 30  # Check OOM every 30 minutes
+OOM_TIMEOUT_HOURS = 12  # Fail OOM after 12 hours
+ERROR_RETRY_INTERVAL_MINUTES = 60  # Check all other errors every 1 hour
+ERROR_TIMEOUT_HOURS = 12  # Fail all other errors after 12 hours
 OTHER_MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 60
 PROCESS_CHECK_INTERVAL = 5  # seconds
 REFRESH_INTERVAL = 10  # seconds
 CONFIRMATION_TIMEOUT = 30  # seconds
 LINE_WIDTH = 80
+EXPERIMENT_START_DELAY_SECONDS = 300  # 5 minutes between experiment starts
 
 
 class ExperimentState:
@@ -83,6 +87,7 @@ class InteractiveWorker:
         self.display_needs_refresh = True
         self.last_key_time = 0
         self.total_gpu_memory_gb = 0.0
+        self.last_experiment_start_time: Optional[datetime] = None
 
         # VALIDATE: Must be run from glacier_mapping/ directory
         if not Path("conf/servers.yaml").exists():
@@ -211,21 +216,18 @@ class InteractiveWorker:
         from glacier_mapping.data.data import fetch_loaders
         from glacier_mapping.core.frame import Framework
 
-        # Write test config to a temp file
-        test_config_path = Path("conf/unet_train_memtest.yaml")
-        test_config_path.write_text(
-            yaml.dump(exp_config, sort_keys=False, default_flow_style=False)
-        )
-
         try:
             # Set GPU device
             os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_rank)
             torch.cuda.set_device(0)
 
             # Redirect stdout to silence memory test output
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                # Initialize framework
-                frame = Framework.from_config(test_config_path, device=0)
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                # Initialize framework directly from config dict
+                frame = Framework.from_dict(exp_config, device=0)
 
                 # Fetch loaders
                 train_loader, val_loader, test_loader = fetch_loaders(
@@ -249,19 +251,16 @@ class InteractiveWorker:
             torch.cuda.empty_cache()
             gc.collect()
 
-            test_config_path.unlink(missing_ok=True)
             return True, "success"
 
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             gc.collect()
-            test_config_path.unlink(missing_ok=True)
             return False, "out_of_memory"
 
         except Exception as e:
             torch.cuda.empty_cache()
             gc.collect()
-            test_config_path.unlink(missing_ok=True)
             return False, f"error: {str(e)}"
 
     def _can_retry_error_waiting_experiment(self, exp_id: str) -> Tuple[bool, str]:
@@ -315,8 +314,6 @@ class InteractiveWorker:
         )
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "worker_training.log"
-
-
 
         # Set up environment
         env = os.environ.copy()
@@ -485,13 +482,10 @@ class InteractiveWorker:
                     exp_state.last_error = error_message
                     exp_state.last_error_time = datetime.now()
 
-                    if is_recoverable:
-                        exp_state.status = "error_waiting"
-                        exp_state.error_wait_start = datetime.now()
-                        self.display_needs_refresh = True
-                    else:
-                        exp_state.status = "failed"
-                        self.display_needs_refresh = True
+                    # Always start in error_waiting - let timeout logic decide when to fail
+                    exp_state.status = "error_waiting"
+                    exp_state.error_wait_start = datetime.now()
+                    self.display_needs_refresh = True
 
                 exp_state.stop_time = datetime.now()
                 exp_state.process = None
@@ -524,8 +518,8 @@ class InteractiveWorker:
 
                 wait_time = datetime.now() - exp_state.error_wait_start
 
-                # Retry every 90 seconds (user requested)
-                retry_interval = 90
+                # Retry every hour
+                retry_interval = ERROR_RETRY_INTERVAL_MINUTES * 60
                 if int(wait_time.total_seconds()) % retry_interval < REFRESH_INTERVAL:
                     can_launch, reason = self._can_retry_error_waiting_experiment(
                         exp_id
@@ -538,8 +532,7 @@ class InteractiveWorker:
                         self.display_needs_refresh = True
                         continue
 
-                # Hard timeout after 2 hours
-                if wait_time.total_seconds() > OOM_MAX_WAIT_HOURS * 3600:
+                if wait_time.total_seconds() > ERROR_TIMEOUT_HOURS * 3600:
                     waiting_count = len(
                         [
                             s
@@ -554,7 +547,7 @@ class InteractiveWorker:
                     if waiting_count == 1 and running_count == 0:
                         exp_state.status = "failed"
                         exp_state.last_error = (
-                            f"Timeout after {OOM_MAX_WAIT_HOURS}h waiting"
+                            f"Timeout after {ERROR_TIMEOUT_HOURS}h waiting"
                         )
                         print(f"[{exp_id}] Failed: error wait timeout")
                         self.display_needs_refresh = True
@@ -568,8 +561,11 @@ class InteractiveWorker:
 
                 wait_time = datetime.now() - exp_state.oom_wait_start
 
-                # Strategy 1: Periodically retry (every 60s)
-                if wait_time.total_seconds() % 60 < REFRESH_INTERVAL:
+                # Strategy 1: Periodically retry (every 30 minutes)
+                if (
+                    wait_time.total_seconds() % (OOM_RETRY_INTERVAL_MINUTES * 60)
+                    < REFRESH_INTERVAL
+                ):
                     # Try launching again (will test memory)
                     can_launch, reason = self.can_launch_experiment(exp_id)
                     if can_launch:
@@ -578,8 +574,8 @@ class InteractiveWorker:
                         print(f"[{exp_id}] Memory freed - ready to launch")
                         continue
 
-                # Strategy 2: Hard timeout after 2 hours
-                if wait_time.total_seconds() > OOM_MAX_WAIT_HOURS * 3600:
+                # Strategy 2: Hard timeout after 12 hours
+                if wait_time.total_seconds() > OOM_TIMEOUT_HOURS * 3600:
                     # Check if this is the only pending/waiting experiment
                     waiting_count = len(
                         [
@@ -596,7 +592,7 @@ class InteractiveWorker:
                     if waiting_count == 1 and running_count == 0:
                         exp_state.status = "failed"
                         exp_state.last_error = (
-                            f"OOM after {OOM_MAX_WAIT_HOURS}h with no memory freed"
+                            f"OOM after {OOM_TIMEOUT_HOURS}h with no memory freed"
                         )
                         exp_state.last_error_time = datetime.now()
                         print(f"[{exp_id}] Failed: OOM timeout")
@@ -661,7 +657,7 @@ class InteractiveWorker:
                 hours, remainder = divmod(int(wait_time.total_seconds()), 3600)
                 minutes, seconds = divmod(remainder, 60)
                 line += f" Waiting: {hours:02d}:{minutes:02d}:{seconds:02d}"
-            line += f" (max: {OOM_MAX_WAIT_HOURS:02d}:00:00)"
+            line += f" (max: {OOM_TIMEOUT_HOURS:02d}:00:00)"
 
         elif exp_state.status == "stopped":
             line += " Stopped by user"
@@ -672,7 +668,7 @@ class InteractiveWorker:
                 hours, remainder = divmod(int(wait_time.total_seconds()), 3600)
                 minutes, seconds = divmod(remainder, 60)
                 line += f" Waiting: {hours:02d}:{minutes:02d}:{seconds:02d}"
-            line += f" (max: {OOM_MAX_WAIT_HOURS:02d}:00:00)"
+            line += f" (max: {ERROR_TIMEOUT_HOURS:02d}:00:00)"
 
             # Show error type and message (truncated for display)
             if exp_state.error_type:
@@ -882,10 +878,10 @@ class InteractiveWorker:
         key_lower = key.lower()
 
         # WASD Navigation
-        if key == '[':  # Up
+        if key == "[":  # Up
             self._navigate_up()
             self.display_needs_refresh = True
-        elif key == ']':  # Down
+        elif key == "]":  # Down
             self._navigate_down()
             self.display_needs_refresh = True
 
@@ -1018,14 +1014,14 @@ class InteractiveWorker:
             for line in result.stdout.strip().splitlines():
                 if not line.strip():
                     continue
-                
+
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) >= 2:
                     try:
                         pid = int(parts[0])
                         mem_mb = float(parts[1])
                         mem_gb = mem_mb / 1024.0
-                        
+
                         # Find matching experiment
                         for exp_state in self.experiments.values():
                             if exp_state.pid == pid:
@@ -1033,7 +1029,7 @@ class InteractiveWorker:
                                 break
                     except (ValueError, IndexError):
                         continue  # Skip malformed lines
-                
+
         except Exception:
             pass  # Silently fail - GPU memory monitoring is non-critical
 
@@ -1071,6 +1067,12 @@ class InteractiveWorker:
         if self.worker_paused:
             return
 
+        # Check if we need to wait before starting another experiment
+        if self.last_experiment_start_time:
+            time_since_last = datetime.now() - self.last_experiment_start_time
+            if time_since_last.total_seconds() < EXPERIMENT_START_DELAY_SECONDS:
+                return  # Not enough time passed yet
+
         # Get list of pending experiments
         pending_experiments = [
             exp_id
@@ -1082,7 +1084,9 @@ class InteractiveWorker:
             can_launch, reason = self.can_launch_experiment(exp_id)
 
             if can_launch:
-                self.launch_experiment_async(exp_id)
+                if self.launch_experiment_async(exp_id):
+                    self.last_experiment_start_time = datetime.now()
+                    break  # Only launch one experiment per cycle
             elif reason == "oom":
                 # Mark as OOM waiting
                 exp_state = self.experiments[exp_id]
@@ -1091,12 +1095,16 @@ class InteractiveWorker:
                     exp_state.oom_wait_start = datetime.now()
                     print(f"[{exp_id}] Out of memory, waiting...")
             else:
-                # Other error - mark as failed
+                # Other error - mark as error_waiting (will retry)
                 exp_state = self.experiments[exp_id]
-                exp_state.status = "failed"
+                exp_state.status = "error_waiting"
+                exp_state.error_wait_start = datetime.now()
+                exp_state.error_type = "config"
+                exp_state.is_recoverable = True
                 exp_state.last_error = f"Memory test failed: {reason}"
                 exp_state.last_error_time = datetime.now()
-                print(f"[{exp_id}] Memory test failed: {reason}")
+                print(f"[{exp_id}] Memory test failed, will retry in 1h...")
+                self.display_needs_refresh = True
 
     def run_interactive(self):
         """Main interactive worker loop."""
