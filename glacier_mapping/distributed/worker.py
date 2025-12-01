@@ -179,7 +179,7 @@ class InteractiveWorker:
                     exp_state = ExperimentState(exp_id)
                     exp_state.status = self._get_experiment_status(exp_id, exp_config)
 
-                    # If we're auto-resuming a stopped experiment, clean up STOPPED marker
+                    # If we're auto-resuming, clean up stale markers
                     if exp_state.status == "pending":
                         run_name = exp_config["training_opts"]["run_name"]
                         results_dir = (
@@ -187,10 +187,18 @@ class InteractiveWorker:
                             / "runs"
                             / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
                         )
+                        
+                        # Clean up STOPPED marker
                         stopped_marker = results_dir / "STOPPED"
                         if stopped_marker.exists():
                             stopped_marker.unlink()
-                            print(f"[{exp_id}] Auto-resuming from stopped state")
+                            print(f"[{exp_id}] Removed STOPPED marker for auto-resume")
+                        
+                        # Clean up stale RUNNING marker
+                        running_marker = results_dir / "RUNNING"
+                        if running_marker.exists():
+                            running_marker.unlink()
+                            print(f"[{exp_id}] Removed stale RUNNING marker for auto-resume")
 
                     self.experiments[exp_id] = exp_state
 
@@ -233,153 +241,61 @@ class InteractiveWorker:
             print(f"DEBUG: {exp_id} -> completed")
             return "completed"
 
+        # Check RUNNING marker WITH PID validation to detect stale markers
         if (results_dir / "RUNNING").exists():
-            print(f"DEBUG: {exp_id} -> running")
-            return "running"
-
-        # Check for incomplete runs (output dir exists but no completion markers)
-        # Only check this if no explicit status markers were found
-        if results_dir.exists():
-            # Make sure we don't have STOPPED, FAILED, RUNNING, or completion markers
-            has_explicit_marker = (
-                (results_dir / "STOPPED").exists()
-                or (results_dir / "FAILED").exists()
-                or (results_dir / "RUNNING").exists()
-                or (results_dir / "checkpoints_summary.json").exists()
-            )
-
-            if not has_explicit_marker:
-                models_dir = results_dir / "models"
-                if models_dir.exists() and any(models_dir.glob("model_*.pt")):
-                    # Has checkpoints but no completion marker - incomplete run
-                    disable_resume = exp_config.get("training_opts", {}).get(
-                        "disable_resume", False
-                    )
-                    if not disable_resume:
-                        print(f"DEBUG: {exp_id} -> pending (incomplete run)")
-                        return "pending"  # Auto-resume incomplete run
+            running_marker = results_dir / "RUNNING"
+            try:
+                running_content = running_marker.read_text().strip()
+                pid = None
+                
+                # Try to extract PID from RUNNING marker
+                for line in running_content.split("\n"):
+                    if line.startswith("PID:"):
+                        pid_str = line.split(":")[1].strip()
+                        try:
+                            pid = int(pid_str)
+                            break
+                        except (ValueError, Exception):
+                            pass
+                
+                # If we found a PID, check if it's still alive
+                if pid is not None and PSUTIL_AVAILABLE:
+                    import psutil  # Re-import for type checker
+                    if psutil.pid_exists(pid):
+                        print(f"DEBUG: {exp_id} -> running (PID {pid} alive)")
+                        return "running"  # Process still alive
                     else:
-                        print(
-                            f"DEBUG: {exp_id} -> stopped (incomplete run, resume disabled)"
-                        )
-                        return "stopped"
+                        print(f"DEBUG: {exp_id} -> stale RUNNING marker (PID {pid} dead)")
+                elif pid is not None and not PSUTIL_AVAILABLE:
+                    # Can't verify PID without psutil, assume stale to be safe
+                    print(f"DEBUG: {exp_id} -> treating as stale (no psutil)")
+                else:
+                    # No PID found in marker, treat as stale
+                    print(f"DEBUG: {exp_id} -> RUNNING marker has no PID")
+                    
+            except Exception as e:
+                # Can't read/parse RUNNING marker, treat as stale
+                print(f"DEBUG: {exp_id} -> RUNNING marker read error: {e}")
+            
+            # If we reach here, RUNNING marker is stale - treat as incomplete run
+            # Fall through to incomplete run check below
+
+        # Check for incomplete runs (output dir exists but no valid status markers)
+        if results_dir.exists():
+            models_dir = results_dir / "models"
+            if models_dir.exists() and any(models_dir.glob("model_*.pt")):
+                # Has checkpoints but no valid status marker - incomplete run
+                disable_resume = exp_config.get("training_opts", {}).get(
+                    "disable_resume", False
+                )
+                if not disable_resume:
+                    print(f"DEBUG: {exp_id} -> pending (incomplete run with stale/no markers)")
+                    return "pending"  # Auto-resume incomplete run
+                else:
+                    print(f"DEBUG: {exp_id} -> stopped (incomplete run, resume disabled)")
+                    return "stopped"
 
         print(f"DEBUG: {exp_id} -> pending (default)")
-        return "pending"
-
-        if (results_dir / "STOPPED").exists():
-            # Check if auto-resume is disabled in config
-            disable_resume = exp_config.get("training_opts", {}).get(
-                "disable_resume", False
-            )
-            if not disable_resume:
-                # Auto-resume stopped experiments by marking them as pending
-                return "pending"
-            else:
-                return "stopped"
-
-        if (results_dir / "FAILED").exists():
-            return "failed"
-
-        if (results_dir / "checkpoints_summary.json").exists():
-            return "completed"
-
-        if (results_dir / "RUNNING").exists():
-            # Check if this is a stale RUNNING marker (no active process)
-            running_marker = results_dir / "RUNNING"
-            if running_marker.exists():
-                try:
-                    running_content = running_marker.read_text().strip()
-                    # Try to extract PID from RUNNING marker
-                    for line in running_content.split("\n"):
-                        if line.startswith("PID:"):
-                            pid_str = line.split(":")[1].strip()
-                            try:
-                                pid = int(pid_str)
-                                # Check if process is still running
-                                if PSUTIL_AVAILABLE and not psutil.pid_exists(pid):
-                                    # Process is dead, this is an incomplete run
-                                    disable_resume = exp_config.get(
-                                        "training_opts", {}
-                                    ).get("disable_resume", False)
-                                    if not disable_resume:
-                                        return "pending"  # Auto-resume incomplete run
-                                    else:
-                                        return "stopped"  # Mark as stopped if resume disabled
-                                elif not PSUTIL_AVAILABLE:
-                                    # Can't check PID, assume incomplete to be safe
-                                    disable_resume = exp_config.get(
-                                        "training_opts", {}
-                                    ).get("disable_resume", False)
-                                    if not disable_resume:
-                                        return "pending"
-                                    else:
-                                        return "stopped"
-                            except (ValueError, Exception):
-                                # If we can't check PID, assume it's incomplete
-                                disable_resume = exp_config.get(
-                                    "training_opts", {}
-                                ).get("disable_resume", False)
-                                if not disable_resume:
-                                    return "pending"
-                                else:
-                                    return "stopped"
-                except Exception:
-                    # If we can't read RUNNING marker, assume it's incomplete
-                    disable_resume = exp_config.get("training_opts", {}).get(
-                        "disable_resume", False
-                    )
-                    if not disable_resume:
-                        return "pending"
-                    else:
-                        return "stopped"
-            return "running"
-
-        # Check for incomplete runs (output dir exists but no completion markers)
-        # Only check this if no explicit status markers were found
-        if results_dir.exists():
-            # Make sure we don't have STOPPED, FAILED, RUNNING, or completion markers
-            has_explicit_marker = (
-                (results_dir / "STOPPED").exists()
-                or (results_dir / "FAILED").exists()
-                or (results_dir / "RUNNING").exists()
-                or (results_dir / "checkpoints_summary.json").exists()
-            )
-
-            if not has_explicit_marker:
-                models_dir = results_dir / "models"
-                if models_dir.exists() and any(models_dir.glob("model_*.pt")):
-                    # Has checkpoints but no completion marker - incomplete run
-                    disable_resume = exp_config.get("training_opts", {}).get(
-                        "disable_resume", False
-                    )
-                    if not disable_resume:
-                        return "pending"  # Auto-resume incomplete run
-                    else:
-                        return "stopped"
-
-        return "pending"
-
-        if (results_dir / "STOPPED").exists():
-            # Check if auto-resume is disabled in config
-            disable_resume = exp_config.get("training_opts", {}).get(
-                "disable_resume", False
-            )
-            if not disable_resume:
-                # Auto-resume stopped experiments by marking them as pending
-                return "pending"
-            else:
-                return "stopped"
-
-        if (results_dir / "FAILED").exists():
-            return "failed"
-
-        if (results_dir / "checkpoints_summary.json").exists():
-            return "completed"
-
-        if (results_dir / "RUNNING").exists():
-            return "running"
-
         return "pending"
 
     def get_run_name(self, exp_id: str) -> str:
