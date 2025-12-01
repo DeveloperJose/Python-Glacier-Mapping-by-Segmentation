@@ -18,7 +18,7 @@ import yaml
 
 
 def get_experiment_status(
-    exp_id: str, server_name: str, gpu_rank: int, run_name: str
+    exp_id: str, server_name: str, gpu_rank: int, run_name: str, debug: bool = False
 ) -> str:
     """
     Determine experiment status from filesystem.
@@ -30,7 +30,11 @@ def get_experiment_status(
         results_dir = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
     else:
         # For remote experiments, we'll check via SSH in get_remote_experiment_status
-        return get_remote_experiment_status(server_name, exp_id, gpu_rank, run_name)
+        # Pass debug flag from monitor_experiments
+        debug = locals().get("debug", False)  # Get debug from outer scope
+        return get_remote_experiment_status(
+            server_name, exp_id, gpu_rank, run_name, debug
+        )
 
     if not results_dir.exists():
         return "pending"
@@ -45,7 +49,7 @@ def get_experiment_status(
 
 
 def get_remote_experiment_status(
-    server_name: str, exp_id: str, gpu_rank: int, run_name: str
+    server_name: str, exp_id: str, gpu_rank: int, run_name: str, debug: bool = False
 ) -> str:
     """Check experiment status on remote server via SSH."""
     servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
@@ -54,49 +58,73 @@ def get_remote_experiment_status(
     if server_name == "desktop":
         return get_experiment_status(exp_id, server_name, gpu_rank, run_name)
 
-    # Check remote filesystem via SSH
+    # Check remote filesystem via SSH with debugging
     remote_results_dir = (
         f"{server['code_path']}/output/runs/{run_name}_{server_name}_gpu{gpu_rank}"
     )
 
+    if debug:
+        print(f"DEBUG: Checking {server_name} at {remote_results_dir}")
+
+    # First, test if directory exists and list contents
     ssh_cmd = [
         "ssh",
         server["ssh_host"],
-        f"test -d {remote_results_dir} && echo 'exists' || echo 'missing'",
+        f"ls -la {remote_results_dir} 2>/dev/null || echo 'DIRECTORY_MISSING'",
     ]
 
     try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
-        if "missing" in result.stdout.strip():
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10)
+        if "DIRECTORY_MISSING" in result.stdout:
+            if debug:
+                print(f"DEBUG: {server_name} directory missing - status: pending")
             return "pending"
-    except subprocess.CalledProcessError:
+        if debug:
+            print(f"DEBUG: {server_name} directory contents:\n{result.stdout}")
+    except subprocess.TimeoutExpired:
+        if debug:
+            print(f"DEBUG: {server_name} SSH timeout - status: pending")
+        return "pending"
+    except Exception as e:
+        if debug:
+            print(f"DEBUG: {server_name} SSH error: {e} - status: pending")
         return "pending"
 
     # Check for FAILED marker
     ssh_cmd = [
         "ssh",
         server["ssh_host"],
-        f"test -f {remote_results_dir}/FAILED && echo 'failed' || echo 'not_failed'",
+        f"test -f {remote_results_dir}/FAILED && echo 'FAILED' || echo 'NO_FAILED'",
     ]
 
     try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
-        if "failed" in result.stdout.strip():
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=5)
+        if "FAILED" in result.stdout.strip():
+            if debug:
+                print(f"DEBUG: {server_name} has FAILED marker - status: failed")
             return "failed"
-    except subprocess.CalledProcessError:
-        pass
+    except Exception as e:
+        if debug:
+            print(f"DEBUG: {server_name} FAILED check error: {e}")
 
     # Check for completion marker
     ssh_cmd = [
         "ssh",
         server["ssh_host"],
-        f"test -f {remote_results_dir}/checkpoints_summary.json && echo 'completed' || echo 'running'",
+        f"test -f {remote_results_dir}/checkpoints_summary.json && echo 'COMPLETED' || echo 'RUNNING'",
     ]
 
     try:
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
-        return "completed" if "completed" in result.stdout.strip() else "running"
-    except subprocess.CalledProcessError:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=5)
+        status = "completed" if "COMPLETED" in result.stdout.strip() else "running"
+        if debug:
+            print(
+                f"DEBUG: {server_name} completion check: {result.stdout.strip()} -> status: {status}"
+            )
+        return status
+    except Exception as e:
+        if debug:
+            print(f"DEBUG: {server_name} completion check error: {e}")
         return "running"
 
 
@@ -146,7 +174,7 @@ def sync_experiment_results(
         return False
 
 
-def sync_all_completed_experiments() -> None:
+def sync_all_completed_experiments(debug: bool = False) -> None:
     """Sync all completed experiments from all servers."""
     servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
     conf_dir = Path("conf/experiments")
@@ -168,7 +196,7 @@ def sync_all_completed_experiments() -> None:
         run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
 
         # Check if experiment is completed
-        status = get_experiment_status(exp_id, server, gpu_rank, run_name)
+        status = get_experiment_status(exp_id, server, gpu_rank, run_name, debug)
         if status != "completed":
             continue
 
@@ -190,7 +218,7 @@ def sync_all_completed_experiments() -> None:
 
 
 def monitor_experiments(
-    detailed: bool = False, server_filter: str | None = None
+    detailed: bool = False, server_filter: str | None = None, debug: bool = False
 ) -> None:
     """Display experiment status."""
     conf_dir = Path("conf/experiments")
@@ -230,7 +258,7 @@ def monitor_experiments(
             continue
 
         run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
-        status = get_experiment_status(exp_id, server, gpu_rank, run_name)
+        status = get_experiment_status(exp_id, server, gpu_rank, run_name, debug)
         status_groups[status].append(
             (exp_id, server, exp_config, exp_file.name, run_name)
         )
@@ -246,14 +274,20 @@ def monitor_experiments(
         for exp_id, server, exp_config, filename, run_name in exps:
             gpu = exp_config.get("gpu_rank", "?")
 
-            line = f"  {exp_id:<12} {server:<10} GPU:{gpu}  {run_name}"
+            # Use shorter experiment ID display (remove exp_XXX_ prefix)
+            short_id = (
+                exp_id.replace("exp_", "")
+                .replace("baseline_", "b_")
+                .replace("debris_", "d_")
+            )
+            line = f"  {short_id:<15} {server:<8} GPU:{gpu} {run_name[:15]:<15}"
 
             # Add sync status for completed experiments
             if status_name == "completed":
                 if is_synced_locally(exp_id, server, gpu, run_name):
-                    line += " [SYNCED]"
+                    line += " ✓SYNC"
                 else:
-                    line += " [NOT SYNCED]"
+                    line += " ✗SYNC"
 
             if detailed:
                 line += f"\n    File: experiments/conf/{filename}"
@@ -371,11 +405,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Sync all completed experiments from remote servers",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output for remote status checking",
+    )
     args = parser.parse_args()
 
     if args.sync_all:
-        sync_all_completed_experiments()
+        sync_all_completed_experiments(args.debug)
     elif args.interactive:
         interactive_monitor(args.server)
     else:
-        monitor_experiments(args.detailed, args.server)
+        monitor_experiments(args.detailed, args.server, args.debug)
