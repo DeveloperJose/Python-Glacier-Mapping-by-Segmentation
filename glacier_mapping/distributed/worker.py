@@ -42,6 +42,7 @@ PROCESS_CHECK_INTERVAL = 5  # seconds
 REFRESH_INTERVAL = 10  # seconds
 CONFIRMATION_TIMEOUT = 30  # seconds
 LINE_WIDTH = 80
+EXPERIMENT_START_DELAY_SECONDS = 300  # 5 minutes between experiment starts
 
 
 class ExperimentState:
@@ -86,6 +87,7 @@ class InteractiveWorker:
         self.display_needs_refresh = True
         self.last_key_time = 0
         self.total_gpu_memory_gb = 0.0
+        self.last_experiment_start_time: Optional[datetime] = None
 
         # VALIDATE: Must be run from glacier_mapping/ directory
         if not Path("conf/servers.yaml").exists():
@@ -1065,6 +1067,12 @@ class InteractiveWorker:
         if self.worker_paused:
             return
 
+        # Check if we need to wait before starting another experiment
+        if self.last_experiment_start_time:
+            time_since_last = datetime.now() - self.last_experiment_start_time
+            if time_since_last.total_seconds() < EXPERIMENT_START_DELAY_SECONDS:
+                return  # Not enough time passed yet
+
         # Get list of pending experiments
         pending_experiments = [
             exp_id
@@ -1076,7 +1084,9 @@ class InteractiveWorker:
             can_launch, reason = self.can_launch_experiment(exp_id)
 
             if can_launch:
-                self.launch_experiment_async(exp_id)
+                if self.launch_experiment_async(exp_id):
+                    self.last_experiment_start_time = datetime.now()
+                    break  # Only launch one experiment per cycle
             elif reason == "oom":
                 # Mark as OOM waiting
                 exp_state = self.experiments[exp_id]
