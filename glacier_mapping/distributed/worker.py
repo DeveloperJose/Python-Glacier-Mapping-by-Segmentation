@@ -167,13 +167,17 @@ class InteractiveWorker:
             if exp_id not in self.experiments:
                 exp_config = yaml.safe_load(exp_file.read_text())
 
-                # Check if assigned to this server and GPU (check both top-level and nested)
-                server = exp_config.get("server") or exp_config.get(
-                    "training_opts", {}
-                ).get("server")
-                gpu_rank = exp_config.get("gpu_rank") or exp_config.get(
-                    "training_opts", {}
-                ).get("gpu_rank")
+                # Check if assigned to this server and GPU
+                server = exp_config.get("server")
+                gpu_rank = exp_config.get("gpu_rank")
+
+                # Validate required fields
+                if server is None:
+                    print(f"ERROR: {exp_id} missing 'server' field")
+                    continue
+                if gpu_rank is None:
+                    print(f"ERROR: {exp_id} missing 'gpu_rank' field")
+                    continue
 
                 if server == self.server_name and gpu_rank == self.gpu_rank:
                     exp_state = ExperimentState(exp_id)
