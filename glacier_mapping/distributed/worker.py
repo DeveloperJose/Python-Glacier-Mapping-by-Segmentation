@@ -94,6 +94,7 @@ class ExperimentState:
     log_file: Optional[Path] = None
     last_log_pos: int = 0
     user_stopped: bool = False    # track user-initiated stops
+    total_epochs: Optional[int] = None  # <-- for ETA computation
 
 
 # ---------------------------------------------------------------------
@@ -181,6 +182,7 @@ class InteractiveWorker:
 
     def print_raw(self, text: str = ""):
         """Print in raw mode with proper line endings."""
+        # Use CRLF so cursor returns to column 0 in raw mode
         sys.stdout.write(text + "\r\n")
         sys.stdout.flush()
 
@@ -211,6 +213,17 @@ class InteractiveWorker:
             if exp_id not in self.experiments:
                 exp_state = ExperimentState(exp_id=exp_id)
                 exp_state.status = self._get_experiment_status_from_fs(exp_id, exp_config)
+                
+                # Load total epochs for ETA computation with error handling
+                epochs = exp_config["training_opts"].get("epochs")
+                if epochs is not None:
+                    try:
+                        exp_state.total_epochs = int(epochs)
+                        if exp_state.total_epochs <= 0:
+                            exp_state.total_epochs = None
+                    except (ValueError, TypeError):
+                        exp_state.total_epochs = None
+                
                 self.experiments[exp_id] = exp_state
             else:
                 # Existing: update status if experiment is not currently running
@@ -816,6 +829,28 @@ class InteractiveWorker:
 
         return groups
 
+    def get_navigation_list(self) -> List[ExperimentState]:
+        """
+        Return experiments in the same logical order as the UI:
+        running → pending → oom_waiting → error_waiting → stopped → failed → completed.
+        This ensures navigation matches what you see on screen.
+        """
+        groups = self.get_experiments_by_status()
+        order = [
+            STATUS_RUNNING,
+            STATUS_PENDING,
+            STATUS_OOM_WAITING,
+            STATUS_ERROR_WAITING,
+            STATUS_STOPPED,
+            STATUS_FAILED,
+            STATUS_COMPLETED,
+        ]
+        nav_list: List[ExperimentState] = []
+        for status in order:
+            for exp in groups[status]:
+                nav_list.append(exp)
+        return nav_list
+
     def try_launch_experiments(self):
         """Try to launch pending experiments that fit in memory."""
         if self.worker_paused:
@@ -851,7 +886,9 @@ class InteractiveWorker:
                 if exp_state.status != STATUS_OOM_WAITING:
                     exp_state.status = STATUS_OOM_WAITING
                     exp_state.oom_wait_start = datetime.now()
-                    exp_state.oom_last_retry_time = None
+                    # Set last retry time to now so we don't immediately re-test
+                    # in handle_oom_experiments on the very next loop.
+                    exp_state.oom_last_retry_time = datetime.now()
                     print(f"[{exp_id}] Out of memory, waiting...")
                     self.display_needs_refresh = True
             else:
@@ -859,7 +896,9 @@ class InteractiveWorker:
                 exp_state = self.experiments[exp_id]
                 exp_state.status = STATUS_ERROR_WAITING
                 exp_state.error_wait_start = datetime.now()
-                exp_state.error_last_retry_time = None
+                # Set last retry time to now so we don't immediately re-test
+                # in handle_error_waiting_experiments on the very next loop.
+                exp_state.error_last_retry_time = datetime.now()
                 exp_state.error_type = "config"
                 exp_state.is_recoverable = True
                 exp_state.last_error = f"Memory test failed: {reason}"
@@ -993,6 +1032,36 @@ class InteractiveWorker:
                 hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
                 minutes, seconds = divmod(remainder, 60)
                 line += f" Time: {hours:02d}:{minutes:02d}:{seconds:02d}"
+
+                # =============================
+                #   EPOCH-BASED ETA (RIGHT EDGE)
+                # =============================
+
+                if (
+                    exp_state.current_epoch > 0
+                    and exp_state.total_epochs
+                    and exp_state.total_epochs > exp_state.current_epoch
+                ):
+                    # Fraction completed
+                    frac = exp_state.current_epoch / exp_state.total_epochs
+                    total_elapsed = elapsed.total_seconds()
+
+                    if frac > 0:
+                        eta_seconds = total_elapsed * (1 - frac) / frac
+
+                        eta_h = int(eta_seconds // 3600)
+                        eta_m = int((eta_seconds % 3600) // 60)
+                        eta_s = int(eta_seconds % 60)
+
+                        eta_str = f"{eta_h:02d}:{eta_m:02d}:{eta_s:02d}"
+
+                        # Right-align the ETA using a spacing block
+                        # (keeps the UI stable regardless of line length)
+                        padding = max(1, 80 - len(line) - len(" ETA: ") - len(eta_str))
+
+                        line += " " * padding + f"ETA: {eta_str}"
+
+                # END ETA
 
             if exp_state.current_loss > 0:
                 line += f" Loss: {exp_state.current_loss:.3f}"
@@ -1259,87 +1328,117 @@ class InteractiveWorker:
 
     def _navigate_up(self):
         """Navigate up through experiments."""
-        exp_list = list(self.experiments.values())
-        if not exp_list:
+        nav_list = self.get_navigation_list()
+        if not nav_list:
             return
 
         if self.selected_exp_id is None:
-            self.selected_exp_id = exp_list[0].exp_id
-        else:
-            current_idx = next(
-                (i for i, exp in enumerate(exp_list) if exp.exp_id == self.selected_exp_id),
-                0,
-            )
-            if current_idx > 0:
-                self.selected_exp_id = exp_list[current_idx - 1].exp_id
+            # Default to first item in visual order
+            self.selected_exp_id = nav_list[0].exp_id
+            return
+
+        current_idx = next(
+            (i for i, exp in enumerate(nav_list) if exp.exp_id == self.selected_exp_id),
+            0,
+        )
+        if current_idx > 0:
+            self.selected_exp_id = nav_list[current_idx - 1].exp_id
 
     def _navigate_down(self):
         """Navigate down through experiments."""
-        exp_list = list(self.experiments.values())
-        if not exp_list:
+        nav_list = self.get_navigation_list()
+        if not nav_list:
             return
 
         if self.selected_exp_id is None:
-            self.selected_exp_id = exp_list[0].exp_id
-        else:
-            current_idx = next(
-                (i for i, exp in enumerate(exp_list) if exp.exp_id == self.selected_exp_id),
-                0,
-            )
-            if current_idx < len(exp_list) - 1:
-                self.selected_exp_id = exp_list[current_idx + 1].exp_id
+            self.selected_exp_id = nav_list[0].exp_id
+            return
+
+        current_idx = next(
+            (i for i, exp in enumerate(nav_list) if exp.exp_id == self.selected_exp_id),
+            0,
+        )
+        if current_idx < len(nav_list) - 1:
+            self.selected_exp_id = nav_list[current_idx + 1].exp_id
 
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
     def run_interactive(self):
         """Main interactive worker loop."""
+        # Set up terminal for raw, non-blocking input
         import termios
         import tty
+        import select
 
         old_settings = termios.tcgetattr(sys.stdin)
+
+        # Event timing
         last_refresh = time.time()
+        REFRESH_SECS = REFRESH_INTERVAL  # keep your existing value
 
         try:
             tty.setraw(sys.stdin.fileno())
 
-            # Initial load
+            # Load experiments BEFORE entering the main loop
             self.load_experiments()
             self.display_needs_refresh = True
 
             while self.running:
-                current_time = time.time()
+                # -----------------------------------------------
+                # 1. Event-driven key input using select()
+                # -----------------------------------------------
+                rlist, _, _ = select.select(
+                    [sys.stdin],  # watch stdin
+                    [],           # no write fds
+                    [],           # no except fds
+                    0.10          # timeout = 100 ms
+                )
 
-                # Highest priority: key input
-                key = self.get_key()
-                if key:
-                    self.handle_key_input(key)
-                    # After key handling, we still continue loop to do housekeeping
+                if rlist:
+                    key = sys.stdin.read(1)
+                    if key:
+                        self.handle_key_input(key)
 
-                # Periodically reload experiment configs
-                if current_time - last_refresh >= REFRESH_INTERVAL:
+                # -----------------------------------------------
+                # 2. Periodic tasks (every REFRESH_INTERVAL seconds)
+                # -----------------------------------------------
+                now = time.time()
+                if now - last_refresh >= REFRESH_SECS:
+                    last_refresh = now
+
+                    # Refresh experiment configurations
                     self.load_experiments()
-                    last_refresh = current_time
+
+                    # Clean up finished experiments
+                    self.cleanup_finished_experiments()
+
+                    # Process error-waiting experiments
+                    self.handle_error_waiting_experiments()
+
+                    # Process OOM-waiting experiments
+                    self.handle_oom_experiments()
+
+                    # Attempt to launch any pending experiments
+                    self.try_launch_experiments()
+
+                    # Update GPU memory statistics
+                    self._update_gpu_memory()
+
+                    # Parse log updates for running experiments
+                    for exp_id, exp_state in self.experiments.items():
+                        if exp_state.status == STATUS_RUNNING:
+                            self._parse_training_logs(exp_id)
+
+                    # Mark display for repaint
                     self.display_needs_refresh = True
 
-                # Process lifecycle + scheduling
-                self.cleanup_finished_experiments()
-                self.handle_error_waiting_experiments()
-                self.handle_oom_experiments()
-                self.try_launch_experiments()
-
-                # GPU memory + metrics
-                self._update_gpu_memory()
-                for exp_id, exp_state in self.experiments.items():
-                    if exp_state.status == STATUS_RUNNING:
-                        self._parse_training_logs(exp_id)
-
-                # Display UI
+                # -----------------------------------------------
+                # 3. Repaint display only when needed
+                # -----------------------------------------------
                 if self.display_needs_refresh:
                     self.display_status()
                     self.display_needs_refresh = False
-
-                time.sleep(0.05)
 
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)

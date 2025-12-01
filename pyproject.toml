@@ -46,5 +46,6 @@ packages = ["glacier_mapping"]
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.407",
     "ruff>=0.14.6",
 ]
