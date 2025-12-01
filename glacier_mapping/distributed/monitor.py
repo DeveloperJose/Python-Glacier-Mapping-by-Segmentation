@@ -421,62 +421,164 @@ def sync_experiment_results(
         return False
 
 
-def sync_all_experiments(debug: bool = False, include_running: bool = True) -> None:
-    """Sync experiments from all servers (optionally including running experiments)."""
+def sync_all_experiments_optimized(
+    debug: bool = False,
+    include_running: bool = True,
+    include_completed: bool = True,
+) -> None:
+    """Optimized sync using parallel batch status checking."""
     conf_dir = Path("conf/experiments")
 
     # Fixed-width formatting
     line = "=" * LINE_WIDTH
-    print(f"\n{line}")
+    sync_types = []
     if include_running:
-        print("SYNCING ALL EXPERIMENTS (INCLUDING RUNNING)")
-    else:
-        print("SYNCING COMPLETED EXPERIMENTS")
+        sync_types.append("RUNNING")
+    if include_completed:
+        sync_types.append("COMPLETED")
+    
+    print(f"\n{line}")
+    print(f"SYNCING {', '.join(sync_types)} EXPERIMENTS")
     print(line)
     print()
 
+    # Find all experiment YAML files
     exp_files = sorted(conf_dir.glob("exp_*.yaml"))
 
     if not exp_files:
         print("No experiments found in conf/experiments/")
         return
 
-    synced_count = 0
-    failed_count = 0
-    skipped_count = 0
+    # Load all experiment configs and group by server
+    experiments_by_server: dict[str, list[tuple[str, dict, str]]] = {}
+    all_experiments = []  # Keep original order for display
 
     for exp_file in exp_files:
         exp_id = exp_file.stem
         exp_config = yaml.safe_load(exp_file.read_text())
-
         server = exp_config.get("server", "unknown")
-        gpu_rank = exp_config.get("gpu_rank", 0)
-        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+        
+        if server not in experiments_by_server:
+            experiments_by_server[server] = []
+        
+        experiments_by_server[server].append((exp_id, exp_config, exp_file.name))
+        all_experiments.append((exp_id, server, exp_config, exp_file.name))
 
-        # Check experiment status
-        status = get_experiment_status(exp_id, server, gpu_rank, run_name, debug)
+    # Show progress message
+    remote_servers = [s for s in experiments_by_server.keys() if s != "desktop"]
+    if remote_servers:
+        print(f"Checking remote servers: {', '.join(sorted(remote_servers))}...")
+        print(f"Using {MAX_WORKERS} workers (75% of {CPU_COUNT} CPU cores)")
+        print()
 
-        # Skip if not completed and we're not including running
-        if not include_running and status != "completed":
-            skipped_count += 1
-            continue
+    # Get experiment statuses in parallel (same as monitor_experiments)
+    all_results: dict[str, str] = {}  # exp_id -> status
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit tasks for each server
+        future_to_server = {}
+        
+        # Desktop experiments (local processing)
+        if "desktop" in experiments_by_server:
+            desktop_experiments = experiments_by_server["desktop"]
+            future = executor.submit(
+                process_desktop_experiments, desktop_experiments, debug
+            )
+            future_to_server[future] = "desktop"
+        
+        # Remote experiments (batch SSH)
+        for server_name in remote_servers:
+            server_experiments = experiments_by_server[server_name]
+            future = executor.submit(
+                process_remote_server_experiments, server_name, server_experiments, debug
+            )
+            future_to_server[future] = server_name
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_server):
+            server_name = future_to_server[future]
+            try:
+                server_results = future.result()
+                all_results.update(server_results)
+                
+                # Update cache with results
+                if server_name in experiments_by_server:
+                    update_cache_from_results(
+                        server_results, server_name, experiments_by_server[server_name]
+                    )
+                
+                if debug:
+                    print(f"DEBUG: {server_name} status check completed with {len(server_results)} results")
+                    
+            except Exception as e:
+                print(f"Error processing {server_name}: {e}")
+                # Mark all experiments on this server as pending
+                for exp_id, _, _ in experiments_by_server[server_name]:
+                    all_results[exp_id] = "pending"
 
+    # Filter experiments by status for syncing
+    experiments_to_sync = []
+    for exp_id, server, exp_config, exp_file_name in all_experiments:
+        status = all_results.get(exp_id, "pending")
+        
+        # Check if this experiment should be synced based on status
+        should_sync = False
+        if status == "running" and include_running:
+            should_sync = True
+        elif status == "completed" and include_completed:
+            should_sync = True
+        elif status == "failed" and include_completed:
+            should_sync = True
+        
         # Skip pending experiments (nothing to sync yet)
         if status == "pending":
-            skipped_count += 1
             continue
+        
+        if should_sync:
+            experiments_to_sync.append((exp_id, server, exp_config, exp_file_name, status))
 
-        # Check if already synced
-        if is_synced_locally(exp_id, server, gpu_rank, run_name, status):
-            sync_age = get_sync_age(server, gpu_rank, run_name)
-            print(f"[{exp_id}] ✓ Already synced ({sync_age})")
-            synced_count += 1
-        else:
-            # Sync experiment
-            if sync_experiment_results(server, exp_id, gpu_rank, run_name):
-                synced_count += 1
-            else:
-                failed_count += 1
+    if not experiments_to_sync:
+        print("No experiments to sync based on current filters.")
+        return
+
+    # Group experiments to sync by server for parallel rsync
+    sync_by_server: dict[str, list[tuple[str, dict, str, str]]] = {}
+    for exp_id, server, exp_config, exp_file_name, status in experiments_to_sync:
+        if server not in sync_by_server:
+            sync_by_server[server] = []
+        sync_by_server[server].append((exp_id, exp_config, exp_file_name, status))
+
+    # Sync experiments in parallel by server
+    synced_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    with ThreadPoolExecutor(max_workers=min(len(sync_by_server), MAX_WORKERS)) as executor:
+        future_to_server_sync = {}
+        
+        for server_name, server_experiments in sync_by_server.items():
+            future = executor.submit(
+                sync_server_experiments, server_name, server_experiments, debug
+            )
+            future_to_server_sync[future] = server_name
+        
+        # Collect sync results
+        for future in as_completed(future_to_server_sync):
+            server_name = future_to_server_sync[future]
+            try:
+                server_synced, server_failed, server_skipped = future.result()
+                synced_count += server_synced
+                failed_count += server_failed
+                skipped_count += server_skipped
+                
+                if debug:
+                    print(f"DEBUG: {server_name} sync completed")
+                    
+            except Exception as e:
+                print(f"Error syncing {server_name}: {e}")
+                # Mark all experiments on this server as failed
+                for exp_id, _, _, _ in sync_by_server[server_name]:
+                    failed_count += 1
 
     # Summary
     print(f"\n{line}")
@@ -485,6 +587,83 @@ def sync_all_experiments(debug: bool = False, include_running: bool = True) -> N
     )
     print(line)
     print()
+
+
+def sync_server_experiments(
+    server_name: str, 
+    experiments: list[tuple[str, dict, str, str]], 
+    debug: bool = False
+) -> tuple[int, int, int]:
+    """Sync all experiments for a single server."""
+    if server_name == "desktop":
+        return sync_desktop_experiments(experiments, debug)
+    else:
+        return sync_remote_server_experiments(server_name, experiments, debug)
+
+
+def sync_desktop_experiments(
+    experiments: list[tuple[str, dict, str, str]], 
+    debug: bool = False
+) -> tuple[int, int, int]:
+    """Sync desktop experiments (local - just verify they exist)."""
+    synced_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for exp_id, exp_config, exp_file_name, status in experiments:
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+        
+        # For desktop experiments, just verify they exist locally
+        if is_synced_locally(exp_id, "desktop", gpu_rank, run_name, status):
+            sync_age = get_sync_age("desktop", gpu_rank, run_name)
+            print(f"[{exp_id}] ✓ Already local ({sync_age})")
+            synced_count += 1
+        else:
+            print(f"[{exp_id}] ✗ Desktop experiment not found locally")
+            failed_count += 1
+    
+    return synced_count, failed_count, skipped_count
+
+
+def sync_remote_server_experiments(
+    server_name: str,
+    experiments: list[tuple[str, dict, str, str]], 
+    debug: bool = False
+) -> tuple[int, int, int]:
+    """Sync experiments from a remote server."""
+    synced_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for exp_id, exp_config, exp_file_name, status in experiments:
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+        
+        # Check if already synced
+        if is_synced_locally(exp_id, server_name, gpu_rank, run_name, status):
+            sync_age = get_sync_age(server_name, gpu_rank, run_name)
+            print(f"[{exp_id}] ✓ Already synced ({sync_age})")
+            synced_count += 1
+            continue
+        
+        # Sync experiment
+        if sync_experiment_results(server_name, exp_id, gpu_rank, run_name):
+            synced_count += 1
+        else:
+            failed_count += 1
+    
+    return synced_count, failed_count, skipped_count
+
+
+def sync_all_experiments(debug: bool = False, include_running: bool = True) -> None:
+    """Sync experiments from all servers (updated to use optimized approach)."""
+    # Use the optimized version with appropriate parameters
+    sync_all_experiments_optimized(
+        debug=debug,
+        include_running=include_running,
+        include_completed=True  # Always include completed experiments
+    )
 
 
 def sync_all_completed_experiments(debug: bool = False) -> None:
@@ -788,7 +967,11 @@ def interactive_monitor(server_filter: str | None = None, debug: bool = False) -
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                     clear_screen()
                     print("🔄 Syncing all completed experiments...")
-                    sync_all_completed_experiments(debug)
+                    sync_all_experiments_optimized(
+                        debug=debug,
+                        include_running=False,
+                        include_completed=True
+                    )
                     input("Press Enter to continue...")
                     tty.setraw(sys.stdin.fileno())
                 elif key == "S":  # Capital S - sync all including running
@@ -796,7 +979,11 @@ def interactive_monitor(server_filter: str | None = None, debug: bool = False) -
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                     clear_screen()
                     print("🔄 Syncing ALL experiments (including running)...")
-                    sync_all_experiments(debug)
+                    sync_all_experiments_optimized(
+                        debug=debug,
+                        include_running=True,
+                        include_completed=True
+                    )
                     input("Press Enter to continue...")
                     tty.setraw(sys.stdin.fileno())
                 elif key_lower == "p":
@@ -837,7 +1024,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sync-all",
         action="store_true",
-        help="Sync all completed experiments from remote servers",
+        help="Sync all experiments (running and completed) from remote servers",
     )
     parser.add_argument(
         "--debug",
@@ -856,7 +1043,11 @@ if __name__ == "__main__":
     _cache_ttl = args.cache_ttl
 
     if args.sync_all:
-        sync_all_completed_experiments(args.debug)
+        sync_all_experiments_optimized(
+            debug=args.debug,
+            include_running=True,
+            include_completed=True
+        )
     elif args.interactive:
         interactive_monitor(args.server, args.debug)
     else:
