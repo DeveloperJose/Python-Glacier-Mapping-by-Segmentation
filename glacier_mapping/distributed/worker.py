@@ -125,13 +125,15 @@ def test_experiment_memory(
         return False, f"error: {str(e)}"
 
 
-def get_experiment_status(exp_id: str, server_name: str, gpu_rank: int) -> str:
+def get_experiment_status(
+    exp_id: str, server_name: str, gpu_rank: int, run_name: str
+) -> str:
     """
     Determine experiment status from filesystem.
 
     Returns: 'pending' | 'running' | 'completed' | 'failed'
     """
-    results_dir = Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+    results_dir = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
 
     if not results_dir.exists():
         return "pending"
@@ -164,7 +166,8 @@ def get_next_experiment(server_name: str, gpu_rank: int):
             continue
 
         # Check status
-        status = get_experiment_status(exp_id, server_name, gpu_rank)
+        run_name = exp_config["training_opts"]["run_name"]
+        status = get_experiment_status(exp_id, server_name, gpu_rank, run_name)
 
         if status == "pending":
             return exp_id, exp_file, exp_config
@@ -187,7 +190,8 @@ def run_experiment(
     print(f"[{exp_id}] Output: {exp_config['training_opts']['output_dir']}")
 
     # Create marker to show running status
-    results_marker = Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+    run_name = exp_config["training_opts"]["run_name"]
+    results_marker = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
     results_marker.mkdir(parents=True, exist_ok=True)
     (results_marker / "RUNNING").write_text(f"Started: {datetime.now().isoformat()}\n")
 
@@ -322,9 +326,10 @@ def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) ->
                             f"[{exp_id}] Out of memory after {max_retries} retries, skipping"
                         )
                         # Mark as failed
+                        run_name = exp_config["training_opts"]["run_name"]
                         results_marker = (
                             Path("output/runs")
-                            / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+                            / f"{run_name}_{server_name}_gpu{gpu_rank}"
                         )
                         results_marker.mkdir(parents=True, exist_ok=True)
                         (results_marker / "FAILED").write_text(
@@ -335,8 +340,9 @@ def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) ->
                 else:
                     print(f"[{exp_id}] Memory test failed: {message}")
                     # Mark as failed
+                    run_name = exp_config["training_opts"]["run_name"]
                     results_marker = (
-                        Path("output/runs") / f"{exp_id}_{server_name}_gpu{gpu_rank}"
+                        Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
                     )
                     results_marker.mkdir(parents=True, exist_ok=True)
                     (results_marker / "FAILED").write_text(
