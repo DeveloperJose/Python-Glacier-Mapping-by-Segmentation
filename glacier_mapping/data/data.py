@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-import glacier_mapping.model.functions as fn
+import glacier_mapping.utils.logging as fn
 
 BAND_NAMES = np.array(
     [

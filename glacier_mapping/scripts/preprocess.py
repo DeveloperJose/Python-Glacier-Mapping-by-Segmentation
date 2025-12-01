@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import random
+import shutil
 import warnings
 from functools import partial
 from pathlib import Path
@@ -17,11 +18,22 @@ from addict import Dict
 from tqdm import tqdm
 
 import glacier_mapping.data.slice as fn
-import glacier_mapping.utils as utils
+import glacier_mapping.utils.parallel
 
 import matplotlib
 
 matplotlib.use("Agg")
+
+
+def remove_and_create(dirpath):
+    """Remove and recreate directory."""
+    if os.path.exists(dirpath) and os.path.isdir(dirpath):
+        shutil.rmtree(dirpath)
+    os.makedirs(dirpath)
+
+
+# Monkey patch istarmap into multiprocessing.Pool
+multiprocessing.pool.Pool.istarmap = glacier_mapping.utils.parallel.istarmap
 
 
 def load_config_with_server_paths(config_path, server_name="desktop"):
@@ -116,7 +128,7 @@ if __name__ == "__main__":
     print("Splits:", splits)
     # breakpoint()
     labels = fn.read_shp(Path(conf.labels_dir) / "HKH_CIDC_5basins_all.shp")
-    utils.remove_and_create(conf.out_dir)
+    remove_and_create(conf.out_dir)
 
     with tqdm(total=1, desc="temp") as pbar:
         for split, meta in splits.items():
@@ -125,12 +137,12 @@ if __name__ == "__main__":
             fn_process = partial(
                 fn.save_slices, labels=labels, savepath=savepath, **conf
             )
-            utils.remove_and_create(savepath)
+            remove_and_create(savepath)
 
             pbar.set_description(f"Processing dataset {split}")
             pbar.reset(len(meta))
             with multiprocessing.Pool(5) as pool:
-                for result in utils.istarmap(pool, fn_process, enumerate(meta)):
+                for result in pool.istarmap(fn_process, enumerate(meta)):
                     mu, s, mi, ma, df_rows, skipped_rows = result
                     means.append(mu)
                     stds.append(s)

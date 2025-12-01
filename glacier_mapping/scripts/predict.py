@@ -29,7 +29,7 @@ from scipy.ndimage import binary_fill_holes
 import matplotlib.pyplot as plt
 import matplotlib
 
-from glacier_mapping.model.frame import Framework
+from glacier_mapping.core.frame import Framework
 from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
 from glacier_mapping.model.visualize import (
     build_cmap,

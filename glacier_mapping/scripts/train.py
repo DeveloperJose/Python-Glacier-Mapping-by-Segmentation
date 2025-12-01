@@ -29,8 +29,8 @@ import yaml
 from addict import Dict
 from torch.utils.tensorboard import SummaryWriter
 
-import glacier_mapping.model.functions as fn
-from glacier_mapping.model.frame import Framework
+import glacier_mapping.utils.logging as fn
+from glacier_mapping.core.frame import Framework
 from glacier_mapping.data.data import fetch_loaders
 
 random.seed(41)
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     frame = Framework.from_config(config_path)
 
     if conf.training_opts.fine_tune:
-        fn.log(logging.INFO, "Finetuning from previous final model…")
+        logging.log(logging.INFO, "Finetuning from previous final model…")
         final_model_path = output_dir / "models" / "model_final.pt"
 
         frame = Framework.from_checkpoint(
@@ -109,8 +109,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(output_dir / "logs")
     writer.add_text("Configuration", json.dumps(conf, indent=4))
 
-    fn.print_conf(conf)
-    fn.log(
+    logging.print_conf(conf)
+    logging.log(
         logging.INFO,
         f"#Train={len(train_loader)}, #Val={len(val_loader)}, #Test={len(test_loader)}",
     )

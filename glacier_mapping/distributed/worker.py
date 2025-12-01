@@ -47,7 +47,7 @@ def test_experiment_memory(
         sys.path.insert(0, str(code_path))
 
     from glacier_mapping.data.data import fetch_loaders
-    from glacier_mapping.model.frame import Framework
+    from glacier_mapping.core.frame import Framework
 
     # Write test config to a temp file
     test_config_path = Path("glacier_mapping/conf/unet_train_memtest.yaml")
