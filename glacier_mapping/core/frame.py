@@ -51,7 +51,12 @@ class Framework:
             conf.get("gpu_rank", conf.get("training_opts", {}).get("gpu_rank", 0))
         )
         if device is None:
-            device = gpu_rank
+            # Check for device override (used when CUDA_VISIBLE_DEVICES is set)
+            device_override = os.environ.get("GLACIER_MAPPING_DEVICE_OVERRIDE")
+            if device_override is not None:
+                device = int(device_override)
+            else:
+                device = gpu_rank
 
         return cls(
             loss_opts=conf.loss_opts,

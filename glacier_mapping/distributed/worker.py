@@ -199,6 +199,9 @@ def run_experiment(
     try:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_rank)
+        # When CUDA_VISIBLE_DEVICES is set, we want to use device 0 in the subprocess
+        # This prevents "invalid device ordinal" errors
+        env["GLACIER_MAPPING_DEVICE_OVERRIDE"] = "0"
 
         # Convert experiment config path to be relative to code_path
         # exp_file is relative to glacier_mapping/, need to make it relative to code_path
