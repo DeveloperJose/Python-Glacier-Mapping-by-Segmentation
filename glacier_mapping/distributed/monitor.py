@@ -38,16 +38,17 @@ def monitor_experiments(
     detailed: bool = False, server_filter: str | None = None
 ) -> None:
     """Display experiment status."""
-    experiments_dir = Path("experiments")
-    conf_dir = experiments_dir / "conf"
+    conf_dir = Path("conf/experiments")
 
     # Find all experiment YAML files
     exp_files = sorted(conf_dir.glob("exp_*.yaml"))
 
     if not exp_files:
-        print("No experiments found in experiments/conf/")
+        print("No experiments found in conf/experiments/")
         print("\nTo create an experiment:")
-        print("  uv run python experiments/submit.py --server bilbo --gpu 0")
+        print(
+            "  uv run python -m glacier_mapping.distributed.submit --server bilbo --gpu 0"
+        )
         return
 
     print("\n" + "=" * 80)

@@ -43,36 +43,18 @@ torch.backends.cudnn.benchmark = False
 warnings.filterwarnings("ignore")
 
 
-def load_config_with_server_paths(config_path, server_name="desktop"):
-    """Load training config and construct paths from servers.yaml"""
-    config = Dict(yaml.safe_load(open(config_path)))
-
-    # Get script directory to find servers.yaml
-    script_dir = pathlib.Path(__file__).parent
-    servers_path = script_dir / "conf" / "servers.yaml"
-    servers_cfg = Dict(yaml.safe_load(open(servers_path)))
-    server = servers_cfg[server_name]
-
-    # Construct paths
-    config.loader_opts.processed_dir = (
-        f"{server.processed_data_path}/{config.training_opts.dataset_name}"
-    )
-    config.training_opts.output_dir = (
-        f"{server.code_path}/output/runs/{config.training_opts.run_name}"
-    )
-
-    return config
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server", default="desktop", choices=["desktop", "bilbo"])
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to experiment config YAML (e.g., conf/experiments/exp_001_baseline_ci_v2.yaml)",
+    )
     args = parser.parse_args()
 
-    # Load config with server paths
-    script_dir = pathlib.Path(__file__).parent
-    config_path = script_dir / "conf" / "unet_train.yaml"
-    conf = load_config_with_server_paths(config_path, args.server)
+    # Load experiment config directly (paths already set by submit.py)
+    config_path = args.config
+    conf = Dict(yaml.safe_load(open(config_path)))
 
     run_name: str = conf.training_opts.run_name
     output_dir = pathlib.Path(conf.training_opts.output_dir)
@@ -84,10 +66,11 @@ if __name__ == "__main__":
 
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
+    # Initialize framework from experiment config
     frame = Framework.from_config(config_path)
 
     if conf.training_opts.fine_tune:
-        logging.log(logging.INFO, "Finetuning from previous final model…")
+        fn.log(logging.INFO, "Finetuning from previous final model…")
         final_model_path = output_dir / "models" / "model_final.pt"
 
         frame = Framework.from_checkpoint(
@@ -109,8 +92,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(output_dir / "logs")
     writer.add_text("Configuration", json.dumps(conf, indent=4))
 
-    logging.print_conf(conf)
-    logging.log(
+    fn.print_conf(conf)
+    fn.log(
         logging.INFO,
         f"#Train={len(train_loader)}, #Val={len(val_loader)}, #Test={len(test_loader)}",
     )
@@ -273,14 +256,22 @@ if __name__ == "__main__":
         iou_vals = to_float(val_metric["IoU"])
 
         # Use first class values for summary display
-        if isinstance(precision_vals, list):
-            p = precision_vals[0]
-            r = recall_vals[0]
-            iou = iou_vals[0]
-        else:
-            p = precision_vals
-            r = recall_vals
-            iou = iou_vals
+        # Extract first value for display (works for scalars, lists, and tensors)
+        def get_first(val):  # type: ignore
+            if isinstance(val, (int, float)):
+                return float(val)
+            elif isinstance(val, (list, tuple)) and len(val) > 0:
+                return float(val[0])  # type: ignore
+            else:
+                # Assume it's indexable (tensor, array, etc.)
+                try:
+                    return float(val[0])  # type: ignore
+                except (TypeError, IndexError):
+                    return float(val)  # type: ignore
+
+        p = get_first(precision_vals)
+        r = get_first(recall_vals)
+        iou = get_first(iou_vals)
 
         print(f"{epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {iou:<10.4f}")
     print("-" * 58 + "\n")

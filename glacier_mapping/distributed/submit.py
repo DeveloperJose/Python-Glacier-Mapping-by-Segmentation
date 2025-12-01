@@ -81,20 +81,12 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
             f"{server_cfg['code_path']}/output/runs/{run_name}"
         )
 
-    # Update processed_dir to use server's paths
-    if "loader_opts" in exp_config and "processed_dir" in exp_config["loader_opts"]:
-        desktop_processed_dir = exp_config["loader_opts"]["processed_dir"]
-        desktop_cfg = servers_cfg["desktop"]
-        desktop_base = desktop_cfg["processed_data_path"]
-        server_base = server_cfg["processed_data_path"]
-
-        if desktop_processed_dir.startswith(desktop_base):
-            # Replace desktop base with server base
-            relative_path = desktop_processed_dir[len(desktop_base) :].lstrip("/")
-            exp_config["loader_opts"]["processed_dir"] = (
-                f"{server_base}/{relative_path}"
-            )
-        # Note: If processed_dir doesn't start with desktop_base, leave as-is (user custom path)
+    # Compute processed_dir from server config + dataset_name
+    dataset_name = exp_config.get("training_opts", {}).get("dataset_name", "")
+    if dataset_name and "loader_opts" in exp_config:
+        exp_config["loader_opts"]["processed_dir"] = (
+            f"{server_cfg['processed_data_path']}/{dataset_name}/"
+        )
 
     # Note: run_name is preserved from template, not replaced with exp_id
 

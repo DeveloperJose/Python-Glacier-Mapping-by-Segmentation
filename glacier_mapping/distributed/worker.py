@@ -50,7 +50,7 @@ def test_experiment_memory(
     from glacier_mapping.core.frame import Framework
 
     # Write test config to a temp file
-    test_config_path = Path("glacier_mapping/conf/unet_train_memtest.yaml")
+    test_config_path = Path("conf/unet_train_memtest.yaml")
     test_config_path.write_text(
         yaml.dump(exp_config, sort_keys=False, default_flow_style=False)
     )
@@ -81,7 +81,7 @@ def test_experiment_memory(
         )
 
         # Test one training step
-        print(f"  [Memory Test] Running test forward + backward pass...")
+        print("  [Memory Test] Running test forward + backward pass...")
         loss_val = 0.0
         for x, y_onehot, y_int in train_loader:
             # Forward + backward (same as training)
@@ -105,7 +105,7 @@ def test_experiment_memory(
         return True, "success"
 
     except torch.cuda.OutOfMemoryError:
-        print(f"  [Memory Test] ✗ Out of memory")
+        print("  [Memory Test] ✗ Out of memory")
 
         # Clean up
         torch.cuda.empty_cache()
@@ -147,8 +147,7 @@ def get_experiment_status(exp_id: str, server_name: str, gpu_rank: int) -> str:
 
 def get_next_experiment(server_name: str, gpu_rank: int):
     """Find next pending experiment for this server and GPU."""
-    experiments_dir = Path("experiments")
-    conf_dir = experiments_dir / "conf"
+    conf_dir = Path("conf/experiments")
 
     # Find all experiment YAML files
     exp_files = sorted(conf_dir.glob("exp_*.yaml"))
@@ -197,9 +196,21 @@ def run_experiment(
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_rank)
 
+        # Convert experiment config path to be relative to code_path
+        # exp_file is relative to glacier_mapping/, need to make it relative to code_path
+        exp_file_from_root = Path("glacier_mapping") / exp_file
+
         result = subprocess.run(
-            ["uv", "run", "python", "unet_train.py", "--server", server_name],
-            cwd=server["code_path"] + "/glacier_mapping",
+            [
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "glacier_mapping.scripts.train",
+                "--config",
+                str(exp_file_from_root),
+            ],
+            cwd=server["code_path"],
             env=env,
             check=True,
             capture_output=False,

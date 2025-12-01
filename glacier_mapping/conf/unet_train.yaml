@@ -1,19 +1,23 @@
 # Training configuration
 training_opts:
-  dataset_name: "bibek_w512_o64_f1"
-  run_name: "baseline_CI"
+  dataset_name: "bibek_w512_o64_f1_v2"
+  run_name: "baseline_debris_v2"
   epochs: 500
   fine_tune: False
   find_lr: False
-  early_stopping: 150
+  early_stopping: 100 # Epochs to wait for improvement
   full_eval_every: 10
   num_viz_samples: 4
 
 loader_opts:
-  batch_size: 8
-  use_channels: [0, 1, 2, 3, 4, 5, 6, 7]
-  output_classes: [1]
-  normalize: "mean-std"
+  batch_size: 8 # 8 (original paper), 12 (debian 512x512) or 46-48 (debian 256x256)
+  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  # [0="B1", 1="B2", 2="B3", 3="B4", 4="B5", 5="B6_VCID1", 6="B6_VCID2", 7="B7"] - Landsat-7 TIFF
+  # [8="elevation", 9="slope_deg"] - DEM derived
+  # [10="NDVI", 11="NDWI", 12="NDSI", 13="H", 14="S", 15="V"] - Spectral indices + HSV
+  # [16="flow_accumulation", 17="TPI", 18="roughness", 19="plan_curvature"] - Physics channels
+  output_classes: [2] # 0=BG, 1=CI, 2=Debris
+  normalize: "mean-std" # "min-max" or "mean-std"
   class_names: ["BG", "CleanIce", "Debris"]
 
 metrics_opts:
@@ -43,7 +47,6 @@ optim_opts:
 scheduler_opts:
   name: "OneCycleLR"
   args:
-    max_lr: 0.001
-    pct_start: 0.3
+    max_lr: 0.001 # Peak LR (3.3x base lr)
+    pct_start: 0.3 # 30% warmup, 70% annealing
     anneal_strategy: "cos"
-
