@@ -305,7 +305,10 @@ if __name__ == "__main__":
     def convert_tensors_to_python(obj):
         """Recursively convert tensors in nested dicts/lists to Python types."""
         if isinstance(obj, torch.Tensor):
-            return float(obj.detach().cpu().item())
+            if obj.numel() == 1:
+                return float(obj.detach().cpu().item())
+            else:
+                return obj.detach().cpu().tolist()
         elif isinstance(obj, dict):
             return {k: convert_tensors_to_python(v) for k, v in obj.items()}
         elif isinstance(obj, list):

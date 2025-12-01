@@ -58,9 +58,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Slice and preprocess glacier data")
     parser.add_argument(
         "--server",
-        default="desktop",
+        required=True,
         choices=["desktop", "bilbo", "frodo"],
-        help="Server name (default: desktop)",
+        help="Server name (must be specified explicitly)",
     )
     args = parser.parse_args()
 

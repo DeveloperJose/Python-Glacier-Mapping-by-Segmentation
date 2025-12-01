@@ -38,6 +38,7 @@ metrics_opts:
   - recall
   threshold:
   - 0.5
+  - 0.5
 loss_opts:
   name: custom
   masked: false
