@@ -76,6 +76,9 @@ class InteractiveWorker:
         self.selected_exp_id: Optional[str] = None
         self.worker_paused = False
         self.running = True
+        self.display_needs_refresh = True
+        self.last_key_time = 0
+        self.total_gpu_memory_gb = 0.0
 
         # VALIDATE: Must be run from glacier_mapping/ directory
         if not Path("conf/servers.yaml").exists():
@@ -98,6 +101,9 @@ class InteractiveWorker:
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # Initialize total GPU memory
+        self._get_total_gpu_memory()
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
@@ -176,6 +182,9 @@ class InteractiveWorker:
 
         if not results_dir.exists():
             return "pending"
+
+        if (results_dir / "STOPPED").exists():
+            return "stopped"
 
         if (results_dir / "FAILED").exists():
             return "failed"
@@ -261,6 +270,21 @@ class InteractiveWorker:
             gc.collect()
             test_config_path.unlink(missing_ok=True)
             return False, f"error: {str(e)}"
+
+    def _can_retry_error_waiting_experiment(self, exp_id: str) -> Tuple[bool, str]:
+        """Direct memory test for error-waiting experiments (bypasses status checks)."""
+        # Load config and test memory directly
+        exp_file = Path(f"conf/experiments/{exp_id}.yaml")
+        exp_config = yaml.safe_load(exp_file.read_text())
+
+        can_run, message = self.test_experiment_memory(exp_config)
+
+        if can_run:
+            return True, "fits"
+        elif message == "out_of_memory":
+            return False, "oom"
+        else:
+            return False, message
 
     def can_launch_experiment(self, exp_id: str) -> Tuple[bool, str]:
         """Check if experiment can be launched."""
@@ -401,18 +425,27 @@ class InteractiveWorker:
             with open(log_file, "r") as f:
                 log_content = f.read()
 
-            # Look for error traceback
-            for pattern, error_type, is_recoverable, description in error_patterns:
-                match = re.search(pattern, log_content, re.IGNORECASE | re.DOTALL)
-                if match:
-                    # Extract surrounding context for better error message
-                    start = max(0, match.start() - 100)
-                    end = min(len(log_content), match.end() + 200)
-                    context = log_content[start:end].strip()
-                    return error_type, context, is_recoverable
+            # Look for error patterns - extract just the error line and message
+            lines = log_content.strip().split("\n")
+            for i, line in enumerate(lines):
+                for pattern, error_type, is_recoverable, _ in error_patterns:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        # Get clean error message from the error line
+                        error_msg = line.strip()
+
+                        # If next line contains additional error info, include it
+                        if i + 1 < len(lines):
+                            next_line = lines[i + 1].strip()
+                            if (
+                                next_line
+                                and not next_line.startswith(" ")
+                                and not next_line.startswith("Traceback")
+                            ):
+                                error_msg += ": " + next_line
+
+                        return error_type, error_msg, is_recoverable
 
             # Fallback: grab last few lines of log for unknown errors
-            lines = log_content.strip().split("\n")
             if len(lines) > 5:
                 context = "\n".join(lines[-5:])
                 return "unknown", context, False
@@ -476,10 +509,14 @@ class InteractiveWorker:
                 )
                 (results_marker / "RUNNING").unlink(missing_ok=True)
 
-                # Create failed marker if needed
+                # Create appropriate marker
                 if exp_state.status == "failed":
                     (results_marker / "FAILED").write_text(
                         f"Failed: {datetime.now().isoformat()}\n{exp_state.last_error}\n"
+                    )
+                elif exp_state.status == "stopped":
+                    (results_marker / "STOPPED").write_text(
+                        f"Stopped: {datetime.now().isoformat()}\nBy user request\n"
                     )
 
     def handle_error_waiting_experiments(self):
@@ -491,14 +528,18 @@ class InteractiveWorker:
 
                 wait_time = datetime.now() - exp_state.error_wait_start
 
-                # Periodically retry (every 60s)
-                if wait_time.total_seconds() % 60 < REFRESH_INTERVAL:
-                    can_launch, reason = self.can_launch_experiment(exp_id)
+                # Retry every 30 seconds (reliable timing)
+                retry_interval = 30
+                if int(wait_time.total_seconds()) % retry_interval < REFRESH_INTERVAL:
+                    can_launch, reason = self._can_retry_error_waiting_experiment(
+                        exp_id
+                    )
                     if can_launch:
                         exp_state.status = "pending"
                         exp_state.error_wait_start = None
                         exp_state.error_type = None
                         print(f"[{exp_id}] Issue resolved - ready to launch")
+                        self.display_needs_refresh = True
                         continue
 
                 # Hard timeout after 2 hours
@@ -520,6 +561,7 @@ class InteractiveWorker:
                             f"Timeout after {OOM_MAX_WAIT_HOURS}h waiting"
                         )
                         print(f"[{exp_id}] Failed: error wait timeout")
+                        self.display_needs_refresh = True
 
     def handle_oom_experiments(self):
         """Handle OOM experiments - retry when memory frees."""
@@ -595,7 +637,13 @@ class InteractiveWorker:
 
             # Add GPU memory if available
             if exp_state.gpu_memory_gb > 0:
-                line += f" GPU: {exp_state.gpu_memory_gb:.1f}GB"
+                if self.total_gpu_memory_gb > 0:
+                    percentage = (
+                        exp_state.gpu_memory_gb / self.total_gpu_memory_gb
+                    ) * 100
+                    line += f" GPU: {exp_state.gpu_memory_gb:.1f}/{self.total_gpu_memory_gb:.1f}GB ({percentage:.0f}%)"
+                else:
+                    line += f" GPU: {exp_state.gpu_memory_gb:.1f}GB"
 
             # Add elapsed time
             if exp_state.start_time:
@@ -630,19 +678,19 @@ class InteractiveWorker:
                 line += f" Waiting: {hours:02d}:{minutes:02d}:{seconds:02d}"
             line += f" (max: {OOM_MAX_WAIT_HOURS:02d}:00:00)"
 
-            # Show error type and brief message
+            # Show error type and message (truncated for display)
             if exp_state.error_type:
                 error_msg = (
-                    exp_state.last_error[:50] + "..."
-                    if exp_state.last_error and len(exp_state.last_error) > 50
+                    exp_state.last_error[:80] + "..."
+                    if exp_state.last_error and len(exp_state.last_error) > 80
                     else exp_state.last_error or "Unknown error"
                 )
                 line += f" [{exp_state.error_type.upper()}: {error_msg}]"
         elif exp_state.status == "failed":
             if exp_state.last_error:
                 error_msg = (
-                    exp_state.last_error[:50] + "..."
-                    if len(exp_state.last_error) > 50
+                    exp_state.last_error[:80] + "..."
+                    if len(exp_state.last_error) > 80
                     else exp_state.last_error
                 )
                 if exp_state.error_type:
@@ -774,13 +822,16 @@ class InteractiveWorker:
                 exp_state.stop_time = datetime.now()
                 print(f"[{exp_id}] Stopped by user")
 
-                # Remove running marker
+                # Remove running marker and create STOPPED marker
                 run_name = self.get_run_name(exp_id)
                 results_marker = (
                     Path("output/runs")
                     / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
                 )
                 (results_marker / "RUNNING").unlink(missing_ok=True)
+                (results_marker / "STOPPED").write_text(
+                    f"Stopped: {datetime.now().isoformat()}\nBy user request\n"
+                )
 
     def handle_restart_experiment(self, exp_id: str):
         """Handle restart experiment action."""
@@ -805,19 +856,20 @@ class InteractiveWorker:
             exp_state.status = "pending"
             exp_state.retry_count = 0
             exp_state.oom_wait_start = None
+            exp_state.error_wait_start = None
             exp_state.last_error = None
             exp_state.last_error_time = None
+            exp_state.error_type = None
             print(f"[{exp_id}] Restarted - output deleted")
 
     def handle_continue_experiment(self, exp_id: str):
         """Handle continue experiment action."""
         exp_state = self.experiments[exp_id]
 
-        # Just delete FAILED marker if it exists
+        # Delete FAILED and STOPPED markers if they exist
         output_path = self.get_output_path(exp_id)
-        failed_marker = output_path / "FAILED"
-        if failed_marker.exists():
-            failed_marker.unlink()
+        (output_path / "FAILED").unlink(missing_ok=True)
+        (output_path / "STOPPED").unlink(missing_ok=True)
 
         exp_state.status = "pending"
         print(f"[{exp_id}] Ready to continue from checkpoint")
@@ -829,24 +881,30 @@ class InteractiveWorker:
         # Navigation
         if key == "\x1b[A":  # Up arrow
             self._navigate_up()
+            self.display_needs_refresh = True
         elif key == "\x1b[B":  # Down arrow
             self._navigate_down()
+            self.display_needs_refresh = True
 
         # Experiment controls (only when experiment selected)
         elif self.selected_exp_id and key_lower == "s":
             self.handle_stop_experiment(self.selected_exp_id)
+            self.display_needs_refresh = True
         elif self.selected_exp_id and key == "R":
             self.handle_restart_experiment(self.selected_exp_id)
+            self.display_needs_refresh = True
         elif self.selected_exp_id and key_lower == "c":
             self.handle_continue_experiment(self.selected_exp_id)
+            self.display_needs_refresh = True
 
         # Worker controls
         elif key_lower == "p":
             self.worker_paused = not self.worker_paused
             status = "PAUSED" if self.worker_paused else "RESUMED"
             print(f"Worker {status}")
+            self.display_needs_refresh = True
         elif key_lower == "r":
-            pass  # Just refresh display
+            self.display_needs_refresh = True  # Just refresh display
         elif key_lower == "q":
             exp_info = {"exp_id": "worker", "run_name": "interactive worker"}
             if self.confirm_action(
@@ -901,38 +959,110 @@ class InteractiveWorker:
             if current_idx < len(exp_list) - 1:
                 self.selected_exp_id = exp_list[current_idx + 1].exp_id
 
-    def _update_gpu_memory(self):
-        """Query GPU memory for all running processes."""
+    def _get_total_gpu_memory(self):
+        """Get total GPU memory for percentage calculations."""
         try:
             result = subprocess.run(
                 [
                     "nvidia-smi",
-                    f"--id={self.gpu_rank}",  # Query only our GPU
-                    "--query-compute-apps=pid,used_memory",
+                    "--query-gpu=memory.total",
                     "--format=csv,noheader,nounits",
+                    f"--id={self.gpu_rank}",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=2,
             )
 
-            # Parse output: "12345, 2048" (pid, mem_MB)
-            for line in result.stdout.strip().splitlines():
-                if "," not in line:
-                    continue
-                parts = line.split(",")
-                pid = int(parts[0].strip())
-                mem_mb = float(parts[1].strip())
-                mem_gb = mem_mb / 1024.0
-
-                # Find matching experiment
-                for exp_state in self.experiments.values():
-                    if exp_state.pid == pid:
-                        exp_state.gpu_memory_gb = mem_gb
-                        break
-
+            if result.stdout.strip():
+                total_mb = float(result.stdout.strip())
+                self.total_gpu_memory_gb = total_mb / 1024.0
         except Exception:
-            pass  # Silently fail if nvidia-smi unavailable
+            # Fallback: try without --id flag
+            try:
+                result = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=memory.total",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+
+                if result.stdout.strip():
+                    lines = result.stdout.strip().split("\n")
+                    if len(lines) > self.gpu_rank:
+                        total_mb = float(lines[self.gpu_rank].strip())
+                        self.total_gpu_memory_gb = total_mb / 1024.0
+            except Exception:
+                pass  # Silently fail - will show memory without percentage
+
+    def _update_gpu_memory(self):
+        """Query GPU memory for all running processes."""
+        # Try different nvidia-smi query formats
+        queries = [
+            # Format 1: --id flag
+            [
+                "nvidia-smi",
+                f"--id={self.gpu_rank}",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            # Format 2: --gpu-id flag
+            [
+                "nvidia-smi",
+                f"--gpu-id={self.gpu_rank}",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            # Format 3: No GPU filter (parse all)
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory,gpu_id",
+                "--format=csv,noheader,nounits",
+            ],
+        ]
+
+        for query in queries:
+            try:
+                result = subprocess.run(
+                    query, capture_output=True, text=True, timeout=2
+                )
+
+                # Parse output: "12345, 2048" or "12345, 2048, 0"
+                for line in result.stdout.strip().splitlines():
+                    if not line.strip():
+                        continue
+
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 2:
+                        pid = int(parts[0])
+                        mem_mb = float(parts[1])
+
+                        # Check GPU ID if present (format 3)
+                        if len(parts) >= 3:
+                            gpu_id = int(parts[2])
+                            if gpu_id != self.gpu_rank:
+                                continue
+
+                        mem_gb = mem_mb / 1024.0
+
+                        # Find matching experiment
+                        for exp_state in self.experiments.values():
+                            if exp_state.pid == pid:
+                                exp_state.gpu_memory_gb = mem_gb
+                                break
+
+                # If we got results, break out of query loop
+                if result.stdout.strip():
+                    break
+
+            except Exception:
+                continue  # Try next query format
+
+        # Silently fail if all queries fail
 
     def _parse_training_logs(self, exp_id: str):
         """Parse recent training output for metrics."""
@@ -1014,6 +1144,7 @@ class InteractiveWorker:
                 if current_time - last_refresh >= REFRESH_INTERVAL:
                     self.load_experiments()
                     last_refresh = current_time
+                    self.display_needs_refresh = True
 
                 # Clean up finished processes
                 self.cleanup_finished_experiments()
@@ -1035,17 +1166,21 @@ class InteractiveWorker:
                     if exp_state.status == "running":
                         self._parse_training_logs(exp_id)
 
-                # Display status
-                self.display_status()
+                # Display status only when needed
+                if self.display_needs_refresh:
+                    self.display_status()
+                    self.display_needs_refresh = False
 
                 # Handle key input with timeout
                 key = None
                 start_time = time.time()
-                while time.time() - start_time < 1:  # 1 second timeout
+                while (
+                    time.time() - start_time < 0.1
+                ):  # 100ms timeout for faster response
                     key = self.get_key()
                     if key:
                         break
-                    time.sleep(0.1)
+                    time.sleep(0.01)
 
                 if key:
                     self.handle_key_input(key)
