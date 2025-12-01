@@ -74,11 +74,11 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
     servers_cfg = yaml.safe_load(servers_path.read_text())
     server_cfg = servers_cfg[server]
 
-    # Update output_dir to use server's consolidated path with server prefix
+    # Update output_dir to use server's output path with server prefix
     if "training_opts" in exp_config:
         run_name = exp_config["training_opts"]["run_name"]
         exp_config["training_opts"]["output_dir"] = (
-            f"{server_cfg['code_path']}/output/runs/{run_name}_{server}_gpu{gpu_rank}"
+            f"{server_cfg['output_path']}/runs/{run_name}_{server}_gpu{gpu_rank}"
         )
 
     # Compute processed_dir from server config + dataset_name
@@ -97,7 +97,7 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
 
     print(f"✓ Created {exp_id} for {server} GPU {gpu_rank}")
     print(f"  Config: glacier_mapping/conf/experiments/{conf_name}")
-    print(f"\nNext steps:")
+    print("\nNext steps:")
     print(f"  1. Edit config: vim glacier_mapping/conf/experiments/{conf_name}")
     print(f"  2. Commit: git add glacier_mapping/conf/experiments/{conf_name}")
     print(f"  3. Push: git commit -m 'Add {exp_id}' && git push")

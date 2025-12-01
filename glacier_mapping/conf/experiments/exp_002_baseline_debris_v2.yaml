@@ -7,7 +7,6 @@ training_opts:
   early_stopping: 100
   full_eval_every: 10
   num_viz_samples: 4
-  output_dir: /home/jperez/Python-Glacier-Mapping-by-Segmentation/output/runs/baseline_debris_v2_bilbo_gpu1
 loader_opts:
   batch_size: 8
   use_channels:

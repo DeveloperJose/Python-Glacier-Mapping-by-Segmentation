@@ -50,7 +50,14 @@ def get_experiment_status(
 
     # For local experiments, check local filesystem
     if server_name == "desktop":
-        results_dir = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
+        # Load servers config to get output path
+        servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
+        server_cfg = servers_cfg[server_name]
+        results_dir = (
+            Path(server_cfg["output_path"])
+            / "runs"
+            / f"{run_name}_{server_name}_gpu{gpu_rank}"
+        )
 
         if not results_dir.exists():
             return "pending"
@@ -88,7 +95,7 @@ def get_remote_experiment_status(
 
     # Check remote filesystem via SSH with debugging
     remote_results_dir = (
-        f"{server['code_path']}/output/runs/{run_name}_{server_name}_gpu{gpu_rank}"
+        f"{server['output_path']}/runs/{run_name}_{server_name}_gpu{gpu_rank}"
     )
 
     if debug:

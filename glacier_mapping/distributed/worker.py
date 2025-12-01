@@ -1,243 +1,890 @@
 #!/usr/bin/env python3
 """
-Worker script that runs on GPU servers.
-Finds and runs pending experiments assigned to this server and GPU.
+Interactive worker script that runs on GPU servers.
+Finds and runs pending experiments assigned to this server and GPU with full interactive control.
 
 Usage on server:
-  # One-shot (check once and exit) - runs on GPU 0
+  # Interactive mode (default)
+  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0
+
+  # Legacy modes (still supported)
   uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --once
-
-  # Loop mode (check every N seconds, default 60s = 1min)
   uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --loop 60
-
-  # Run workers for both GPUs on bilbo (in separate terminals)
-  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 0 --loop 60
-  uv run python -m glacier_mapping.distributed.worker --server bilbo --gpu 1 --loop 60
 """
 
 import argparse
 import gc
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
+import signal
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import yaml
 
+# Configuration constants
+OOM_MAX_WAIT_HOURS = 2
+OTHER_MAX_RETRIES = 2
+RETRY_DELAY_SECONDS = 60
+PROCESS_CHECK_INTERVAL = 5  # seconds
+REFRESH_INTERVAL = 10  # seconds
+CONFIRMATION_TIMEOUT = 30  # seconds
+LINE_WIDTH = 80
 
-def test_experiment_memory(
-    exp_config: dict, gpu_rank: int, server_name: str
-) -> tuple[bool, str]:
-    """
-    Test if an experiment can fit in GPU memory.
 
-    Uses Framework.from_config() and fetch_loaders() to simulate actual training:
-    - Load model
-    - Create data loaders
-    - Run one forward + backward + optimizer step
+class ExperimentState:
+    """Track state of a single experiment."""
 
-    Returns: (success: bool, message: str)
-    """
-    # Add glacier_mapping to path if needed
-    code_path = Path.cwd()
-    if str(code_path) not in sys.path:
-        sys.path.insert(0, str(code_path))
+    def __init__(self, exp_id: str):
+        self.exp_id = exp_id
+        self.process: Optional[subprocess.Popen] = None
+        self.status = (
+            "pending"  # pending, running, stopped, completed, failed, oom_waiting
+        )
+        self.start_time: Optional[datetime] = None
+        self.stop_time: Optional[datetime] = None
+        self.retry_count = 0
+        self.oom_wait_start: Optional[datetime] = None
+        self.last_error: Optional[str] = None
+        self.last_error_time: Optional[datetime] = None
+        self.pid: Optional[int] = None
+        self.gpu_memory_gb = 0.0
+        self.current_epoch = 0
+        self.current_loss = 0.0
+        self.log_file: Optional[Path] = None
+        self.last_log_pos = 0
 
-    from glacier_mapping.data.data import fetch_loaders
-    from glacier_mapping.core.frame import Framework
 
-    # Write test config to a temp file
-    test_config_path = Path("conf/unet_train_memtest.yaml")
-    test_config_path.write_text(
-        yaml.dump(exp_config, sort_keys=False, default_flow_style=False)
-    )
+class InteractiveWorker:
+    """Interactive worker with concurrent experiment execution."""
 
-    try:
-        # Set GPU device
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_rank)
-        torch.cuda.set_device(0)  # After CUDA_VISIBLE_DEVICES, we always use device 0
+    def __init__(self, server_name: str, gpu_rank: int):
+        self.server_name = server_name
+        self.gpu_rank = gpu_rank
+        self.experiments: Dict[str, ExperimentState] = {}
+        self.selected_exp_id: Optional[str] = None
+        self.worker_paused = False
+        self.running = True
 
-        print(f"  [Memory Test] Testing on GPU {gpu_rank}...")
-        print(f"  [Memory Test] CUDA available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"  [Memory Test] GPU name: {torch.cuda.get_device_name(0)}")
-            mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            print(f"  [Memory Test] GPU memory: {mem_gb:.2f} GB")
+        # VALIDATE: Must be run from glacier_mapping/ directory
+        if not Path("conf/servers.yaml").exists():
+            print("\n" + "=" * 80)
+            print("ERROR: Worker must be run from glacier_mapping/ directory")
+            print("=" * 80)
+            print("\nExpected usage:")
+            print("  cd glacier_mapping")
+            print(
+                "  uv run python -m glacier_mapping.distributed.worker --server <name> --gpu <N>"
+            )
+            print("\nCurrent directory:", Path.cwd())
+            print("=" * 80 + "\n")
+            sys.exit(1)
 
-        # Initialize framework (loads model)
-        frame = Framework.from_config(test_config_path, device=0)
+        # Load server configuration
+        self.servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
+        self.server = self.servers_cfg[server_name]
 
-        # Fetch loaders (simulates data loading)
-        train_loader, val_loader, test_loader = fetch_loaders(
-            processed_dir=str(exp_config["loader_opts"]["processed_dir"]),
-            batch_size=int(exp_config["loader_opts"]["batch_size"]),
-            use_channels=list(exp_config["loader_opts"]["use_channels"]),
-            output_classes=list(exp_config["loader_opts"]["output_classes"]),
-            class_names=list(exp_config["loader_opts"]["class_names"]),
-            normalize=str(exp_config["loader_opts"]["normalize"]),
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        self.running = False
+        self._cleanup_all_processes()
+        sys.exit(0)
+
+    def _cleanup_all_processes(self):
+        """Clean up all running processes."""
+        for exp_state in self.experiments.values():
+            if exp_state.process and exp_state.process.poll() is None:
+                try:
+                    exp_state.process.terminate()
+                    exp_state.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    exp_state.process.kill()
+
+    def get_key(self) -> Optional[str]:
+        """Get keypress, handling multi-byte escape sequences."""
+        import select
+
+        if sys.stdin not in select.select([sys.stdin], [], [], 0)[0]:
+            return None
+
+        ch = sys.stdin.read(1)
+
+        # Handle escape sequences (arrow keys, etc.)
+        if ch == "\x1b":
+            # Check if more bytes available (with short timeout)
+            if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
+                ch2 = sys.stdin.read(1)
+                if ch2 == "[":
+                    # Read final byte (A/B/C/D for arrows)
+                    if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
+                        ch3 = sys.stdin.read(1)
+                        return f"\x1b[{ch3}"  # Return full sequence
+                ch += ch2
+
+        return ch
+
+    def clear_screen(self):
+        """Clear screen and move cursor to top-left."""
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+    def print_raw(self, text: str = ""):
+        """Print in raw mode with proper line endings."""
+        sys.stdout.write(text + "\r\n")
+        sys.stdout.flush()
+
+    def load_experiments(self):
+        """Load all experiments from config files."""
+        conf_dir = Path("conf/experiments")
+        exp_files = sorted(conf_dir.glob("exp_*.yaml"))
+
+        for exp_file in exp_files:
+            exp_id = exp_file.stem
+            if exp_id not in self.experiments:
+                exp_config = yaml.safe_load(exp_file.read_text())
+
+                # Check if assigned to this server and GPU
+                if (
+                    exp_config.get("server") == self.server_name
+                    and exp_config.get("gpu_rank") == self.gpu_rank
+                ):
+                    exp_state = ExperimentState(exp_id)
+                    exp_state.status = self._get_experiment_status(exp_id, exp_config)
+                    self.experiments[exp_id] = exp_state
+
+    def _get_experiment_status(self, exp_id: str, exp_config: dict) -> str:
+        """Determine experiment status from filesystem."""
+        run_name = exp_config["training_opts"]["run_name"]
+        results_dir = (
+            Path("output/runs") / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
         )
 
-        # Test one training step
-        print("  [Memory Test] Running test forward + backward pass...")
-        loss_val = 0.0
-        for x, y_onehot, y_int in train_loader:
-            # Forward + backward (same as training)
-            y_hat, loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
-            frame.step()
-            loss_val = loss.item()
+        if not results_dir.exists():
+            return "pending"
 
-            # Only test one batch
-            break
+        if (results_dir / "FAILED").exists():
+            return "failed"
 
-        print(f"  [Memory Test] ✓ Success! Loss: {loss_val:.4f}")
+        if (results_dir / "checkpoints_summary.json").exists():
+            return "completed"
 
-        # Clean up
-        del frame
-        del train_loader, val_loader, test_loader
-        torch.cuda.empty_cache()
-        gc.collect()
+        if (results_dir / "RUNNING").exists():
+            return "running"
 
-        test_config_path.unlink(missing_ok=True)
-
-        return True, "success"
-
-    except torch.cuda.OutOfMemoryError:
-        print("  [Memory Test] ✗ Out of memory")
-
-        # Clean up
-        torch.cuda.empty_cache()
-        gc.collect()
-        test_config_path.unlink(missing_ok=True)
-
-        return False, "out_of_memory"
-
-    except Exception as e:
-        print(f"  [Memory Test] ✗ Error: {e}")
-
-        # Clean up
-        torch.cuda.empty_cache()
-        gc.collect()
-        test_config_path.unlink(missing_ok=True)
-
-        return False, f"error: {str(e)}"
-
-
-def get_experiment_status(
-    exp_id: str, server_name: str, gpu_rank: int, run_name: str
-) -> str:
-    """
-    Determine experiment status from filesystem.
-
-    Returns: 'pending' | 'running' | 'completed' | 'failed'
-    """
-    results_dir = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
-
-    if not results_dir.exists():
         return "pending"
 
-    if (results_dir / "FAILED").exists():
-        return "failed"
+    def get_run_name(self, exp_id: str) -> str:
+        """Get run name for experiment."""
+        exp_file = Path(f"conf/experiments/{exp_id}.yaml")
+        if exp_file.exists():
+            exp_config = yaml.safe_load(exp_file.read_text())
+            return exp_config["training_opts"]["run_name"]
+        return "unknown"
 
-    if (results_dir / "checkpoints_summary.json").exists():
-        return "completed"
+    def get_output_path(self, exp_id: str) -> Path:
+        """Get output path for experiment."""
+        run_name = self.get_run_name(exp_id)
+        return Path("output/runs") / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
 
-    return "running"
+    def test_experiment_memory(self, exp_config: dict) -> Tuple[bool, str]:
+        """Test if an experiment can fit in GPU memory."""
+        # Add glacier_mapping to path if needed
+        code_path = Path.cwd()
+        if str(code_path) not in sys.path:
+            sys.path.insert(0, str(code_path))
 
+        from glacier_mapping.data.data import fetch_loaders
+        from glacier_mapping.core.frame import Framework
 
-def get_next_experiment(server_name: str, gpu_rank: int):
-    """Find next pending experiment for this server and GPU."""
-    conf_dir = Path("conf/experiments")
+        # Write test config to a temp file
+        test_config_path = Path("conf/unet_train_memtest.yaml")
+        test_config_path.write_text(
+            yaml.dump(exp_config, sort_keys=False, default_flow_style=False)
+        )
 
-    # Find all experiment YAML files
-    exp_files = sorted(conf_dir.glob("exp_*.yaml"))
+        try:
+            # Set GPU device
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_rank)
+            torch.cuda.set_device(0)
 
-    for exp_file in exp_files:
-        exp_id = exp_file.stem
+            # Initialize framework
+            frame = Framework.from_config(test_config_path, device=0)
+
+            # Fetch loaders
+            train_loader, val_loader, test_loader = fetch_loaders(
+                processed_dir=str(exp_config["loader_opts"]["processed_dir"]),
+                batch_size=int(exp_config["loader_opts"]["batch_size"]),
+                use_channels=list(exp_config["loader_opts"]["use_channels"]),
+                output_classes=list(exp_config["loader_opts"]["output_classes"]),
+                class_names=list(exp_config["loader_opts"]["class_names"]),
+                normalize=str(exp_config["loader_opts"]["normalize"]),
+            )
+
+            # Test one training step
+            for x, y_onehot, y_int in train_loader:
+                y_hat, loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
+                frame.step()
+                break
+
+            # Clean up
+            del frame
+            del train_loader, val_loader, test_loader
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            test_config_path.unlink(missing_ok=True)
+            return True, "success"
+
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            gc.collect()
+            test_config_path.unlink(missing_ok=True)
+            return False, "out_of_memory"
+
+        except Exception as e:
+            torch.cuda.empty_cache()
+            gc.collect()
+            test_config_path.unlink(missing_ok=True)
+            return False, f"error: {str(e)}"
+
+    def can_launch_experiment(self, exp_id: str) -> Tuple[bool, str]:
+        """Check if experiment can be launched."""
+        exp_state = self.experiments[exp_id]
+
+        # Skip if not pending
+        if exp_state.status != "pending":
+            return False, "not_pending"
+
+        # Load config and test memory
+        exp_file = Path(f"conf/experiments/{exp_id}.yaml")
         exp_config = yaml.safe_load(exp_file.read_text())
 
-        # Check if assigned to this server and GPU
-        if exp_config.get("server") != server_name:
-            continue
+        can_run, message = self.test_experiment_memory(exp_config)
 
-        if exp_config.get("gpu_rank") != gpu_rank:
-            continue
+        if can_run:
+            return True, "fits"
+        elif message == "out_of_memory":
+            return False, "oom"
+        else:
+            return False, message
 
-        # Check status
+    def launch_experiment_async(self, exp_id: str):
+        """Launch experiment asynchronously."""
+        exp_file = Path(f"conf/experiments/{exp_id}.yaml")
+        exp_config = yaml.safe_load(exp_file.read_text())
+
+        # Set up log file
         run_name = exp_config["training_opts"]["run_name"]
-        status = get_experiment_status(exp_id, server_name, gpu_rank, run_name)
+        log_dir = (
+            Path(self.server["output_path"])
+            / "runs"
+            / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "worker_training.log"
 
-        if status == "pending":
-            return exp_id, exp_file, exp_config
-
-    return None, None, None
-
-
-def run_experiment(
-    server_name: str, gpu_rank: int, exp_id: str, exp_file: Path, exp_config: dict
-) -> bool:
-    """Execute the training experiment."""
-    servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
-    server = servers_cfg[server_name]
-
-    # Update paths for this server - use consolidated output structure
-    # The config already has correct paths from submit.py, just use as-is
-    # No need to modify paths since submit.py already set them correctly
-
-    print(f"\n[{exp_id}] Starting training on {server_name} GPU {gpu_rank}...")
-    print(f"[{exp_id}] Output: {exp_config['training_opts']['output_dir']}")
-
-    # Create marker to show running status
-    run_name = exp_config["training_opts"]["run_name"]
-    results_marker = Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
-    results_marker.mkdir(parents=True, exist_ok=True)
-    (results_marker / "RUNNING").write_text(f"Started: {datetime.now().isoformat()}\n")
-
-    # Run training with CUDA_VISIBLE_DEVICES set
-    try:
+        # Set up environment
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_rank)
-        # When CUDA_VISIBLE_DEVICES is set, we want to use device 0 in the subprocess
-        # This prevents "invalid device ordinal" errors
+        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_rank)
         env["GLACIER_MAPPING_DEVICE_OVERRIDE"] = "0"
 
-        # Convert experiment config path to be relative to code_path
-        # exp_file is relative to glacier_mapping/, need to make it relative to code_path
+        # Convert experiment config path
         exp_file_from_root = Path("glacier_mapping") / exp_file
 
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "python",
-                "-m",
-                "glacier_mapping.scripts.train",
-                "--config",
-                str(exp_file_from_root),
-            ],
-            cwd=server["code_path"],
-            env=env,
-            check=True,
-            capture_output=False,
+        try:
+            # Open log file for writing
+            log_f = open(log_file, "w")
+
+            process = subprocess.Popen(
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "-m",
+                    "glacier_mapping.scripts.train",
+                    "--config",
+                    str(exp_file_from_root),
+                ],
+                cwd=self.server["code_path"],
+                env=env,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            # Update experiment state
+            exp_state = self.experiments[exp_id]
+            exp_state.process = process
+            exp_state.pid = process.pid
+            exp_state.status = "running"
+            exp_state.start_time = datetime.now()
+            exp_state.log_file = log_file
+            exp_state.last_log_pos = 0
+
+            # Create running marker
+            (log_dir / "RUNNING").write_text(
+                f"Started: {datetime.now().isoformat()}\nPID: {process.pid}\n"
+            )
+
+            print(f"[{exp_id}] Launched successfully (PID: {process.pid})")
+            return True
+
+        except Exception as e:
+            print(f"[{exp_id}] Failed to launch: {e}")
+            return False
+
+    def cleanup_finished_experiments(self):
+        """Check and clean up finished processes."""
+        for exp_id, exp_state in list(self.experiments.items()):
+            if exp_state.process and exp_state.process.poll() is not None:
+                # Process finished
+                return_code = exp_state.process.returncode
+
+                if return_code == 0:
+                    exp_state.status = "completed"
+                    print(f"[{exp_id}] ✓ Completed successfully")
+                else:
+                    exp_state.status = "failed"
+                    exp_state.last_error = f"Exit code: {return_code}"
+                    exp_state.last_error_time = datetime.now()
+                    print(f"[{exp_id}] ✗ Failed with exit code {return_code}")
+
+                exp_state.stop_time = datetime.now()
+                exp_state.process = None
+                exp_state.pid = None
+
+                # Remove running marker
+                run_name = self.get_run_name(exp_id)
+                results_marker = (
+                    Path("output/runs")
+                    / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+                )
+                (results_marker / "RUNNING").unlink(missing_ok=True)
+
+                # Create failed marker if needed
+                if exp_state.status == "failed":
+                    (results_marker / "FAILED").write_text(
+                        f"Failed: {datetime.now().isoformat()}\n{exp_state.last_error}\n"
+                    )
+
+    def handle_oom_experiments(self):
+        """Handle OOM experiments - retry when memory frees."""
+        for exp_id, exp_state in self.experiments.items():
+            if exp_state.status == "oom_waiting":
+                if exp_state.oom_wait_start is None:
+                    exp_state.oom_wait_start = datetime.now()
+
+                wait_time = datetime.now() - exp_state.oom_wait_start
+
+                # Strategy 1: Periodically retry (every 60s)
+                if wait_time.total_seconds() % 60 < REFRESH_INTERVAL:
+                    # Try launching again (will test memory)
+                    can_launch, reason = self.can_launch_experiment(exp_id)
+                    if can_launch:
+                        exp_state.status = "pending"  # Reset to pending
+                        exp_state.oom_wait_start = None
+                        print(f"[{exp_id}] Memory freed - ready to launch")
+                        continue
+
+                # Strategy 2: Hard timeout after 2 hours
+                if wait_time.total_seconds() > OOM_MAX_WAIT_HOURS * 3600:
+                    # Check if this is the only pending/waiting experiment
+                    waiting_count = len(
+                        [
+                            s
+                            for s in self.experiments.values()
+                            if s.status in ["oom_waiting", "pending"]
+                        ]
+                    )
+                    running_count = len(
+                        [s for s in self.experiments.values() if s.status == "running"]
+                    )
+
+                    # Only fail if this is the only one left AND nothing running
+                    if waiting_count == 1 and running_count == 0:
+                        exp_state.status = "failed"
+                        exp_state.last_error = (
+                            f"OOM after {OOM_MAX_WAIT_HOURS}h with no memory freed"
+                        )
+                        exp_state.last_error_time = datetime.now()
+                        print(f"[{exp_id}] Failed: OOM timeout")
+
+    def get_experiments_by_status(self) -> Dict[str, List[ExperimentState]]:
+        """Group experiments by status."""
+        groups = {
+            "running": [],
+            "pending": [],
+            "oom_waiting": [],
+            "stopped": [],
+            "failed": [],
+            "completed": [],
+        }
+
+        for exp_state in self.experiments.values():
+            if exp_state.status in groups:
+                groups[exp_state.status].append(exp_state)
+
+        return groups
+
+    def format_experiment_line(
+        self, exp_state: ExperimentState, is_selected: bool
+    ) -> str:
+        """Format a single experiment line for display."""
+        prefix = "> " if is_selected else "  "
+
+        # Basic info
+        line = f"{prefix}{exp_state.exp_id:<18}"
+
+        if exp_state.status == "running":
+            line += f" [PID: {exp_state.pid or '???':<5}]"
+
+            # Add GPU memory if available
+            if exp_state.gpu_memory_gb > 0:
+                line += f" GPU: {exp_state.gpu_memory_gb:.1f}GB"
+
+            # Add elapsed time
+            if exp_state.start_time:
+                elapsed = datetime.now() - exp_state.start_time
+                hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                line += f" Time: {hours:02d}:{minutes:02d}:{seconds:02d}"
+
+            # Add current loss if available
+            if exp_state.current_loss > 0:
+                line += f" Loss: {exp_state.current_loss:.3f}"
+
+        elif exp_state.status == "pending":
+            line += " Memory test: pending..."
+
+        elif exp_state.status == "oom_waiting":
+            if exp_state.oom_wait_start:
+                wait_time = datetime.now() - exp_state.oom_wait_start
+                hours, remainder = divmod(int(wait_time.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                line += f" Waiting: {hours:02d}:{minutes:02d}:{seconds:02d}"
+            line += f" (max: {OOM_MAX_WAIT_HOURS:02d}:00:00)"
+
+        elif exp_state.status == "stopped":
+            line += " Stopped by user"
+
+        elif exp_state.status == "failed":
+            if exp_state.last_error:
+                error_msg = (
+                    exp_state.last_error[:50] + "..."
+                    if len(exp_state.last_error) > 50
+                    else exp_state.last_error
+                )
+                line += f" [Error: {error_msg}]"
+            if exp_state.retry_count > 0:
+                line += f" Retries: {exp_state.retry_count}/{OTHER_MAX_RETRIES}"
+
+        elif exp_state.status == "completed":
+            line += " ✓ Completed"
+
+        return line
+
+    def display_status(self):
+        """Display main status screen."""
+        self.clear_screen()
+
+        # Header
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        groups = self.get_experiments_by_status()
+
+        status_line = f"Status: {'PAUSED' if self.worker_paused else 'RUNNING'}"
+        status_line += (
+            f" ({len(groups['running'])} active, {len(groups['pending'])} pending"
         )
-        print(f"\n[{exp_id}] ✓ Training completed successfully!")
+        status_line += f", {len(groups['oom_waiting'])} OOM-waiting)"
 
-        # Remove running marker
-        (results_marker / "RUNNING").unlink(missing_ok=True)
+        self.print_raw("=" * LINE_WIDTH)
+        self.print_raw(
+            f"INTERACTIVE WORKER MODE - {self.server_name} GPU {self.gpu_rank} - Last updated: {timestamp}"
+        )
+        self.print_raw(status_line)
+        self.print_raw("=" * LINE_WIDTH)
+        self.print_raw()
 
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"\n[{exp_id}] ✗ Training failed with exit code {e.returncode}")
+        # Display experiments by status
+        status_order = [
+            "running",
+            "pending",
+            "oom_waiting",
+            "stopped",
+            "failed",
+            "completed",
+        ]
+        status_labels = {
+            "running": "RUNNING",
+            "pending": "PENDING",
+            "oom_waiting": "OOM-WAITING",
+            "stopped": "STOPPED",
+            "failed": "FAILED",
+            "completed": "COMPLETED",
+        }
 
-        # Mark as failed
-        (results_marker / "RUNNING").unlink(missing_ok=True)
-        (results_marker / "FAILED").write_text(
-            f"Failed: {datetime.now().isoformat()}\nExit code: {e.returncode}\n"
+        for status in status_order:
+            exp_list = groups[status]
+            if exp_list:
+                self.print_raw(f"{status_labels[status]} ({len(exp_list)}):")
+                for exp_state in exp_list:
+                    is_selected = exp_state.exp_id == self.selected_exp_id
+                    line = self.format_experiment_line(exp_state, is_selected)
+                    self.print_raw(line)
+                self.print_raw()
+
+        # Controls
+        self.print_raw("=" * LINE_WIDTH)
+        self.print_raw("Experiment Controls: [s]top | [R]estart | [c]ontinue")
+        self.print_raw("Worker Controls:    [p]ause | [r]efresh | [q]uit")
+        self.print_raw("Navigation:         [↑↓]select")
+        self.print_raw("=" * LINE_WIDTH)
+
+    def confirm_action(
+        self,
+        action_description: str,
+        experiment_info: Optional[dict] = None,
+        warning: Optional[str] = None,
+    ) -> bool:
+        """Show confirmation dialog and return True/False."""
+        self.clear_screen()
+        self.print_raw("=" * LINE_WIDTH)
+        self.print_raw("CONFIRMATION REQUIRED")
+        self.print_raw("=" * LINE_WIDTH)
+        self.print_raw(f"Action: {action_description}")
+
+        if experiment_info:
+            self.print_raw(
+                f"Experiment: {experiment_info['exp_id']} ({experiment_info['run_name']})"
+            )
+            if "output_path" in experiment_info:
+                self.print_raw(f"Output path: {experiment_info['output_path']}/")
+
+        if warning:
+            self.print_raw(f"Warning: {warning}")
+
+        self.print_raw()
+        self.print_raw("Are you sure? [y]es / [n]o (default: no)")
+        self.print_raw("=" * LINE_WIDTH)
+
+        # Get user input with timeout
+        start_time = time.time()
+        while time.time() - start_time < CONFIRMATION_TIMEOUT:
+            key = self.get_key()
+            if key:
+                if key.lower() == "y":
+                    return True
+                elif (
+                    key.lower() == "n" or key == "\r" or key == "\x1b"
+                ):  # Enter or Escape
+                    return False
+            time.sleep(0.1)
+
+        return False  # Timeout = no
+
+    def handle_stop_experiment(self, exp_id: str):
+        """Handle stop experiment action."""
+        exp_state = self.experiments[exp_id]
+        exp_info = {"exp_id": exp_id, "run_name": self.get_run_name(exp_id)}
+
+        warning = "This will terminate the running process and mark as stopped.\n"
+        warning += "Note: You can resume and continue from the last checkpoint later if you want."
+
+        if self.confirm_action("Stop running experiment", exp_info, warning):
+            if exp_state.process:
+                exp_state.process.terminate()
+                exp_state.status = "stopped"
+                exp_state.stop_time = datetime.now()
+                print(f"[{exp_id}] Stopped by user")
+
+                # Remove running marker
+                run_name = self.get_run_name(exp_id)
+                results_marker = (
+                    Path("output/runs")
+                    / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+                )
+                (results_marker / "RUNNING").unlink(missing_ok=True)
+
+    def handle_restart_experiment(self, exp_id: str):
+        """Handle restart experiment action."""
+        exp_state = self.experiments[exp_id]
+        exp_info = {
+            "exp_id": exp_id,
+            "run_name": self.get_run_name(exp_id),
+            "output_path": str(self.get_output_path(exp_id)),
+        }
+
+        warning = (
+            "This will permanently delete all training progress, checkpoints, and logs!"
         )
 
-        return False
+        if self.confirm_action("Restart experiment (clean slate)", exp_info, warning):
+            # Delete output directory
+            output_path = self.get_output_path(exp_id)
+            if output_path.exists():
+                shutil.rmtree(output_path)
+
+            # Reset state
+            exp_state.status = "pending"
+            exp_state.retry_count = 0
+            exp_state.oom_wait_start = None
+            exp_state.last_error = None
+            exp_state.last_error_time = None
+            print(f"[{exp_id}] Restarted - output deleted")
+
+    def handle_continue_experiment(self, exp_id: str):
+        """Handle continue experiment action."""
+        exp_state = self.experiments[exp_id]
+
+        # Just delete FAILED marker if it exists
+        output_path = self.get_output_path(exp_id)
+        failed_marker = output_path / "FAILED"
+        if failed_marker.exists():
+            failed_marker.unlink()
+
+        exp_state.status = "pending"
+        print(f"[{exp_id}] Ready to continue from checkpoint")
+
+    def handle_key_input(self, key: str):
+        """Handle keyboard input."""
+        key_lower = key.lower()
+
+        # Navigation
+        if key == "\x1b[A":  # Up arrow
+            self._navigate_up()
+        elif key == "\x1b[B":  # Down arrow
+            self._navigate_down()
+
+        # Experiment controls (only when experiment selected)
+        elif self.selected_exp_id and key_lower == "s":
+            self.handle_stop_experiment(self.selected_exp_id)
+        elif self.selected_exp_id and key == "R":
+            self.handle_restart_experiment(self.selected_exp_id)
+        elif self.selected_exp_id and key_lower == "c":
+            self.handle_continue_experiment(self.selected_exp_id)
+
+        # Worker controls
+        elif key_lower == "p":
+            self.worker_paused = not self.worker_paused
+            status = "PAUSED" if self.worker_paused else "RESUMED"
+            print(f"Worker {status}")
+        elif key_lower == "r":
+            pass  # Just refresh display
+        elif key_lower == "q":
+            exp_info = {"exp_id": "worker", "run_name": "interactive worker"}
+            if self.confirm_action(
+                "Quit worker",
+                exp_info,
+                "This will stop the worker and all running experiments.",
+            ):
+                self.running = False
+                self._cleanup_all_processes()
+
+    def _navigate_up(self):
+        """Navigate up through experiments."""
+        exp_list = list(self.experiments.values())
+        if not exp_list:
+            return
+
+        if self.selected_exp_id is None:
+            # Select first experiment
+            self.selected_exp_id = exp_list[0].exp_id
+        else:
+            # Find current index and select previous
+            current_idx = next(
+                (
+                    i
+                    for i, exp in enumerate(exp_list)
+                    if exp.exp_id == self.selected_exp_id
+                ),
+                0,
+            )
+            if current_idx > 0:
+                self.selected_exp_id = exp_list[current_idx - 1].exp_id
+
+    def _navigate_down(self):
+        """Navigate down through experiments."""
+        exp_list = list(self.experiments.values())
+        if not exp_list:
+            return
+
+        if self.selected_exp_id is None:
+            # Select first experiment
+            self.selected_exp_id = exp_list[0].exp_id
+        else:
+            # Find current index and select next
+            current_idx = next(
+                (
+                    i
+                    for i, exp in enumerate(exp_list)
+                    if exp.exp_id == self.selected_exp_id
+                ),
+                0,
+            )
+            if current_idx < len(exp_list) - 1:
+                self.selected_exp_id = exp_list[current_idx + 1].exp_id
+
+    def _update_gpu_memory(self):
+        """Query GPU memory for all running processes."""
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    f"--id={self.gpu_rank}",  # Query only our GPU
+                    "--query-compute-apps=pid,used_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+
+            # Parse output: "12345, 2048" (pid, mem_MB)
+            for line in result.stdout.strip().splitlines():
+                if "," not in line:
+                    continue
+                parts = line.split(",")
+                pid = int(parts[0].strip())
+                mem_mb = float(parts[1].strip())
+                mem_gb = mem_mb / 1024.0
+
+                # Find matching experiment
+                for exp_state in self.experiments.values():
+                    if exp_state.pid == pid:
+                        exp_state.gpu_memory_gb = mem_gb
+                        break
+
+        except Exception:
+            pass  # Silently fail if nvidia-smi unavailable
+
+    def _parse_training_logs(self, exp_id: str):
+        """Parse recent training output for metrics."""
+        exp_state = self.experiments[exp_id]
+
+        if not exp_state.log_file or not exp_state.log_file.exists():
+            return
+
+        try:
+            with open(exp_state.log_file, "r") as f:
+                # Seek to last read position
+                f.seek(exp_state.last_log_pos)
+                new_lines = f.readlines()
+                exp_state.last_log_pos = f.tell()
+
+            # Parse patterns (most recent wins)
+            for line in new_lines:
+                # Pattern 1: "===== Epoch 5 Summary ====="
+                epoch_match = re.search(r"Epoch (\d+) Summary", line)
+                if epoch_match:
+                    exp_state.current_epoch = int(epoch_match.group(1))
+
+                # Pattern 2: "Val Ep=5 Step=10 Loss=0.234 Avg=0.245"
+                loss_match = re.search(r"Avg=(\d+\.\d+)", line)
+                if loss_match:
+                    exp_state.current_loss = float(loss_match.group(1))
+
+        except Exception:
+            pass  # Silently fail - not critical
+
+    def try_launch_experiments(self):
+        """Try to launch pending experiments that fit in memory."""
+        if self.worker_paused:
+            return
+
+        # Get list of pending experiments
+        pending_experiments = [
+            exp_id
+            for exp_id, exp_state in self.experiments.items()
+            if exp_state.status == "pending"
+        ]
+
+        for exp_id in pending_experiments:
+            can_launch, reason = self.can_launch_experiment(exp_id)
+
+            if can_launch:
+                self.launch_experiment_async(exp_id)
+            elif reason == "oom":
+                # Mark as OOM waiting
+                exp_state = self.experiments[exp_id]
+                if exp_state.status != "oom_waiting":
+                    exp_state.status = "oom_waiting"
+                    exp_state.oom_wait_start = datetime.now()
+                    print(f"[{exp_id}] Out of memory, waiting...")
+            else:
+                # Other error - mark as failed
+                exp_state = self.experiments[exp_id]
+                exp_state.status = "failed"
+                exp_state.last_error = f"Memory test failed: {reason}"
+                exp_state.last_error_time = datetime.now()
+                print(f"[{exp_id}] Memory test failed: {reason}")
+
+    def run_interactive(self):
+        """Main interactive worker loop."""
+        # Set up terminal for non-blocking input
+        import termios
+        import tty
+
+        old_settings = termios.tcgetattr(sys.stdin)
+        last_refresh = time.time()
+
+        try:
+            tty.setraw(sys.stdin.fileno())
+
+            while self.running:
+                current_time = time.time()
+
+                # Load experiments periodically
+                if current_time - last_refresh >= REFRESH_INTERVAL:
+                    self.load_experiments()
+                    last_refresh = current_time
+
+                # Clean up finished processes
+                self.cleanup_finished_experiments()
+
+                # Handle OOM experiments
+                self.handle_oom_experiments()
+
+                # Try to launch new experiments
+                self.try_launch_experiments()
+
+                # Update GPU memory for running experiments
+                self._update_gpu_memory()
+
+                # Parse logs for all running experiments
+                for exp_id, exp_state in self.experiments.items():
+                    if exp_state.status == "running":
+                        self._parse_training_logs(exp_id)
+
+                # Display status
+                self.display_status()
+
+                # Handle key input with timeout
+                key = None
+                start_time = time.time()
+                while time.time() - start_time < 1:  # 1 second timeout
+                    key = self.get_key()
+                    if key:
+                        break
+                    time.sleep(0.1)
+
+                if key:
+                    self.handle_key_input(key)
+
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            self.clear_screen()
+            print("👋 Exiting interactive worker")
 
 
 def git_pull() -> None:
@@ -254,119 +901,10 @@ def git_pull() -> None:
         print(f"WARNING: Git pull failed: {e.stderr}")
 
 
-def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) -> None:
-    """
-    Main worker loop.
-
-    Checks for pending experiments assigned to this server + GPU.
-    Tests memory before running, waits and retries on OOM.
-    """
-    print(f"\n{'=' * 80}")
-    print(f"WORKER STARTING: {server_name} GPU {gpu_rank}")
-    print(f"Mode: {'one-shot' if interval is None else f'loop (every {interval}s)'}")
-    print(f"{'=' * 80}\n")
-
-    # Track retry counts for OOM experiments
-    oom_retry_counts = {}
-    max_retries = 5
-    retry_wait_seconds = 60
-
-    while True:
-        # Git pull to get latest experiments
-        git_pull()
-
-        # Get next experiment
-        exp_id, exp_file, exp_config = get_next_experiment(server_name, gpu_rank)
-
-        if exp_id is not None and exp_file is not None and exp_config is not None:
-            print(f"\n{'=' * 80}")
-            print(f"Found experiment: {exp_id}")
-            print(f"Config: {exp_file}")
-            print(f"Server: {server_name} GPU: {gpu_rank}")
-            print(f"{'=' * 80}")
-
-            # Test memory first
-            print(f"\n[{exp_id}] Testing GPU memory before launch...")
-            can_run, message = test_experiment_memory(exp_config, gpu_rank, server_name)
-
-            if can_run:
-                print(f"[{exp_id}] Memory test passed, launching training...")
-
-                # Reset retry count on success
-                oom_retry_counts.pop(exp_id, None)
-
-                # Run experiment
-                success = run_experiment(
-                    server_name, gpu_rank, exp_id, exp_file, exp_config
-                )
-
-                if success:
-                    print(f"[{exp_id}] ✓ Training completed successfully!")
-                    print(
-                        f"[{exp_id}] Results available at: {exp_config['training_opts']['output_dir']}"
-                    )
-                    print(
-                        f"[{exp_id}] Use monitor.py --sync-all to pull results to desktop"
-                    )
-            else:
-                # OOM or error
-                if message == "out_of_memory":
-                    # Track retry count
-                    retries = oom_retry_counts.get(exp_id, 0)
-                    oom_retry_counts[exp_id] = retries + 1
-
-                    if retries < max_retries:
-                        print(
-                            f"[{exp_id}] Out of memory (retry {retries + 1}/{max_retries})"
-                        )
-                        print(
-                            f"[{exp_id}] Waiting {retry_wait_seconds}s before retry..."
-                        )
-                        time.sleep(retry_wait_seconds)
-                        continue  # Try again immediately
-                    else:
-                        print(
-                            f"[{exp_id}] Out of memory after {max_retries} retries, skipping"
-                        )
-                        # Mark as failed
-                        run_name = exp_config["training_opts"]["run_name"]
-                        results_marker = (
-                            Path("output/runs")
-                            / f"{run_name}_{server_name}_gpu{gpu_rank}"
-                        )
-                        results_marker.mkdir(parents=True, exist_ok=True)
-                        (results_marker / "FAILED").write_text(
-                            f"Failed: {datetime.now().isoformat()}\n"
-                            f"Reason: Out of memory after {max_retries} retries\n"
-                        )
-                        oom_retry_counts.pop(exp_id, None)
-                else:
-                    print(f"[{exp_id}] Memory test failed: {message}")
-                    # Mark as failed
-                    run_name = exp_config["training_opts"]["run_name"]
-                    results_marker = (
-                        Path("output/runs") / f"{run_name}_{server_name}_gpu{gpu_rank}"
-                    )
-                    results_marker.mkdir(parents=True, exist_ok=True)
-                    (results_marker / "FAILED").write_text(
-                        f"Failed: {datetime.now().isoformat()}\n"
-                        f"Reason: Memory test failed - {message}\n"
-                    )
-        else:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(
-                f"[{timestamp}] No pending experiments for {server_name} GPU {gpu_rank}"
-            )
-
-        if interval is None:
-            break  # One-shot mode
-
-        print(f"\nSleeping for {interval}s...\n")
-        time.sleep(interval)
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Distributed experiment worker")
+    parser = argparse.ArgumentParser(
+        description="Interactive distributed experiment worker"
+    )
     parser.add_argument(
         "--server",
         required=True,
@@ -379,18 +917,11 @@ if __name__ == "__main__":
         required=True,
         help="GPU rank to use (0 or 1 for bilbo, 0 for desktop)",
     )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run once and exit (default: loop)",
-    )
-    parser.add_argument(
-        "--loop",
-        type=int,
-        default=60,
-        help="Loop interval in seconds (default: 60)",
-    )
     args = parser.parse_args()
 
-    interval = None if args.once else args.loop
-    worker_loop(args.server, args.gpu, interval)
+    # Git pull to get latest experiments
+    git_pull()
+
+    # Run interactive worker
+    worker = InteractiveWorker(args.server, args.gpu)
+    worker.run_interactive()

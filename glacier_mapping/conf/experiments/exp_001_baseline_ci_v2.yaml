@@ -7,7 +7,6 @@ training_opts:
   early_stopping: 100
   full_eval_every: 10
   num_viz_samples: 4
-  output_dir: /home/devj/local-debian/Python-Glacier-Mapping-by-Segmentation/output/runs/baseline_ci_v2_desktop_gpu0
 loader_opts:
   batch_size: 8
   use_channels:
