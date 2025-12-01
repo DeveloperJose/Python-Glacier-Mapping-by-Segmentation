@@ -1,14 +1,16 @@
 # Prediction configuration
-gpu_rank: 0
+gpu_rank: cpu
 visualization:
   mode: "scaled"
   max_width: 2400
 
 # Model references
-cleanice:
-  run_name: "replicate_bibek_cleanice_all_channels_v2"
-  threshold: 0.5
+# cleanice:
+#   run_name: "replicate_bibek_cleanice_all_channels_v2"
+#   threshold: 0.5
 
 debris:
-  run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
+  # run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
+  run_name: "baseline_debris_v2_bilbo_gpu1"
   threshold: 0.5
+  model_type: "best"

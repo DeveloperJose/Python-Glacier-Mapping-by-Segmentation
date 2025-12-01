@@ -18,6 +18,7 @@ Also produces:
 import argparse
 import yaml
 import pathlib
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from addict import Dict
@@ -667,22 +668,23 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     """Load prediction config and construct paths from servers.yaml"""
     config = Dict(yaml.safe_load(open(config_path)))
 
-    # Get script directory to find servers.yaml
-    script_dir = pathlib.Path(__file__).parent
-    servers_path = script_dir / "conf" / "servers.yaml"
-    servers_cfg = Dict(yaml.safe_load(open(servers_path)))
+    # Load server paths using relative path from working directory
+    servers_cfg = Dict(yaml.safe_load(Path("conf/servers.yaml").read_text()))
     server = servers_cfg[server_name]
 
-    # Auto-generate prediction name from model runs
-    cleanice_run = config.cleanice.run_name
-    debris_run = config.debris.run_name
-    prediction_name = f"{cleanice_run}_{debris_run}"
+    # Auto-generate prediction name from model runs (handle missing sections)
+    run_names = []
+    if "cleanice" in config:
+        run_names.append(config.cleanice.run_name)
+    if "debris" in config:
+        run_names.append(config.debris.run_name)
+    prediction_name = "_".join(run_names)
 
-    # Construct paths
-    config.runs_dir = f"{server.code_path}/output/runs"
-    config.output_dir = f"{server.code_path}/output/predictions/{prediction_name}"
+    # Construct paths using output_path instead of code_path
+    config.runs_dir = f"{server.output_path}/runs"
+    config.output_dir = f"{server.output_path}/predictions/{prediction_name}"
 
-    return config
+    return config, server
 
 
 if __name__ == "__main__":
@@ -693,12 +695,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load config with server paths
-    script_dir = pathlib.Path(__file__).parent
-    config_path = script_dir / "conf" / "unet_predict.yaml"
-    conf = load_config_with_server_paths(config_path, args.server)
+    config_path = Path("conf/unet_predict.yaml")
+    conf, server = load_config_with_server_paths(config_path, args.server)
 
     # Get GPU device
-    gpu = int(conf.get("gpu_rank", 0))
+    gpu = conf.get("gpu_rank", 0)
+    if isinstance(gpu, str) and gpu.lower() == "cpu":
+        gpu = "cpu"
+    else:
+        gpu = int(gpu)
 
     runs_dir = pathlib.Path(conf.runs_dir)
     out_root = pathlib.Path(conf.output_dir)
@@ -855,11 +860,20 @@ if __name__ == "__main__":
                 frame_ci = Framework.from_checkpoint(
                     ci_ckpt_path, device=gpu, testing=True
                 )
+                # Update processed_dir to use current server's data path
+                original_dir = Path(frame_ci.loader_opts.processed_dir).name
+                frame_ci.loader_opts.processed_dir = str(Path(server.processed_data_path) / original_dir)
 
             if has_deb:
                 # print(f"Loading Debris: {deb_ckpt_path}")
+# Update processed_dir to use current server's data path
+                # First load checkpoint state to get original path
+                state = torch.load(deb_ckpt_path, map_location='cpu', weights_only=False)
+                original_dir = Path(state["loader_opts"].processed_dir).name
+                new_processed_dir = str(Path(server.processed_data_path) / original_dir)
+                
                 frame_deb = Framework.from_checkpoint(
-                    deb_ckpt_path, device=gpu, testing=True
+                    deb_ckpt_path, device=gpu, testing=True, new_data_path=new_processed_dir
                 )
 
             # Get test tiles (from whichever model was loaded)
