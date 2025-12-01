@@ -93,12 +93,12 @@ def get_batch_remote_experiment_status(
     server_name: str, experiments: list[tuple[str, str, int, str]], debug: bool = False
 ) -> dict[str, str]:
     """Check multiple experiments on remote server via single SSH call.
-    
+
     Args:
         server_name: Name of the remote server
         experiments: List of (exp_id, run_name, gpu_rank, expected_dir_name) tuples
         debug: Enable debug output
-        
+
     Returns:
         Dict mapping exp_id to status ('pending', 'running', 'completed', 'failed')
     """
@@ -114,17 +114,17 @@ def get_batch_remote_experiment_status(
 
     # Build batch SSH command to check all experiments at once
     output_path = server["output_path"]
-    
+
     # Create shell script to check all experiment directories
     batch_script = """
 # Create expected directory lookup
 declare -A exp_dirs
 """
-    
+
     # Add directory mappings for each experiment
     for exp_id, run_name, gpu_rank, expected_dir in experiments:
         batch_script += f'exp_dirs["{expected_dir}"]="{exp_id}"\n'
-    
+
     batch_script += f"""
 # Check all experiment directories
 for exp_dir in {output_path}/runs/*_{server_name}_gpu*; do
@@ -149,29 +149,31 @@ done
 
 # Check for missing experiments (directories that don't exist)
 """
-    
+
     # Add checks for missing directories
     for exp_id, run_name, gpu_rank, expected_dir in experiments:
         full_path = f"{output_path}/runs/{expected_dir}"
-        batch_script += f'if [ ! -d "{full_path}" ]; then echo "{exp_id}:DIRECTORY_MISSING"; fi\n'
-    
+        batch_script += (
+            f'if [ ! -d "{full_path}" ]; then echo "{exp_id}:DIRECTORY_MISSING"; fi\n'
+        )
+
     ssh_cmd = ["ssh", server["ssh_host"], batch_script]
 
     try:
         result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
         output = result.stdout.strip()
-        
+
         if debug:
             print(f"DEBUG: {server_name} batch output:\n{output}")
 
         # Parse output: format "exp_id:STATUS"
         results = {}
-        for line in output.split('\n'):
-            if ':' in line:
-                exp_id, status = line.split(':', 1)
+        for line in output.split("\n"):
+            if ":" in line:
+                exp_id, status = line.split(":", 1)
                 exp_id = exp_id.strip()
                 status = status.strip()
-                
+
                 # Map status to our standard format
                 if status == "DIRECTORY_MISSING":
                     results[exp_id] = "pending"
@@ -183,16 +185,20 @@ done
                     results[exp_id] = "running"
                 else:
                     if debug:
-                        print(f"DEBUG: {server_name} unknown status for {exp_id}: {status}")
+                        print(
+                            f"DEBUG: {server_name} unknown status for {exp_id}: {status}"
+                        )
                     results[exp_id] = "pending"
-        
+
         # Ensure all experiments have a status (default to pending)
         for exp_id, _, _, _ in experiments:
             if exp_id not in results:
                 if debug:
-                    print(f"DEBUG: {server_name} no status for {exp_id}, defaulting to pending")
+                    print(
+                        f"DEBUG: {server_name} no status for {exp_id}, defaulting to pending"
+                    )
                 results[exp_id] = "pending"
-        
+
         return results
 
     except subprocess.TimeoutExpired:
@@ -201,7 +207,9 @@ done
         return {exp_id: "pending" for exp_id, _, _, _ in experiments}
     except Exception as e:
         if debug:
-            print(f"DEBUG: {server_name} batch SSH error: {e} - all experiments pending")
+            print(
+                f"DEBUG: {server_name} batch SSH error: {e} - all experiments pending"
+            )
         return {exp_id: "pending" for exp_id, _, _, _ in experiments}
 
 
@@ -276,11 +284,11 @@ def process_desktop_experiments(
 ) -> dict[str, str]:
     """Process desktop experiments locally (no SSH needed)."""
     results = {}
-    
+
     for exp_id, exp_config, exp_file_name in experiments:
         gpu_rank = exp_config.get("gpu_rank", 0)
         run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
-        
+
         # Load servers config to get output path
         servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
         server_cfg = servers_cfg["desktop"]
@@ -298,7 +306,7 @@ def process_desktop_experiments(
             results[exp_id] = "completed"
         else:
             results[exp_id] = "running"
-    
+
     return results
 
 
@@ -308,7 +316,7 @@ def process_remote_server_experiments(
     """Process experiments for a single remote server using batch SSH."""
     if not experiments:
         return {}
-    
+
     # Prepare experiments for batch processing
     batch_experiments = []
     for exp_id, exp_config, exp_file_name in experiments:
@@ -316,7 +324,7 @@ def process_remote_server_experiments(
         run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
         expected_dir = f"{run_name}_{server_name}_gpu{gpu_rank}"
         batch_experiments.append((exp_id, run_name, gpu_rank, expected_dir))
-    
+
     # Use batch SSH to get all statuses at once
     return get_batch_remote_experiment_status(server_name, batch_experiments, debug)
 
@@ -519,14 +527,14 @@ def monitor_experiments(
         exp_id = exp_file.stem
         exp_config = yaml.safe_load(exp_file.read_text())
         server = exp_config.get("server", "unknown")
-        
+
         # Apply server filter if specified
         if server_filter and server != server_filter:
             continue
-        
+
         if server not in experiments_by_server:
             experiments_by_server[server] = []
-        
+
         experiments_by_server[server].append((exp_id, exp_config, exp_file.name))
         all_experiments.append((exp_id, server, exp_config, exp_file.name))
 
@@ -539,11 +547,11 @@ def monitor_experiments(
 
     # Process experiments in parallel
     all_results: dict[str, str] = {}  # exp_id -> status
-    
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # Submit tasks for each server
         future_to_server = {}
-        
+
         # Desktop experiments (local processing)
         if "desktop" in experiments_by_server:
             desktop_experiments = experiments_by_server["desktop"]
@@ -551,31 +559,36 @@ def monitor_experiments(
                 process_desktop_experiments, desktop_experiments, debug
             )
             future_to_server[future] = "desktop"
-        
+
         # Remote experiments (batch SSH)
         for server_name in remote_servers:
             server_experiments = experiments_by_server[server_name]
             future = executor.submit(
-                process_remote_server_experiments, server_name, server_experiments, debug
+                process_remote_server_experiments,
+                server_name,
+                server_experiments,
+                debug,
             )
             future_to_server[future] = server_name
-        
+
         # Collect results as they complete
         for future in as_completed(future_to_server):
             server_name = future_to_server[future]
             try:
                 server_results = future.result()
                 all_results.update(server_results)
-                
+
                 # Update cache with results
                 if server_name in experiments_by_server:
                     update_cache_from_results(
                         server_results, server_name, experiments_by_server[server_name]
                     )
-                
+
                 if debug:
-                    print(f"DEBUG: {server_name} completed with {len(server_results)} results")
-                    
+                    print(
+                        f"DEBUG: {server_name} completed with {len(server_results)} results"
+                    )
+
             except Exception as e:
                 print(f"Error processing {server_name}: {e}")
                 # Mark all experiments on this server as pending
