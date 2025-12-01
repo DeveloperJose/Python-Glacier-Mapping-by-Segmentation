@@ -9,9 +9,11 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml
@@ -21,7 +23,11 @@ LINE_WIDTH = 80
 
 # Status cache to avoid redundant SSH calls
 _status_cache: dict[str, tuple[str, float]] = {}  # key -> (status, timestamp)
-_cache_ttl = 15  # seconds
+_cache_ttl = 60  # seconds (increased from 15s for better performance)
+
+# CPU worker count for parallel execution
+CPU_COUNT = os.cpu_count() or 4  # Fallback to 4 if None
+MAX_WORKERS = max(1, int(CPU_COUNT * 0.75))  # Use 75% of CPU cores
 
 
 def get_experiment_status(
@@ -81,6 +87,122 @@ def get_experiment_status(
             _status_cache[cache_key] = (status, time.time())
 
         return status
+
+
+def get_batch_remote_experiment_status(
+    server_name: str, experiments: list[tuple[str, str, int, str]], debug: bool = False
+) -> dict[str, str]:
+    """Check multiple experiments on remote server via single SSH call.
+    
+    Args:
+        server_name: Name of the remote server
+        experiments: List of (exp_id, run_name, gpu_rank, expected_dir_name) tuples
+        debug: Enable debug output
+        
+    Returns:
+        Dict mapping exp_id to status ('pending', 'running', 'completed', 'failed')
+    """
+    servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
+    server = servers_cfg[server_name]
+
+    if server_name == "desktop":
+        # Should not be called for desktop, but handle gracefully
+        return {}
+
+    if debug:
+        print(f"DEBUG: Batch checking {len(experiments)} experiments on {server_name}")
+
+    # Build batch SSH command to check all experiments at once
+    output_path = server["output_path"]
+    
+    # Create shell script to check all experiment directories
+    batch_script = """
+# Create expected directory lookup
+declare -A exp_dirs
+"""
+    
+    # Add directory mappings for each experiment
+    for exp_id, run_name, gpu_rank, expected_dir in experiments:
+        batch_script += f'exp_dirs["{expected_dir}"]="{exp_id}"\n'
+    
+    batch_script += f"""
+# Check all experiment directories
+for exp_dir in {output_path}/runs/*_{server_name}_gpu*; do
+    if [ -d "$exp_dir" ]; then
+        exp_name=$(basename "$exp_dir")
+        exp_id="${{exp_dirs[$exp_name]}}"
+        
+        if [ -z "$exp_id" ]; then
+            # Skip directories not in our expected list
+            continue
+        fi
+        
+        if [ -f "$exp_dir/FAILED" ]; then
+            echo "$exp_id:FAILED"
+        elif [ -f "$exp_dir/checkpoints_summary.json" ]; then
+            echo "$exp_id:COMPLETED"
+        else
+            echo "$exp_id:RUNNING"
+        fi
+    fi
+done
+
+# Check for missing experiments (directories that don't exist)
+"""
+    
+    # Add checks for missing directories
+    for exp_id, run_name, gpu_rank, expected_dir in experiments:
+        full_path = f"{output_path}/runs/{expected_dir}"
+        batch_script += f'if [ ! -d "{full_path}" ]; then echo "{exp_id}:DIRECTORY_MISSING"; fi\n'
+    
+    ssh_cmd = ["ssh", server["ssh_host"], batch_script]
+
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+        output = result.stdout.strip()
+        
+        if debug:
+            print(f"DEBUG: {server_name} batch output:\n{output}")
+
+        # Parse output: format "exp_id:STATUS"
+        results = {}
+        for line in output.split('\n'):
+            if ':' in line:
+                exp_id, status = line.split(':', 1)
+                exp_id = exp_id.strip()
+                status = status.strip()
+                
+                # Map status to our standard format
+                if status == "DIRECTORY_MISSING":
+                    results[exp_id] = "pending"
+                elif status == "FAILED":
+                    results[exp_id] = "failed"
+                elif status == "COMPLETED":
+                    results[exp_id] = "completed"
+                elif status == "RUNNING":
+                    results[exp_id] = "running"
+                else:
+                    if debug:
+                        print(f"DEBUG: {server_name} unknown status for {exp_id}: {status}")
+                    results[exp_id] = "pending"
+        
+        # Ensure all experiments have a status (default to pending)
+        for exp_id, _, _, _ in experiments:
+            if exp_id not in results:
+                if debug:
+                    print(f"DEBUG: {server_name} no status for {exp_id}, defaulting to pending")
+                results[exp_id] = "pending"
+        
+        return results
+
+    except subprocess.TimeoutExpired:
+        if debug:
+            print(f"DEBUG: {server_name} batch SSH timeout - all experiments pending")
+        return {exp_id: "pending" for exp_id, _, _, _ in experiments}
+    except Exception as e:
+        if debug:
+            print(f"DEBUG: {server_name} batch SSH error: {e} - all experiments pending")
+        return {exp_id: "pending" for exp_id, _, _, _ in experiments}
 
 
 def get_remote_experiment_status(
@@ -147,6 +269,67 @@ def get_remote_experiment_status(
         if debug:
             print(f"DEBUG: {server_name} SSH error: {e} - status: pending")
         return "pending"
+
+
+def process_desktop_experiments(
+    experiments: list[tuple[str, dict, str]], debug: bool = False
+) -> dict[str, str]:
+    """Process desktop experiments locally (no SSH needed)."""
+    results = {}
+    
+    for exp_id, exp_config, exp_file_name in experiments:
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+        
+        # Load servers config to get output path
+        servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
+        server_cfg = servers_cfg["desktop"]
+        results_dir = (
+            Path(server_cfg["output_path"])
+            / "runs"
+            / f"{run_name}_desktop_gpu{gpu_rank}"
+        )
+
+        if not results_dir.exists():
+            results[exp_id] = "pending"
+        elif (results_dir / "FAILED").exists():
+            results[exp_id] = "failed"
+        elif (results_dir / "checkpoints_summary.json").exists():
+            results[exp_id] = "completed"
+        else:
+            results[exp_id] = "running"
+    
+    return results
+
+
+def process_remote_server_experiments(
+    server_name: str, experiments: list[tuple[str, dict, str]], debug: bool = False
+) -> dict[str, str]:
+    """Process experiments for a single remote server using batch SSH."""
+    if not experiments:
+        return {}
+    
+    # Prepare experiments for batch processing
+    batch_experiments = []
+    for exp_id, exp_config, exp_file_name in experiments:
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+        expected_dir = f"{run_name}_{server_name}_gpu{gpu_rank}"
+        batch_experiments.append((exp_id, run_name, gpu_rank, expected_dir))
+    
+    # Use batch SSH to get all statuses at once
+    return get_batch_remote_experiment_status(server_name, batch_experiments, debug)
+
+
+def update_cache_from_results(
+    results: dict[str, str], server_name: str, experiments: list[tuple[str, dict, str]]
+) -> None:
+    """Update status cache with new results."""
+    for exp_id, exp_config, _ in experiments:
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        cache_key = f"{exp_id}_{server_name}_{gpu_rank}"
+        if exp_id in results:
+            _status_cache[cache_key] = (results[exp_id], time.time())
 
 
 def is_synced_locally(
@@ -307,7 +490,7 @@ def monitor_experiments(
     debug: bool = False,
     show_progress: bool = False,
 ) -> None:
-    """Display experiment status."""
+    """Display experiment status using parallel processing and batch SSH commands."""
     conf_dir = Path("conf/experiments")
 
     # Find all experiment YAML files
@@ -328,7 +511,78 @@ def monitor_experiments(
     print(line)
     print()
 
-    # Group by status
+    # Load all experiment configs and group by server
+    experiments_by_server: dict[str, list[tuple[str, dict, str]]] = {}
+    all_experiments = []  # Keep original order for display
+
+    for exp_file in exp_files:
+        exp_id = exp_file.stem
+        exp_config = yaml.safe_load(exp_file.read_text())
+        server = exp_config.get("server", "unknown")
+        
+        # Apply server filter if specified
+        if server_filter and server != server_filter:
+            continue
+        
+        if server not in experiments_by_server:
+            experiments_by_server[server] = []
+        
+        experiments_by_server[server].append((exp_id, exp_config, exp_file.name))
+        all_experiments.append((exp_id, server, exp_config, exp_file.name))
+
+    # Show progress message
+    remote_servers = [s for s in experiments_by_server.keys() if s != "desktop"]
+    if show_progress and remote_servers:
+        print(f"Checking remote servers: {', '.join(sorted(remote_servers))}...")
+        print(f"Using {MAX_WORKERS} workers (75% of {CPU_COUNT} CPU cores)")
+        print()
+
+    # Process experiments in parallel
+    all_results: dict[str, str] = {}  # exp_id -> status
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit tasks for each server
+        future_to_server = {}
+        
+        # Desktop experiments (local processing)
+        if "desktop" in experiments_by_server:
+            desktop_experiments = experiments_by_server["desktop"]
+            future = executor.submit(
+                process_desktop_experiments, desktop_experiments, debug
+            )
+            future_to_server[future] = "desktop"
+        
+        # Remote experiments (batch SSH)
+        for server_name in remote_servers:
+            server_experiments = experiments_by_server[server_name]
+            future = executor.submit(
+                process_remote_server_experiments, server_name, server_experiments, debug
+            )
+            future_to_server[future] = server_name
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_server):
+            server_name = future_to_server[future]
+            try:
+                server_results = future.result()
+                all_results.update(server_results)
+                
+                # Update cache with results
+                if server_name in experiments_by_server:
+                    update_cache_from_results(
+                        server_results, server_name, experiments_by_server[server_name]
+                    )
+                
+                if debug:
+                    print(f"DEBUG: {server_name} completed with {len(server_results)} results")
+                    
+            except Exception as e:
+                print(f"Error processing {server_name}: {e}")
+                # Mark all experiments on this server as pending
+                for exp_id, _, _ in experiments_by_server[server_name]:
+                    all_results[exp_id] = "pending"
+
+    # Group by status for display
     status_groups: dict[str, list[tuple[str, str, dict, str, str]]] = {
         "pending": [],
         "running": [],
@@ -336,33 +590,12 @@ def monitor_experiments(
         "failed": [],
     }
 
-    # Collect unique remote servers to show progress
-    remote_servers = set()
-    for exp_file in exp_files:
-        exp_config = yaml.safe_load(exp_file.read_text())
-        server = exp_config.get("server", "unknown")
-        if server != "desktop" and (not server_filter or server == server_filter):
-            remote_servers.add(server)
-
-    if show_progress and remote_servers:
-        print(f"Checking remote servers: {', '.join(sorted(remote_servers))}...")
-        print()
-
-    for exp_file in exp_files:
-        exp_id = exp_file.stem
-        exp_config = yaml.safe_load(exp_file.read_text())
-
-        server = exp_config.get("server", "unknown")
-        gpu_rank = exp_config.get("gpu_rank", 0)
-
-        # Apply server filter if specified
-        if server_filter and server != server_filter:
-            continue
-
+    # Build status groups maintaining original order
+    for exp_id, server, exp_config, exp_file_name in all_experiments:
+        status = all_results.get(exp_id, "pending")
         run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
-        status = get_experiment_status(exp_id, server, gpu_rank, run_name, debug)
         status_groups[status].append(
-            (exp_id, server, exp_config, exp_file.name, run_name)
+            (exp_id, server, exp_config, exp_file_name, run_name)
         )
 
     # Display each status group
@@ -598,7 +831,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable debug output for remote status checking",
     )
+    parser.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=_cache_ttl,
+        help=f"Cache TTL in seconds (default: {_cache_ttl})",
+    )
     args = parser.parse_args()
+
+    # Update cache TTL if overridden
+    _cache_ttl = args.cache_ttl
 
     if args.sync_all:
         sync_all_completed_experiments(args.debug)
