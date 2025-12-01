@@ -10,31 +10,31 @@ training_opts:
   loader_opts:
     batch_size: 8
     use_channels:
-      - 0
-      - 1
-      - 2
-      - 3
-      - 4
-      - 5
-      - 6
-      - 7
-      - 8
-      - 9
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
     output_classes:
-      - 1
+    - 1
     normalize: mean-std
     class_names:
-      - BG
-      - CleanIce
-      - Debris
+    - BG
+    - CleanIce
+    - Debris
     processed_dir: /home/jperez/datasets/HKH/bibek_w512_o64_f001_v2/
   metrics_opts:
     metrics:
-      - IoU
-      - precision
-      - recall
+    - IoU
+    - precision
+    - recall
     threshold:
-      - 0.5
+    - 0.5
   loss_opts:
     name: custom
     masked: false
@@ -58,5 +58,5 @@ training_opts:
       max_lr: 0.001
       pct_start: 0.3
       anneal_strategy: cos
-  server: frodo
-  gpu_rank: 0
+server: frodo
+gpu_rank: 0
