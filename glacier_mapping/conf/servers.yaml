@@ -16,7 +16,7 @@ bilbo:
   hostname: bilbo
   ssh_host: jperez@bilbo
   code_path: /home/jperez/Python-Glacier-Mapping-by-Segmentation
-  output_path: /home/jperez/Python-Glacier-Mapping-by-Segmentation/glacier_mapping/output
+  output_path: /data/jperez/output
   # Preprocessing input directories
   image_dir: /data/jperez/datasets/HKH_raw/Landsat7_2005
   dem_dir: /data/jperez/datasets/HKH_raw/DEM
