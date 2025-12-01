@@ -141,7 +141,10 @@ if __name__ == "__main__":
 
             pbar.set_description(f"Processing dataset {split}")
             pbar.reset(len(meta))
-            with multiprocessing.Pool(5) as pool:
+            cores = multiprocessing.cpu_count()
+            workers = max(1, int(cores * 0.75))
+            print(f"Using {workers}/{cores} CPU cores")
+            with multiprocessing.Pool(workers) as pool:
                 for result in pool.istarmap(fn_process, enumerate(meta)):
                     mu, s, mi, ma, df_rows, skipped_rows = result
                     means.append(mu)

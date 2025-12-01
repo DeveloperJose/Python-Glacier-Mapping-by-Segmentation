@@ -16,6 +16,9 @@ from pathlib import Path
 
 import yaml
 
+# Conservative line width for all terminals
+LINE_WIDTH = 60
+
 
 def get_experiment_status(
     exp_id: str, server_name: str, gpu_rank: int, run_name: str, debug: bool = False
@@ -97,9 +100,19 @@ def get_remote_experiment_status(
         f"test -f {remote_results_dir}/FAILED && echo 'FAILED' || echo 'NO_FAILED'",
     ]
 
+    if debug:
+        print(f"DEBUG: {server_name} FAILED check SSH command: {' '.join(ssh_cmd)}")
+
     try:
         result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=5)
-        if "FAILED" in result.stdout.strip():
+        if debug:
+            print(f"DEBUG: {server_name} FAILED check return code: {result.returncode}")
+            print(
+                f"DEBUG: {server_name} FAILED check stdout: '{result.stdout.strip()}'"
+            )
+            print(f"DEBUG: {server_name} FAILED check stderr: '{result.stderr}'")
+
+        if result.stdout.strip() == "FAILED":
             if debug:
                 print(f"DEBUG: {server_name} has FAILED marker - status: failed")
             return "failed"
@@ -116,7 +129,7 @@ def get_remote_experiment_status(
 
     try:
         result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=5)
-        status = "completed" if "COMPLETED" in result.stdout.strip() else "running"
+        status = "completed" if result.stdout.strip() == "COMPLETED" else "running"
         if debug:
             print(
                 f"DEBUG: {server_name} completion check: {result.stdout.strip()} -> status: {status}"
@@ -179,9 +192,49 @@ def sync_all_completed_experiments(debug: bool = False) -> None:
     servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
     conf_dir = Path("conf/experiments")
 
-    print("\n" + "=" * 80)
+    # Fixed-width formatting
+    line = "=" * LINE_WIDTH
+    print(f"\n{line}")
     print("SYNCING ALL COMPLETED EXPERIMENTS")
-    print("=" * 80 + "\n")
+    print(line + "\n")
+
+    exp_files = sorted(conf_dir.glob("exp_*.yaml"))
+
+    if not exp_files:
+        print("No experiments found in conf/experiments/")
+        return
+
+    synced_count = 0
+    failed_count = 0
+
+    for exp_file in exp_files:
+        exp_id = exp_file.stem
+        exp_config = yaml.safe_load(exp_file.read_text())
+
+        server = exp_config.get("server", "unknown")
+        gpu_rank = exp_config.get("gpu_rank", 0)
+        run_name = exp_config.get("training_opts", {}).get("run_name", "unknown")
+
+        # Check if experiment is completed
+        status = get_experiment_status(exp_id, server, gpu_rank, run_name, debug)
+        if status != "completed":
+            continue
+
+        # Check if already synced
+        if is_synced_locally(exp_id, server, gpu_rank, run_name):
+            print(f"[{exp_id}] ✓ Already synced")
+            synced_count += 1
+        else:
+            # Sync experiment
+            if sync_experiment_results(server, exp_id, gpu_rank, run_name):
+                synced_count += 1
+            else:
+                failed_count += 1
+
+    # Fixed-width summary
+    print(f"\n{line}")
+    print(f"Sync Summary: {synced_count} synced, {failed_count} failed")
+    print(line + "\n")
 
     exp_files = sorted(conf_dir.glob("exp_*.yaml"))
     synced_count = 0
@@ -212,7 +265,7 @@ def sync_all_completed_experiments(debug: bool = False) -> None:
         else:
             failed_count += 1
 
-    print(f"\n" + "=" * 80)
+    print("\n" + "=" * 80)
     print(f"Sync Summary: {synced_count} synced, {failed_count} failed")
     print("=" * 80 + "\n")
 
@@ -234,9 +287,11 @@ def monitor_experiments(
         )
         return
 
-    print("\n" + "=" * 80)
+    # Fixed-width formatting
+    line = "=" * LINE_WIDTH
+    print(f"\n{line}")
     print("EXPERIMENT STATUS")
-    print("=" * 80 + "\n")
+    print(line + "\n")
 
     # Group by status
     status_groups: dict[str, list[tuple[str, str, dict, str, str]]] = {
@@ -268,19 +323,16 @@ def monitor_experiments(
         if not exps:
             continue
 
+        sep = "-" * LINE_WIDTH
         print(f"\n{status_name.upper()} ({len(exps)}):")
-        print("-" * 80)
+        print(sep)
 
         for exp_id, server, exp_config, filename, run_name in exps:
             gpu = exp_config.get("gpu_rank", "?")
+            run_name = exp_config.get("training_opts", {}).get("run_name", "?")
 
-            # Use shorter experiment ID display (remove exp_XXX_ prefix)
-            short_id = (
-                exp_id.replace("exp_", "")
-                .replace("baseline_", "b_")
-                .replace("debris_", "d_")
-            )
-            line = f"  {short_id:<15} {server:<8} GPU:{gpu} {run_name[:15]:<15}"
+            # Simple fixed-width formatting
+            line = f"  {exp_id:<12} {server:<6} GPU:{gpu} {run_name[:10]:<10}"
 
             # Add sync status for completed experiments
             if status_name == "completed":
@@ -307,7 +359,10 @@ def monitor_experiments(
 
     # Summary
     total = sum(len(exps) for exps in status_groups.values())
-    print("\n" + "=" * 80)
+
+    # Fixed-width separator
+    sep = "=" * LINE_WIDTH
+    print(f"\n{sep}")
     print(f"Total experiments: {total}")
     if server_filter:
         print(f"Filtered by server: {server_filter}")
@@ -319,10 +374,10 @@ def monitor_experiments(
             f"Status: {', '.join(f'{status}={count}' for status, count in counts.items())}"
         )
 
-    print("=" * 80 + "\n")
+    print(sep + "\n")
 
 
-def interactive_monitor(server_filter: str | None = None) -> None:
+def interactive_monitor(server_filter: str | None = None, debug: bool = False) -> None:
     """Interactive monitor with keypress controls."""
     import select
     import termios
@@ -334,24 +389,28 @@ def interactive_monitor(server_filter: str | None = None) -> None:
             return sys.stdin.read(1)
         return None
 
+    # Fixed-width formatting
+    line = "=" * LINE_WIDTH
+    print(f"\n{line}")
+    print("INTERACTIVE MONITOR MODE")
+    print(line)
+    print("Controls: [s]ync all, [r]efresh, [q]uit")
+    print(line + "\n")
+
     # Set up terminal for non-blocking input
     old_settings = termios.tcgetattr(sys.stdin)
     try:
         tty.setraw(sys.stdin.fileno())
 
-        print("\n" + "=" * 80)
-        print("INTERACTIVE MONITOR MODE")
-        print("=" * 80)
-        print("Controls: [s]ync all, [r]efresh, [q]uit")
-        print("=" * 80 + "\n")
-
         while True:
             # Display current status
-            monitor_experiments(detailed=False, server_filter=server_filter)
+            monitor_experiments(
+                detailed=False, server_filter=server_filter, debug=debug
+            )
 
-            print("\n" + "-" * 80)
-            print("Press key: [s]ync all completed, [r]efresh, [q]uit")
-            print("-" * 80)
+            print(f"\n{line}")
+            print("Press: [s]ync all, [r]efresh, [q]uit")
+            print(line)
 
             # Wait for keypress with timeout
             key = None
@@ -369,7 +428,7 @@ def interactive_monitor(server_filter: str | None = None) -> None:
                     break
                 elif key == "s":
                     print("\n🔄 Syncing all completed experiments...")
-                    sync_all_completed_experiments()
+                    sync_all_completed_experiments(debug)
                 elif key == "r":
                     print("\n🔄 Refreshing...")
                     continue
