@@ -21,3 +21,14 @@ bilbo:
   labels_dir: /data/jperez/datasets/HKH_raw/labels_fixed
   # Preprocessing output directory
   processed_data_path: /home/jperez/datasets/HKH
+
+frodo:
+  hostname: frodo
+  ssh_host: jperez@frodo
+  code_path: /home/jperez/Python-Glacier-Mapping-by-Segmentation
+  # Preprocessing input directories
+  image_dir: /home/jperez/datasets/HKH_raw/Landsat7_2005
+  dem_dir: /home/jperez/datasets/HKH_raw/DEM
+  labels_dir: /home/jperez/datasets/HKH_raw/labels_fixed
+  # Preprocessing output directory
+  processed_data_path: /home/jperez/datasets/HKH
