@@ -50,8 +50,7 @@ class customloss(nn.Module):
             ignore_mask = target_int != 255
         else:
             ignore_mask = target.sum(dim=1) == 1
-
-        ignore_mask_exp = ignore_mask.unsqueeze(1).float()
+        ignore_mask_exp = ignore_mask.unsqueeze(1).float().to(device)
 
         if c == 2:
             pred_prob = torch.sigmoid(pred[:, 1:2])
@@ -82,7 +81,7 @@ class customloss(nn.Module):
             if C_eff == 1:
                 dice_loss_scalar = dice_per_class.sum()
             else:
-                class_mask = torch.zeros_like(dice_per_class)
+                class_mask = torch.zeros_like(dice_per_class).to(device)
                 for fg_idx in self.foreground_classes:
                     if 0 <= fg_idx < dice_per_class.shape[0]:
                         class_mask[fg_idx] = 1.0

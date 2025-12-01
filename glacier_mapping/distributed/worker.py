@@ -38,9 +38,9 @@ except ImportError:
 # ---------------------------------------------------------------------
 # Configuration constants
 # ---------------------------------------------------------------------
-OOM_RETRY_INTERVAL_MINUTES = 30   # Check OOM every 30 minutes
+OOM_RETRY_INTERVAL_MINUTES = 5   # Check OOM every X minutes
 OOM_TIMEOUT_HOURS = 12            # Fail OOM after 12 hours
-ERROR_RETRY_INTERVAL_MINUTES = 60 # Check all other errors every 1 hour
+ERROR_RETRY_INTERVAL_MINUTES = 5 # Check all other errors every X minutes
 ERROR_TIMEOUT_HOURS = 12          # Fail all other errors after 12 hours
 OTHER_MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 60
@@ -48,7 +48,7 @@ PROCESS_CHECK_INTERVAL = 5        # seconds (not currently used, but kept for fu
 REFRESH_INTERVAL = 10             # seconds (reload experiments / UI)
 CONFIRMATION_TIMEOUT = 30         # seconds
 LINE_WIDTH = 80
-EXPERIMENT_START_DELAY_SECONDS = 300  # 5 minutes between experiment starts (only if something is already running)
+EXPERIMENT_START_DELAY_SECONDS = 2 * 60  # minutes between experiment starts (only if something is already running)
 
 # Status values (string-based state machine)
 STATUS_PENDING = "pending"
@@ -667,7 +667,9 @@ class InteractiveWorker:
             if is_recoverable:
                 exp_state.status = STATUS_ERROR_WAITING
                 exp_state.error_wait_start = datetime.now()
-                exp_state.error_last_retry_time = None
+                # Set last retry time to now so we don't immediately re-test
+                # in handle_error_waiting_experiments on the very next loop.
+                exp_state.error_last_retry_time = datetime.now()
             else:
                 exp_state.status = STATUS_FAILED
                 (results_dir / "FAILED").write_text(
