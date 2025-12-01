@@ -60,4 +60,4 @@ scheduler_opts:
     pct_start: 0.3
     anneal_strategy: cos
 server: bilbo
-gpu_rank: 0
+gpu_rank: 1
