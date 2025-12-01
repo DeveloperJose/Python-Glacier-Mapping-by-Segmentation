@@ -131,6 +131,17 @@ class Framework:
         frame.model.load_state_dict(state["state_dict"])
         frame.optimizer.load_state_dict(state["optimizer_state_dict"])
 
+        # Load scheduler state if available
+        if (
+            "scheduler_state_dict" in state
+            and state["scheduler_state_dict"] is not None
+        ):
+            if frame.lrscheduler is not None:
+                frame.lrscheduler.load_state_dict(state["scheduler_state_dict"])
+                print("Loaded scheduler state")
+            else:
+                print("Warning: scheduler state found but no scheduler initialized")
+
         if "sigma1" in state:
             frame.sigma_list = [state["sigma1"], state["sigma2"]]
         else:
@@ -497,6 +508,9 @@ class Framework:
             "epoch": epoch,
             "state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.lrscheduler.state_dict()
+            if self.lrscheduler is not None
+            else None,
             "sigma_list": self.sigma_list,
             "loss_opts": self.loss_opts,
             "loader_opts": self.loader_opts,
@@ -527,6 +541,9 @@ class Framework:
             "epoch": epoch,
             "state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.lrscheduler.state_dict()
+            if self.lrscheduler is not None
+            else None,
             "sigma_list": self.sigma_list,
             "loss_opts": self.loss_opts,
             "loader_opts": self.loader_opts,
@@ -1129,9 +1146,9 @@ class Framework:
     def get_y_true(self, label_mask: np.ndarray, mask=None):
         y_true = np.zeros((label_mask.shape[0], label_mask.shape[1]), dtype=np.uint8)
         if self.is_binary:
-            assert self.binary_class_idx != 0, (
-                "You are trying to predict BG instead of CI or DCG"
-            )
+            assert (
+                self.binary_class_idx != 0
+            ), "You are trying to predict BG instead of CI or DCG"
             y_true[label_mask[:, :, self.binary_class_idx - 1] != 1] = 0
             y_true[label_mask[:, :, self.binary_class_idx - 1] == 1] = 1
         else:

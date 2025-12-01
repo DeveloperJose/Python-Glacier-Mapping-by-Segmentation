@@ -31,6 +31,13 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import yaml
 
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
 # Configuration constants
 OOM_RETRY_INTERVAL_MINUTES = 30  # Check OOM every 30 minutes
 OOM_TIMEOUT_HOURS = 12  # Fail OOM after 12 hours
@@ -171,20 +178,198 @@ class InteractiveWorker:
                 if server == self.server_name and gpu_rank == self.gpu_rank:
                     exp_state = ExperimentState(exp_id)
                     exp_state.status = self._get_experiment_status(exp_id, exp_config)
+
+                    # If we're auto-resuming a stopped experiment, clean up STOPPED marker
+                    if exp_state.status == "pending":
+                        run_name = exp_config["training_opts"]["run_name"]
+                        results_dir = (
+                            Path(self.server["output_path"])
+                            / "runs"
+                            / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+                        )
+                        stopped_marker = results_dir / "STOPPED"
+                        if stopped_marker.exists():
+                            stopped_marker.unlink()
+                            print(f"[{exp_id}] Auto-resuming from stopped state")
+
                     self.experiments[exp_id] = exp_state
 
     def _get_experiment_status(self, exp_id: str, exp_config: dict) -> str:
         """Determine experiment status from filesystem."""
         run_name = exp_config["training_opts"]["run_name"]
         results_dir = (
-            Path("output/runs") / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+            Path(self.server["output_path"])
+            / "runs"
+            / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
         )
 
+        print(f"DEBUG: Checking status for {exp_id} at {results_dir}")
+        print(f"DEBUG: Directory exists: {results_dir.exists()}")
+
         if not results_dir.exists():
+            print(f"DEBUG: {exp_id} -> pending (no directory)")
             return "pending"
 
         if (results_dir / "STOPPED").exists():
-            return "stopped"
+            print(f"DEBUG: {exp_id} -> STOPPED marker found")
+            # Check if auto-resume is disabled in config
+            disable_resume = exp_config.get("training_opts", {}).get(
+                "disable_resume", False
+            )
+            print(f"DEBUG: {exp_id} -> disable_resume={disable_resume}")
+            if not disable_resume:
+                # Auto-resume stopped experiments by marking them as pending
+                print(f"DEBUG: {exp_id} -> pending (auto-resume from stopped)")
+                return "pending"
+            else:
+                print(f"DEBUG: {exp_id} -> stopped (auto-resume disabled)")
+                return "stopped"
+
+        if (results_dir / "FAILED").exists():
+            print(f"DEBUG: {exp_id} -> failed")
+            return "failed"
+
+        if (results_dir / "checkpoints_summary.json").exists():
+            print(f"DEBUG: {exp_id} -> completed")
+            return "completed"
+
+        if (results_dir / "RUNNING").exists():
+            print(f"DEBUG: {exp_id} -> running")
+            return "running"
+
+        # Check for incomplete runs (output dir exists but no completion markers)
+        # Only check this if no explicit status markers were found
+        if results_dir.exists():
+            # Make sure we don't have STOPPED, FAILED, RUNNING, or completion markers
+            has_explicit_marker = (
+                (results_dir / "STOPPED").exists()
+                or (results_dir / "FAILED").exists()
+                or (results_dir / "RUNNING").exists()
+                or (results_dir / "checkpoints_summary.json").exists()
+            )
+
+            if not has_explicit_marker:
+                models_dir = results_dir / "models"
+                if models_dir.exists() and any(models_dir.glob("model_*.pt")):
+                    # Has checkpoints but no completion marker - incomplete run
+                    disable_resume = exp_config.get("training_opts", {}).get(
+                        "disable_resume", False
+                    )
+                    if not disable_resume:
+                        print(f"DEBUG: {exp_id} -> pending (incomplete run)")
+                        return "pending"  # Auto-resume incomplete run
+                    else:
+                        print(
+                            f"DEBUG: {exp_id} -> stopped (incomplete run, resume disabled)"
+                        )
+                        return "stopped"
+
+        print(f"DEBUG: {exp_id} -> pending (default)")
+        return "pending"
+
+        if (results_dir / "STOPPED").exists():
+            # Check if auto-resume is disabled in config
+            disable_resume = exp_config.get("training_opts", {}).get(
+                "disable_resume", False
+            )
+            if not disable_resume:
+                # Auto-resume stopped experiments by marking them as pending
+                return "pending"
+            else:
+                return "stopped"
+
+        if (results_dir / "FAILED").exists():
+            return "failed"
+
+        if (results_dir / "checkpoints_summary.json").exists():
+            return "completed"
+
+        if (results_dir / "RUNNING").exists():
+            # Check if this is a stale RUNNING marker (no active process)
+            running_marker = results_dir / "RUNNING"
+            if running_marker.exists():
+                try:
+                    running_content = running_marker.read_text().strip()
+                    # Try to extract PID from RUNNING marker
+                    for line in running_content.split("\n"):
+                        if line.startswith("PID:"):
+                            pid_str = line.split(":")[1].strip()
+                            try:
+                                pid = int(pid_str)
+                                # Check if process is still running
+                                if PSUTIL_AVAILABLE and not psutil.pid_exists(pid):
+                                    # Process is dead, this is an incomplete run
+                                    disable_resume = exp_config.get(
+                                        "training_opts", {}
+                                    ).get("disable_resume", False)
+                                    if not disable_resume:
+                                        return "pending"  # Auto-resume incomplete run
+                                    else:
+                                        return "stopped"  # Mark as stopped if resume disabled
+                                elif not PSUTIL_AVAILABLE:
+                                    # Can't check PID, assume incomplete to be safe
+                                    disable_resume = exp_config.get(
+                                        "training_opts", {}
+                                    ).get("disable_resume", False)
+                                    if not disable_resume:
+                                        return "pending"
+                                    else:
+                                        return "stopped"
+                            except (ValueError, Exception):
+                                # If we can't check PID, assume it's incomplete
+                                disable_resume = exp_config.get(
+                                    "training_opts", {}
+                                ).get("disable_resume", False)
+                                if not disable_resume:
+                                    return "pending"
+                                else:
+                                    return "stopped"
+                except Exception:
+                    # If we can't read RUNNING marker, assume it's incomplete
+                    disable_resume = exp_config.get("training_opts", {}).get(
+                        "disable_resume", False
+                    )
+                    if not disable_resume:
+                        return "pending"
+                    else:
+                        return "stopped"
+            return "running"
+
+        # Check for incomplete runs (output dir exists but no completion markers)
+        # Only check this if no explicit status markers were found
+        if results_dir.exists():
+            # Make sure we don't have STOPPED, FAILED, RUNNING, or completion markers
+            has_explicit_marker = (
+                (results_dir / "STOPPED").exists()
+                or (results_dir / "FAILED").exists()
+                or (results_dir / "RUNNING").exists()
+                or (results_dir / "checkpoints_summary.json").exists()
+            )
+
+            if not has_explicit_marker:
+                models_dir = results_dir / "models"
+                if models_dir.exists() and any(models_dir.glob("model_*.pt")):
+                    # Has checkpoints but no completion marker - incomplete run
+                    disable_resume = exp_config.get("training_opts", {}).get(
+                        "disable_resume", False
+                    )
+                    if not disable_resume:
+                        return "pending"  # Auto-resume incomplete run
+                    else:
+                        return "stopped"
+
+        return "pending"
+
+        if (results_dir / "STOPPED").exists():
+            # Check if auto-resume is disabled in config
+            disable_resume = exp_config.get("training_opts", {}).get(
+                "disable_resume", False
+            )
+            if not disable_resume:
+                # Auto-resume stopped experiments by marking them as pending
+                return "pending"
+            else:
+                return "stopped"
 
         if (results_dir / "FAILED").exists():
             return "failed"
@@ -208,7 +393,11 @@ class InteractiveWorker:
     def get_output_path(self, exp_id: str) -> Path:
         """Get output path for experiment."""
         run_name = self.get_run_name(exp_id)
-        return Path("output/runs") / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+        return (
+            Path(self.server["output_path"])
+            / "runs"
+            / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
+        )
 
     def test_experiment_memory(self, exp_config: dict) -> Tuple[bool, str]:
         """Test if an experiment can fit in GPU memory."""
@@ -498,7 +687,8 @@ class InteractiveWorker:
                 # Remove running marker
                 run_name = self.get_run_name(exp_id)
                 results_marker = (
-                    Path("output/runs")
+                    Path(self.server["output_path"])
+                    / "runs"
                     / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
                 )
                 (results_marker / "RUNNING").unlink(missing_ok=True)
@@ -824,7 +1014,8 @@ class InteractiveWorker:
                 # Remove running marker and create STOPPED marker
                 run_name = self.get_run_name(exp_id)
                 results_marker = (
-                    Path("output/runs")
+                    Path(self.server["output_path"])
+                    / "runs"
                     / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
                 )
                 (results_marker / "RUNNING").unlink(missing_ok=True)

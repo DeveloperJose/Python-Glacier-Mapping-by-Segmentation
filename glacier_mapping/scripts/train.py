@@ -19,6 +19,7 @@ import json
 import logging
 import pathlib
 import random
+import re
 import subprocess
 import warnings
 from timeit import default_timer as timer
@@ -74,11 +75,89 @@ if __name__ == "__main__":
 
     train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
 
+    # Check for existing checkpoints to resume from
+    start_epoch = 1
+    resume_checkpoint = None
+
+    # Look for existing checkpoints in output directory
+    if output_dir.exists():
+        models_dir = output_dir / "models"
+        if models_dir.exists():
+            # Priority 1: Check for best model
+            best_model_path = models_dir / "model_best.pt"
+            if best_model_path.exists():
+                resume_checkpoint = best_model_path
+                fn.log(logging.INFO, f"Found best checkpoint: {best_model_path}")
+            else:
+                # Priority 2: Find the latest epoch checkpoint
+                epoch_checkpoints = list(models_dir.glob("model_*.pt"))
+                # Filter out improvement checkpoints (model_epochXXXX_valXXXXXX.pt)
+                epoch_checkpoints = [
+                    cp
+                    for cp in epoch_checkpoints
+                    if not re.search(r"model_epoch\d+_val", cp.name)
+                ]
+
+                if epoch_checkpoints:
+                    # Sort by epoch number
+                    def get_epoch_from_path(path):
+                        match = re.search(r"model_(\d+)\.pt", path.name)
+                        return int(match.group(1)) if match else 0
+
+                    epoch_checkpoints.sort(key=get_epoch_from_path)
+                    resume_checkpoint = epoch_checkpoints[-1]
+                    fn.log(
+                        logging.INFO,
+                        f"Found latest epoch checkpoint: {resume_checkpoint}",
+                    )
+
     # Initialize framework from experiment config
-    if args.config_dict:
-        frame = Framework.from_dict(conf)
+    if resume_checkpoint and not conf.training_opts.get("disable_resume", False):
+        fn.log(logging.INFO, f"Resuming training from checkpoint: {resume_checkpoint}")
+        frame = Framework.from_checkpoint(resume_checkpoint, testing=False)
+
+        # Extract the epoch from checkpoint
+        if resume_checkpoint.name == "model_best.pt":
+            # For best model, we need to check the checkpoints summary to get the epoch
+            summary_path = output_dir / "checkpoints_summary.json"
+            if summary_path.exists():
+                with open(summary_path, "r") as f:
+                    summary = json.load(f)
+                    start_epoch = summary.get("best_epoch", 1) + 1
+                    fn.log(
+                        logging.INFO,
+                        f"Resuming from epoch {start_epoch} (best model was epoch {summary.get('best_epoch', '?')})",
+                    )
+            else:
+                start_epoch = 1
+                fn.log(
+                    logging.WARNING,
+                    "Could not determine epoch from best model, starting from epoch 1",
+                )
+        else:
+            # Extract epoch from filename like "model_15.pt"
+            epoch_match = re.search(r"model_(\d+)\.pt", resume_checkpoint.name)
+            if epoch_match:
+                start_epoch = int(epoch_match.group(1)) + 1
+                fn.log(
+                    logging.INFO,
+                    f"Resuming from epoch {start_epoch} (checkpoint was epoch {epoch_match.group(1)})",
+                )
+            else:
+                start_epoch = 1
+                fn.log(
+                    logging.WARNING,
+                    "Could not determine epoch from checkpoint, starting from epoch 1",
+                )
     else:
-        frame = Framework.from_config(args.config)
+        # Fresh start
+        if args.config_dict:
+            frame = Framework.from_dict(conf)
+        else:
+            frame = Framework.from_config(args.config)
+
+        if resume_checkpoint and conf.training_opts.get("disable_resume", False):
+            fn.log(logging.INFO, "Resume disabled by config, starting fresh training")
 
     if conf.training_opts.fine_tune:
         fn.log(logging.INFO, "Finetuning from previous final model…")
@@ -130,19 +209,49 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------
-    best_val_loss = np.inf
-    best_epoch = None
-    best_train_metric = None
-    best_val_metric = None
-    epochs_without_improvement = 0
-
-    # Track all improvements
-    improvement_checkpoints = []  # List of dicts: {epoch, val_loss, train_metric, val_metric}
+    # Load existing metrics if resuming
+    if resume_checkpoint and start_epoch > 1:
+        summary_path = output_dir / "checkpoints_summary.json"
+        if summary_path.exists():
+            with open(summary_path, "r") as f:
+                summary = json.load(f)
+                best_val_loss = summary.get("best_val_loss", np.inf)
+                best_epoch = summary.get("best_epoch", None)
+                # Note: We don't restore the detailed metrics to avoid complexity
+                best_train_metric = None
+                best_val_metric = None
+                epochs_without_improvement = 0
+                improvement_checkpoints = summary.get("improvement_checkpoints", [])
+                fn.log(
+                    logging.INFO,
+                    f"Loaded training history: best_val_loss={best_val_loss:.6f}, best_epoch={best_epoch}",
+                )
+        else:
+            # Reset metrics if no summary found
+            best_val_loss = np.inf
+            best_epoch = None
+            best_train_metric = None
+            best_val_metric = None
+            epochs_without_improvement = 0
+            improvement_checkpoints = []
+            fn.log(logging.WARNING, "No training history found, starting fresh metrics")
+    else:
+        # Fresh start
+        best_val_loss = np.inf
+        best_epoch = None
+        best_train_metric = None
+        best_val_metric = None
+        epochs_without_improvement = 0
+        improvement_checkpoints = []  # List of dicts: {epoch, val_loss, train_metric, val_metric}
 
     start_time = timer()
     final_epoch = 0
 
-    for epoch in range(1, conf.training_opts.epochs + 1):
+    fn.log(
+        logging.INFO,
+        f"Starting training from epoch {start_epoch} to {conf.training_opts.epochs}",
+    )
+    for epoch in range(start_epoch, conf.training_opts.epochs + 1):
         # ------------------------ TRAIN ------------------------
         loss_train, train_metric, loss_alpha = frame.train_one_epoch(
             epoch, train_loader
