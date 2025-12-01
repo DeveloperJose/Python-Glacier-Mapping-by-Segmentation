@@ -1229,6 +1229,10 @@ class InteractiveWorker:
         try:
             tty.setraw(sys.stdin.fileno())
 
+            # Load experiments BEFORE entering the main loop
+            self.load_experiments()
+            self.display_needs_refresh = True
+
             while self.running:
                 current_time = time.time()
 
