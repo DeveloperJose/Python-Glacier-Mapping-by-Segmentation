@@ -233,49 +233,6 @@ def run_experiment(
         return False
 
 
-def sync_results(server_name: str, gpu_rank: int, exp_id: str) -> None:
-    """Sync results back to desktop."""
-    servers_cfg = yaml.safe_load(Path("conf/servers.yaml").read_text())
-    server = servers_cfg[server_name]
-    desktop = servers_cfg["desktop"]
-
-    source = f"{server['output_path']}/{exp_id}/"
-    dest = f"{desktop['output_path']}/{exp_id}_{server_name}_gpu{gpu_rank}/"
-
-    print(f"\n[{exp_id}] Syncing results to desktop...")
-    print(f"  Source: {source}")
-    print(f"  Dest:   {dest}")
-
-    # If running on desktop, just copy
-    if server_name == "desktop":
-        dest_path = Path(dest)
-        dest_path.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["cp", "-r", source.rstrip("/"), dest.rstrip("/")], check=True)
-    else:
-        # rsync to desktop (assumes SSH keys set up)
-        desktop_ssh = desktop.get("ssh_host")
-        if desktop_ssh is None:
-            # Try to infer desktop hostname
-            print(
-                "WARNING: desktop ssh_host is null. Update conf/servers.yaml if rsync fails."
-            )
-            desktop_ssh = "devj@desktop"
-
-        subprocess.run(
-            [
-                "rsync",
-                "-avz",
-                "--partial",
-                "--progress",
-                source,
-                f"{desktop_ssh}:{dest}",
-            ],
-            check=True,
-        )
-
-    print(f"[{exp_id}] ✓ Results synced to {dest}")
-
-
 def git_pull() -> None:
     """Pull latest changes from git."""
     try:
@@ -337,12 +294,13 @@ def worker_loop(server_name: str, gpu_rank: int, interval: int | None = None) ->
                 )
 
                 if success:
-                    # Sync results back to desktop
-                    try:
-                        sync_results(server_name, gpu_rank, exp_id)
-                    except Exception as e:
-                        print(f"ERROR: Failed to sync results: {e}")
-                        print("You may need to manually rsync results to desktop")
+                    print(f"[{exp_id}] ✓ Training completed successfully!")
+                    print(
+                        f"[{exp_id}] Results available at: {exp_config['training_opts']['output_dir']}"
+                    )
+                    print(
+                        f"[{exp_id}] Use monitor.py --sync-all to pull results to desktop"
+                    )
             else:
                 # OOM or error
                 if message == "out_of_memory":

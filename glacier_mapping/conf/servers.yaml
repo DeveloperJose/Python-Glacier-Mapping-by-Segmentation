@@ -20,4 +20,4 @@ bilbo:
   dem_dir: /data/jperez/datasets/HKH_raw/DEM
   labels_dir: /data/jperez/datasets/HKH_raw/labels_fixed
   # Preprocessing output directory
-  processed_data_path: /data/jperez/datasets/HKH
+  processed_data_path: /home/jperez/datasets/HKH

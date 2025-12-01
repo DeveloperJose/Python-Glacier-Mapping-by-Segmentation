@@ -7,7 +7,7 @@ training_opts:
   early_stopping: 100
   full_eval_every: 10
   num_viz_samples: 4
-  output_dir: /home/jperez/Python-Glacier-Mapping-by-Segmentation/output/runs/baseline_debris_v2
+  output_dir: /home/jperez/Python-Glacier-Mapping-by-Segmentation/output/runs/baseline_debris_v2_bilbo_gpu0
 loader_opts:
   batch_size: 8
   use_channels:
@@ -28,7 +28,7 @@ loader_opts:
   - BG
   - CleanIce
   - Debris
-  processed_dir: /data/jperez/datasets/HKH/bibek_w512_o64_f1_v2/
+  processed_dir: /home/jperez/datasets/HKH/bibek_w512_o64_f1_v2/
 metrics_opts:
   metrics:
   - IoU

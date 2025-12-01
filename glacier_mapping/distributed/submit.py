@@ -74,11 +74,11 @@ def submit_experiment(server: str, gpu_rank: int, conf_name: str | None = None) 
     servers_cfg = yaml.safe_load(servers_path.read_text())
     server_cfg = servers_cfg[server]
 
-    # Update output_dir to use server's consolidated path
+    # Update output_dir to use server's consolidated path with server prefix
     if "training_opts" in exp_config:
         run_name = exp_config["training_opts"]["run_name"]
         exp_config["training_opts"]["output_dir"] = (
-            f"{server_cfg['code_path']}/output/runs/{run_name}"
+            f"{server_cfg['code_path']}/output/runs/{run_name}_{server}_gpu{gpu_rank}"
         )
 
     # Compute processed_dir from server config + dataset_name
