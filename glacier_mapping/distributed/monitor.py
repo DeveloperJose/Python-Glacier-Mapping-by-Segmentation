@@ -573,7 +573,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--server",
-        choices=["desktop", "bilbo"],
+        choices=["desktop", "bilbo", "frodo"],
         help="Filter by server",
     )
     parser.add_argument(

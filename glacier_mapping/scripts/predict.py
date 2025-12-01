@@ -687,7 +687,9 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server", default="desktop", choices=["desktop", "bilbo"])
+    parser.add_argument(
+        "--server", default="desktop", choices=["desktop", "bilbo", "frodo"]
+    )
     args = parser.parse_args()
 
     # Load config with server paths

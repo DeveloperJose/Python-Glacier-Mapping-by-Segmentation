@@ -59,7 +59,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--server",
         default="desktop",
-        choices=["desktop", "bilbo"],
+        choices=["desktop", "bilbo", "frodo"],
         help="Server name (default: desktop)",
     )
     args = parser.parse_args()

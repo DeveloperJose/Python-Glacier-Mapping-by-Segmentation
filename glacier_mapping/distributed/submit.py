@@ -114,7 +114,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--server",
         required=True,
-        choices=["desktop", "bilbo"],
+        choices=["desktop", "bilbo", "frodo"],
         help="Target server for this experiment",
     )
     parser.add_argument(
