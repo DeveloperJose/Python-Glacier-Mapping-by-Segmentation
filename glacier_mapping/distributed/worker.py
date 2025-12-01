@@ -13,7 +13,9 @@ Usage on server:
 """
 
 import argparse
+import contextlib
 import gc
+import io
 import json
 import os
 import re
@@ -64,6 +66,8 @@ class ExperimentState:
         self.is_recoverable: bool = False
         self.error_wait_start: Optional[datetime] = None
         self.last_log_pos = 0
+        # Track user-initiated stops
+        self.user_stopped = False
 
 
 class InteractiveWorker:
@@ -122,26 +126,13 @@ class InteractiveWorker:
                     exp_state.process.kill()
 
     def get_key(self) -> Optional[str]:
-        """Get keypress, handling multi-byte escape sequences."""
+        """Get keypress"""
         import select
 
-        if sys.stdin not in select.select([sys.stdin], [], [], 0)[0]:
+        if sys.stdin not in select.select([sys.stdin], [], [], 0.1)[0]:
             return None
 
         ch = sys.stdin.read(1)
-
-        # Handle escape sequences (arrow keys, etc.)
-        if ch == "\x1b":
-            # Check if more bytes available (with short timeout)
-            if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    # Read final byte (A/B/C/D for arrows)
-                    if sys.stdin in select.select([sys.stdin], [], [], 0.05)[0]:
-                        ch3 = sys.stdin.read(1)
-                        return f"\x1b[{ch3}"  # Return full sequence
-                ch += ch2
-
         return ch
 
     def clear_screen(self):
@@ -231,24 +222,26 @@ class InteractiveWorker:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_rank)
             torch.cuda.set_device(0)
 
-            # Initialize framework
-            frame = Framework.from_config(test_config_path, device=0)
+            # Redirect stdout to silence memory test output
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                # Initialize framework
+                frame = Framework.from_config(test_config_path, device=0)
 
-            # Fetch loaders
-            train_loader, val_loader, test_loader = fetch_loaders(
-                processed_dir=str(exp_config["loader_opts"]["processed_dir"]),
-                batch_size=int(exp_config["loader_opts"]["batch_size"]),
-                use_channels=list(exp_config["loader_opts"]["use_channels"]),
-                output_classes=list(exp_config["loader_opts"]["output_classes"]),
-                class_names=list(exp_config["loader_opts"]["class_names"]),
-                normalize=str(exp_config["loader_opts"]["normalize"]),
-            )
+                # Fetch loaders
+                train_loader, val_loader, test_loader = fetch_loaders(
+                    processed_dir=str(exp_config["loader_opts"]["processed_dir"]),
+                    batch_size=int(exp_config["loader_opts"]["batch_size"]),
+                    use_channels=list(exp_config["loader_opts"]["use_channels"]),
+                    output_classes=list(exp_config["loader_opts"]["output_classes"]),
+                    class_names=list(exp_config["loader_opts"]["class_names"]),
+                    normalize=str(exp_config["loader_opts"]["normalize"]),
+                )
 
-            # Test one training step
-            for x, y_onehot, y_int in train_loader:
-                y_hat, loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
-                frame.step()
-                break
+                # Test one training step
+                for x, y_onehot, y_int in train_loader:
+                    y_hat, loss = frame.optimize(x, y_onehot, y_int.squeeze(-1))
+                    frame.step()
+                    break
 
             # Clean up
             del frame
@@ -314,13 +307,16 @@ class InteractiveWorker:
 
         # Set up log file
         run_name = exp_config["training_opts"]["run_name"]
+        base_output_path = Path(self.server["output_path"])
         log_dir = (
-            Path(self.server["output_path"])
+            base_output_path
             / "runs"
             / f"{run_name}_{self.server_name}_gpu{self.gpu_rank}"
         )
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "worker_training.log"
+
+
 
         # Set up environment
         env = os.environ.copy()
@@ -334,7 +330,7 @@ class InteractiveWorker:
             # Prepare config dict with output_dir injection
             exp_config_with_output = exp_config.copy()
             exp_config_with_output.setdefault("training_opts", {})["output_dir"] = str(
-                log_dir.parent
+                log_dir
             )
 
             process = subprocess.Popen(
@@ -369,11 +365,13 @@ class InteractiveWorker:
                 f"Started: {datetime.now().isoformat()}\nPID: {process.pid}\n"
             )
 
-            print(f"[{exp_id}] Launched successfully (PID: {process.pid})")
+            # Use display refresh flag instead of print
+            self.display_needs_refresh = True
             return True
 
-        except Exception as e:
-            print(f"[{exp_id}] Failed to launch: {e}")
+        except Exception:
+            # Use display refresh flag instead of print
+            self.display_needs_refresh = True
             return False
 
     def _detect_error_in_log(self, log_file: Path) -> Tuple[str, str, bool]:
@@ -462,9 +460,13 @@ class InteractiveWorker:
                 # Process finished
                 return_code = exp_state.process.returncode
 
-                if return_code == 0:
+                if exp_state.user_stopped:
+                    # User stopped - set status directly, skip error detection
+                    exp_state.status = "stopped"
+                    self.display_needs_refresh = True
+                elif return_code == 0:
                     exp_state.status = "completed"
-                    print(f"[{exp_id}] ✓ Completed successfully")
+                    self.display_needs_refresh = True
                 else:
                     # Use universal error detection to categorize the failure
                     if exp_state.log_file:
@@ -486,16 +488,10 @@ class InteractiveWorker:
                     if is_recoverable:
                         exp_state.status = "error_waiting"
                         exp_state.error_wait_start = datetime.now()
-                        print(
-                            f"[{exp_id}] ⚠️ {error_type.upper()} error - waiting to retry"
-                        )
-                        print(f"[{exp_id}] Error: {error_message[:100]}...")
+                        self.display_needs_refresh = True
                     else:
                         exp_state.status = "failed"
-                        print(
-                            f"[{exp_id}] ✗ {error_type.upper()} error - not recoverable"
-                        )
-                        print(f"[{exp_id}] Error: {error_message[:100]}...")
+                        self.display_needs_refresh = True
 
                 exp_state.stop_time = datetime.now()
                 exp_state.process = None
@@ -510,7 +506,7 @@ class InteractiveWorker:
                 (results_marker / "RUNNING").unlink(missing_ok=True)
 
                 # Create appropriate marker
-                if exp_state.status == "failed":
+                if exp_state.status == "failed" and not exp_state.user_stopped:
                     (results_marker / "FAILED").write_text(
                         f"Failed: {datetime.now().isoformat()}\n{exp_state.last_error}\n"
                     )
@@ -528,8 +524,8 @@ class InteractiveWorker:
 
                 wait_time = datetime.now() - exp_state.error_wait_start
 
-                # Retry every 30 seconds (reliable timing)
-                retry_interval = 30
+                # Retry every 90 seconds (user requested)
+                retry_interval = 90
                 if int(wait_time.total_seconds()) % retry_interval < REFRESH_INTERVAL:
                     can_launch, reason = self._can_retry_error_waiting_experiment(
                         exp_id
@@ -762,7 +758,7 @@ class InteractiveWorker:
         self.print_raw("=" * LINE_WIDTH)
         self.print_raw("Experiment Controls: [s]top | [R]estart | [c]ontinue")
         self.print_raw("Worker Controls:    [p]ause | [r]efresh | [q]uit")
-        self.print_raw("Navigation:         [↑↓]select")
+        self.print_raw("Navigation:         [ prev , next ]")
         self.print_raw("=" * LINE_WIDTH)
 
     def confirm_action(
@@ -816,11 +812,14 @@ class InteractiveWorker:
         warning += "Note: You can resume and continue from the last checkpoint later if you want."
 
         if self.confirm_action("Stop running experiment", exp_info, warning):
+            # Mark as user stopped BEFORE process termination
+            exp_state.user_stopped = True
+
             if exp_state.process:
                 exp_state.process.terminate()
                 exp_state.status = "stopped"
                 exp_state.stop_time = datetime.now()
-                print(f"[{exp_id}] Stopped by user")
+                self.display_needs_refresh = True
 
                 # Remove running marker and create STOPPED marker
                 run_name = self.get_run_name(exp_id)
@@ -860,11 +859,15 @@ class InteractiveWorker:
             exp_state.last_error = None
             exp_state.last_error_time = None
             exp_state.error_type = None
-            print(f"[{exp_id}] Restarted - output deleted")
+            exp_state.user_stopped = False
+            self.display_needs_refresh = True
 
     def handle_continue_experiment(self, exp_id: str):
         """Handle continue experiment action."""
         exp_state = self.experiments[exp_id]
+
+        # Reset user stopped flag
+        exp_state.user_stopped = False
 
         # Delete FAILED and STOPPED markers if they exist
         output_path = self.get_output_path(exp_id)
@@ -872,17 +875,17 @@ class InteractiveWorker:
         (output_path / "STOPPED").unlink(missing_ok=True)
 
         exp_state.status = "pending"
-        print(f"[{exp_id}] Ready to continue from checkpoint")
+        self.display_needs_refresh = True
 
     def handle_key_input(self, key: str):
         """Handle keyboard input."""
         key_lower = key.lower()
 
-        # Navigation
-        if key == "\x1b[A":  # Up arrow
+        # WASD Navigation
+        if key == '[':  # Up
             self._navigate_up()
             self.display_needs_refresh = True
-        elif key == "\x1b[B":  # Down arrow
+        elif key == ']':  # Down
             self._navigate_down()
             self.display_needs_refresh = True
 
@@ -1001,68 +1004,38 @@ class InteractiveWorker:
 
     def _update_gpu_memory(self):
         """Query GPU memory for all running processes."""
-        # Try different nvidia-smi query formats
-        queries = [
-            # Format 1: --id flag
-            [
-                "nvidia-smi",
-                f"--id={self.gpu_rank}",
-                "--query-compute-apps=pid,used_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            # Format 2: --gpu-id flag
-            [
-                "nvidia-smi",
-                f"--gpu-id={self.gpu_rank}",
-                "--query-compute-apps=pid,used_memory",
-                "--format=csv,noheader,nounits",
-            ],
-            # Format 3: No GPU filter (parse all)
-            [
-                "nvidia-smi",
-                "--query-compute-apps=pid,used_memory,gpu_id",
-                "--format=csv,noheader,nounits",
-            ],
+        # Use simple query without GPU filtering - will get all processes
+        query = [
+            "nvidia-smi",
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
         ]
 
-        for query in queries:
-            try:
-                result = subprocess.run(
-                    query, capture_output=True, text=True, timeout=2
-                )
+        try:
+            result = subprocess.run(query, capture_output=True, text=True, timeout=2)
 
-                # Parse output: "12345, 2048" or "12345, 2048, 0"
-                for line in result.stdout.strip().splitlines():
-                    if not line.strip():
-                        continue
-
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 2:
+            # Parse output: "12345, 2048"
+            for line in result.stdout.strip().splitlines():
+                if not line.strip():
+                    continue
+                
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    try:
                         pid = int(parts[0])
                         mem_mb = float(parts[1])
-
-                        # Check GPU ID if present (format 3)
-                        if len(parts) >= 3:
-                            gpu_id = int(parts[2])
-                            if gpu_id != self.gpu_rank:
-                                continue
-
                         mem_gb = mem_mb / 1024.0
-
+                        
                         # Find matching experiment
                         for exp_state in self.experiments.values():
                             if exp_state.pid == pid:
                                 exp_state.gpu_memory_gb = mem_gb
                                 break
-
-                # If we got results, break out of query loop
-                if result.stdout.strip():
-                    break
-
-            except Exception:
-                continue  # Try next query format
-
-        # Silently fail if all queries fail
+                    except (ValueError, IndexError):
+                        continue  # Skip malformed lines
+                
+        except Exception:
+            pass  # Silently fail - GPU memory monitoring is non-critical
 
     def _parse_training_logs(self, exp_id: str):
         """Parse recent training output for metrics."""
@@ -1140,6 +1113,12 @@ class InteractiveWorker:
             while self.running:
                 current_time = time.time()
 
+                # Handle key input FIRST (highest priority)
+                key = self.get_key()
+                if key:
+                    self.handle_key_input(key)
+                    continue  # Skip periodic updates if key handled
+
                 # Load experiments periodically
                 if current_time - last_refresh >= REFRESH_INTERVAL:
                     self.load_experiments()
@@ -1171,19 +1150,8 @@ class InteractiveWorker:
                     self.display_status()
                     self.display_needs_refresh = False
 
-                # Handle key input with timeout
-                key = None
-                start_time = time.time()
-                while (
-                    time.time() - start_time < 0.1
-                ):  # 100ms timeout for faster response
-                    key = self.get_key()
-                    if key:
-                        break
-                    time.sleep(0.01)
-
-                if key:
-                    self.handle_key_input(key)
+                # Small sleep to prevent CPU spinning
+                time.sleep(0.05)
 
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
