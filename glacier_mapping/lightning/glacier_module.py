@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,6 +42,7 @@ class GlacierSegmentationModule(pl.LightningModule):
         metrics_opts: Optional[Dict[str, Any]] = None,
         training_opts: Optional[Dict[str, Any]] = None,
         reg_opts: Optional[Dict[str, Any]] = None,
+        loader_opts: Optional[Dict[str, Any]] = None,
         class_names: List[str] = ["BG", "CleanIce", "Debris"],
         output_classes: List[int] = [0, 1, 2],
         use_channels: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -77,6 +79,17 @@ class GlacierSegmentationModule(pl.LightningModule):
         self.class_names = class_names
         self.output_classes = output_classes
         self.use_channels = use_channels
+        
+        # Add processed_dir for normalization and prediction
+        if loader_opts:
+            self.processed_dir = loader_opts.get('processed_dir', '/tmp')
+            self.normalization = loader_opts.get('normalize', 'mean-std')
+        else:
+            self.processed_dir = '/tmp'
+            self.normalization = 'mean-std'
+        
+        # Load normalization parameters
+        self._load_normalization_params()
         
         # Initialize model with proper parameters
         model_args = model_opts.get('args', {})
@@ -306,3 +319,67 @@ class GlacierSegmentationModule(pl.LightningModule):
         """Reset validation metrics at end of epoch."""
         for metric in self.val_metrics.values():
             metric.reset()
+    
+    def _load_normalization_params(self):
+        """Load normalization array from processed data directory."""
+        norm_path = Path(self.processed_dir) / "normalize_train.npy"
+        if norm_path.exists():
+            self.norm_arr_full = np.load(norm_path)
+            self.norm_arr = self.norm_arr_full[:, self.use_channels]
+        else:
+            # Fallback if normalization file doesn't exist
+            self.norm_arr_full = np.array([[0, 1], [0, 1], [0, 1], [0, 1]])  # mean, std, min, max
+            self.norm_arr = self.norm_arr_full[:, self.use_channels]
+    
+    def normalize(self, x):
+        """Normalize input data (from Framework)."""
+        if self.normalization == "mean-std":
+            _mean, _std = self.norm_arr[0], self.norm_arr[1]
+            return (x - _mean) / _std
+        elif self.normalization == "min-max":
+            _min, _max = self.norm_arr[2], self.norm_arr[3]
+            return (np.clip(x, _min, _max) - _min) / (_max - _min)
+        else:
+            raise Exception("Invalid normalization")
+    
+    def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
+        """Predict on single slice (from Framework)."""
+        _mask = np.sum(slice_arr, axis=2) == 0
+        
+        if preprocess:
+            slice_arr = slice_arr[:, :, self.use_channels]
+            slice_arr = self.normalize(slice_arr)
+        
+        _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float().to(self.device)
+        _y = self.forward(_x.permute(0, 3, 1, 2))  # NCHW format
+        
+        if len(self.output_classes) == 1:  # Binary
+            if threshold is None:
+                threshold = [0.5]
+            elif isinstance(threshold, (int, float)):
+                threshold = [threshold]
+            elif isinstance(threshold, list):
+                pass  # Use provided threshold
+            else:
+                threshold = [0.5]
+            
+            _y = torch.sigmoid(_y)
+            _y = np.squeeze(_y.cpu())  # (H, W, 2)
+            y_pred = (_y[..., 1] >= threshold[0]).astype(np.uint8)
+        else:  # Multi-class
+            _y = torch.nn.functional.softmax(_y, dim=1)
+            _y = np.squeeze(_y.cpu())  # (H, W, C)
+            y_pred = np.argmax(_y, axis=2).astype(np.uint8) + 1  # 1..C
+        
+        if use_mask:
+            y_pred[_mask] = 0
+            return y_pred, _mask
+        return y_pred
+    
+    def freeze_layers(self, layers=None):
+        """Freeze specified layers (from Framework)."""
+        for i, param in enumerate(self.model.parameters()):
+            if layers is None:
+                param.requires_grad = False
+            elif i < layers:
+                param.requires_grad = False

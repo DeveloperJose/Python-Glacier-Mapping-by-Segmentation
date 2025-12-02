@@ -30,7 +30,7 @@ from scipy.ndimage import binary_fill_holes
 import matplotlib.pyplot as plt
 import matplotlib
 
-from glacier_mapping.core.frame import Framework
+from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
 from glacier_mapping.model.visualize import (
     build_cmap,
@@ -42,23 +42,31 @@ from glacier_mapping.model.visualize import (
     make_eight_panel,
 )
 from glacier_mapping.data.data import BAND_NAMES
+# softmax_probs and merge_ci_debris are defined in this file
+
+def load_lightning_module(checkpoint_path, device):
+    """Load Lightning module from checkpoint."""
+    module = GlacierSegmentationModule.load_from_checkpoint(checkpoint_path)
+    module.eval()
+    module.to(device)
+    return module
 
 # Use non-interactive backend for plotting
 matplotlib.use("Agg")
 
 
 # Helpers
-def softmax_probs(frame, x_full):
+def softmax_probs(module, x_full):
     """
     Returns probability cube (H, W, C) for a single model.
     """
-    use_ch = frame.loader_opts.use_channels
+    use_ch = module.use_channels
     x = x_full[:, :, use_ch]
-    x_norm = frame.normalize(x)
+    x_norm = module.normalize(x)
 
-    inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float()
-    logits = frame.infer(inp)
-    probs = torch.nn.functional.softmax(logits, dim=3)[0].cpu().numpy()
+    inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float().to(module.device)
+    logits = module.forward(inp.permute(0, 3, 1, 2))
+    probs = torch.nn.functional.softmax(logits, dim=1)[0].cpu().numpy()
     return probs
 
 
@@ -69,6 +77,12 @@ def merge_ci_debris(prob_ci, prob_deb, thr_ci, thr_deb):
     """
     ci_mask = binary_fill_holes(prob_ci[:, :, 1] >= thr_ci)
     deb_mask = binary_fill_holes(prob_deb[:, :, 1] >= thr_deb)
+
+    # Ensure masks are not None
+    if ci_mask is None:
+        ci_mask = prob_ci[:, :, 1] >= thr_ci
+    if deb_mask is None:
+        deb_mask = prob_deb[:, :, 1] >= thr_deb
 
     H, W = ci_mask.shape
     merged = np.zeros((H, W), dtype=np.uint8)
@@ -97,7 +111,7 @@ def get_pr_iou(pred, true):
 
 
 def compute_feature_importance(
-    frame,
+    module,
     test_tiles,
     target_class_idx,
     num_samples=None,
@@ -113,7 +127,7 @@ def compute_feature_importance(
     higher importance.
 
     Args:
-        frame: Framework instance with loaded model
+        module: Lightning module with loaded model
         test_tiles: List of test tile paths
         target_class_idx: Class index to compute gradients for (0-indexed in model output)
         num_samples: Number of samples to use (None = all)
@@ -125,9 +139,9 @@ def compute_feature_importance(
         channel_gradients: np.array of shape (num_channels,) with importance scores
         spatial_maps: List of (tile_name, saliency_map) tuples
     """
-    frame.model.eval()
-    device = frame.device
-    use_channels = frame.loader_opts.use_channels
+    module.eval()
+    device = module.device
+    use_channels = module.use_channels
     num_channels = len(use_channels)
 
     # Select subset of tiles if requested
@@ -149,7 +163,7 @@ def compute_feature_importance(
         x = x_full[:, :, use_channels]
 
         # Normalize
-        x_norm = frame.normalize(x)
+        x_norm = module.normalize(x)
 
         # Convert to tensor with gradient tracking
         x_tensor = torch.from_numpy(x_norm).float().to(device).unsqueeze(0)
@@ -157,7 +171,7 @@ def compute_feature_importance(
         x_tensor.requires_grad_(True)
 
         # Forward pass
-        logits = frame.model(x_tensor)
+        logits = module(x_tensor)
         probs = torch.nn.functional.softmax(logits, dim=1)
 
         # Get mean activation for target class
@@ -167,16 +181,20 @@ def compute_feature_importance(
         target_prob.backward()
 
         # Extract per-channel gradient magnitude
-        grads = x_tensor.grad.data.abs()  # (1, C, H, W)
-        channel_grad = (
-            grads.sum(dim=(2, 3)).cpu().numpy()[0]
-        )  # Sum over spatial dims -> (C,)
+        grads = None
+        if x_tensor.grad is not None:
+            grads = x_tensor.grad.data.abs()  # (1, C, H, W)
+            channel_grad = (
+                grads.sum(dim=(2, 3)).cpu().numpy()[0]
+            )  # Sum over spatial dims -> (C,)
+        else:
+            channel_grad = np.zeros(len(use_channels))
 
         # Accumulate
         channel_gradients += channel_grad
 
         # Save spatial map if requested
-        if save_spatial and idx < max_spatial and output_dir is not None:
+        if save_spatial and idx < max_spatial and output_dir is not None and grads is not None:
             spatial_maps.append((tile_path.name, grads[0].cpu().numpy()))  # (C, H, W)
 
         # Clear gradients to free memory
@@ -239,11 +257,11 @@ def save_feature_importance_results(importance_scores, channel_names, output_dir
     )
     print("-" * 70)
 
-    for i, row in df.iterrows():
+    for rank, (i, row) in enumerate(df.iterrows()):
         bar_length = int(row["normalized_score"] * 50)
         bar = "█" * bar_length
         print(
-            f"{i + 1:<6}{row['channel_idx']:<6}{row['channel_name']:<20}"
+            f"{rank + 1:<6}{row['channel_idx']:<6}{row['channel_name']:<20}"
             f"{row['importance_score']:<15.2f}{row['normalized_score']:<15.4f}{bar}"
         )
 
@@ -271,7 +289,7 @@ def plot_channel_importance(channel_names, channel_indices, scores, save_path):
     fig, ax = plt.subplots(figsize=(10, max(6, len(channel_names) * 0.35)))
 
     y_pos = np.arange(len(channel_names))
-    colors = plt.cm.viridis(scores / scores.max() if scores.max() > 0 else scores)
+    colors = plt.colormaps['viridis'](scores / scores.max() if scores.max() > 0 else scores)
 
     ax.barh(y_pos, scores, color=colors, edgecolor="black", linewidth=0.5)
     ax.set_yticks(y_pos)
@@ -523,7 +541,7 @@ def run_prediction(
             pv = pred_bin[valid]
             t_bin = (tv == model_class).astype(np.uint8)
 
-            P, R, I, tp, fp, fn = get_pr_iou(pv, t_bin)
+            P, R, iou, tp, fp, fn = get_pr_iou(pv, t_bin)
 
             # accumulate
             if has_ci:
@@ -535,7 +553,7 @@ def run_prediction(
                 acc["db_fp"] += fp
                 acc["db_fn"] += fn
 
-            df_rows.append([name, P, R, I])
+            df_rows.append([name, P, R, iou])
 
             # Visualization label maps - use binary labeling for consistency
             y_gt = y_full.copy()
@@ -564,7 +582,7 @@ def run_prediction(
             conf_rgb = make_confidence_map(probs[:, :, 1], invalid_mask=invalid)
             entropy_rgb = make_entropy_map(probs, invalid_mask=invalid)
 
-            metrics_text = f"{model_name}: P={P:.3f} R={R:.3f} IoU={I:.3f}"
+            metrics_text = f"{model_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}"
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
@@ -782,6 +800,7 @@ if __name__ == "__main__":
     else:
         run_base = f"ci_{conf.cleanice.run_name}__db_{conf.debris.run_name}"
 
+    assert run_base is not None, "run_base must be set"
     print("Run", run_base)
 
     comparison_csv_path = out_root / run_base / "checkpoints_comparison.csv"
@@ -815,11 +834,11 @@ if __name__ == "__main__":
         for deb_ckpt_path, deb_ckpt_name in deb_checkpoints:
             # Determine checkpoint name
             if has_ci and not has_deb:
-                ckpt_name = ci_ckpt_name
+                ckpt_name = ci_ckpt_name or "unknown"
             elif has_deb and not has_ci:
-                ckpt_name = deb_ckpt_name
+                ckpt_name = deb_ckpt_name or "unknown"
             else:
-                ckpt_name = f"ci_{ci_ckpt_name}__db_{deb_ckpt_name}"
+                ckpt_name = f"ci_{ci_ckpt_name or 'unknown'}__db_{deb_ckpt_name or 'unknown'}"
 
             # Check if this checkpoint was already processed
             if ckpt_name in existing_results:
@@ -857,31 +876,19 @@ if __name__ == "__main__":
 
             if has_ci:
                 # print(f"Loading CleanIce: {ci_ckpt_path}")
-                frame_ci = Framework.from_checkpoint(
-                    ci_ckpt_path, device=gpu, testing=True
-                )
-                # Update processed_dir to use current server's data path
-                original_dir = Path(frame_ci.loader_opts.processed_dir).name
-                frame_ci.loader_opts.processed_dir = str(Path(server.processed_data_path) / original_dir)
+                frame_ci = load_lightning_module(ci_ckpt_path, gpu)
 
             if has_deb:
                 # print(f"Loading Debris: {deb_ckpt_path}")
-# Update processed_dir to use current server's data path
-                # First load checkpoint state to get original path
-                state = torch.load(deb_ckpt_path, map_location='cpu', weights_only=False)
-                original_dir = Path(state["loader_opts"].processed_dir).name
-                new_processed_dir = str(Path(server.processed_data_path) / original_dir)
-                
-                frame_deb = Framework.from_checkpoint(
-                    deb_ckpt_path, device=gpu, testing=True, new_data_path=new_processed_dir
-                )
+                frame_deb = load_lightning_module(deb_ckpt_path, gpu)
 
             # Get test tiles (from whichever model was loaded)
-            data_dir = (
-                frame_ci.loader_opts.processed_dir
-                if has_ci
-                else frame_deb.loader_opts.processed_dir
-            )
+            if has_ci and frame_ci is not None:
+                data_dir = pathlib.Path(frame_ci.processed_dir)
+            elif has_deb and frame_deb is not None:
+                data_dir = pathlib.Path(frame_deb.processed_dir)
+            else:
+                raise RuntimeError("No valid model loaded for test tiles")
             test_tiles = sorted(pathlib.Path(data_dir, "test").glob("tiff*"))
 
             # Create output directory for this checkpoint
@@ -952,22 +959,22 @@ if __name__ == "__main__":
 
                 P = precision(tp, fp, fn)
                 R = recall(tp, fp, fn)
-                I = IoU(tp, fp, fn)
+                iou = IoU(tp, fp, fn)
 
                 print(f"\n===== {ckpt_name} SUMMARY =====")
-                print(f"{cname}: P={P:.4f} R={R:.4f} IoU={I:.4f}")
+                print(f"{cname}: P={P:.4f} R={R:.4f} IoU={iou:.4f}")
 
-                # df_rows.append([ckpt_name, "TOTAL", P, R, I])
-                df_rows.append(["TOTAL", P, R, I])
+                # df_rows.append([ckpt_name, "TOTAL", P, R, iou])
+                df_rows.append(["TOTAL", P, R, iou])
                 all_checkpoint_results.append(
-                    {"checkpoint": ckpt_name, "P": P, "R": R, "IoU": I}
+                    {"checkpoint": ckpt_name, "P": P, "R": R, "IoU": iou}
                 )
 
             # Add checkpoint column to all rows
             df_rows_with_ckpt = [[ckpt_name] + row for row in df_rows]
 
             # Save per-tile metrics for this checkpoint
-            df = pd.DataFrame(df_rows_with_ckpt, columns=columns)
+            df = pd.DataFrame(df_rows_with_ckpt, columns=pd.Index(columns))
             df.to_csv(out_dir / "metrics.csv", index=False)
             print(f"Saved metrics: {out_dir / 'metrics.csv'}")
 
@@ -991,33 +998,36 @@ if __name__ == "__main__":
         saliency_label = ""
 
         if has_ci and not has_deb:
-            ci_ckpt_path = ci_checkpoints[0][0]
+            ci_ckpt_info = ci_checkpoints[0]
+            ci_ckpt_path = ci_ckpt_info[0] if ci_ckpt_info else None
+            if ci_ckpt_path is None:
+                raise RuntimeError("No CleanIce checkpoint found for saliency")
             print(f"Loading CleanIce checkpoint for saliency: {ci_ckpt_path.name}")
-            saliency_frame = Framework.from_checkpoint(
-                ci_ckpt_path, device=gpu, testing=True
-            )
+            saliency_frame = load_lightning_module(ci_ckpt_path, gpu)
             saliency_label = "CleanIce"
             target_class = 1  # Binary: foreground class
         elif has_deb and not has_ci:
-            deb_ckpt_path = deb_checkpoints[0][0]
+            deb_ckpt_info = deb_checkpoints[0]
+            deb_ckpt_path = deb_ckpt_info[0] if deb_ckpt_info else None
+            if deb_ckpt_path is None:
+                raise RuntimeError("No Debris checkpoint found for saliency")
             print(f"Loading Debris checkpoint for saliency: {deb_ckpt_path.name}")
-            saliency_frame = Framework.from_checkpoint(
-                deb_ckpt_path, device=gpu, testing=True
-            )
+            saliency_frame = load_lightning_module(deb_ckpt_path, gpu)
             saliency_label = "Debris"
             target_class = 1  # Binary: foreground class
         else:
             # For merged models, use cleanice frame
-            ci_ckpt_path = ci_checkpoints[0][0]
+            ci_ckpt_info = ci_checkpoints[0]
+            ci_ckpt_path = ci_ckpt_info[0] if ci_ckpt_info else None
+            if ci_ckpt_path is None:
+                raise RuntimeError("No CleanIce checkpoint found for saliency")
             print(f"Loading CleanIce checkpoint for saliency: {ci_ckpt_path.name}")
-            saliency_frame = Framework.from_checkpoint(
-                ci_ckpt_path, device=gpu, testing=True
-            )
+            saliency_frame = load_lightning_module(ci_ckpt_path, gpu)
             target_class = fi_conf.get("target_class", 1)
             saliency_label = f"Class_{target_class}"
 
         # Get test tiles
-        data_dir = pathlib.Path(saliency_frame.loader_opts.processed_dir)
+        data_dir = pathlib.Path(saliency_frame.processed_dir)
         test_tiles_for_saliency = sorted(data_dir.glob("test/tiff*"))
 
         print(f"Model: {saliency_label}")
@@ -1038,7 +1048,7 @@ if __name__ == "__main__":
         )
 
         # Get channel names
-        use_channels = saliency_frame.loader_opts.use_channels
+        use_channels = saliency_frame.use_channels
         channel_names = BAND_NAMES[use_channels]
 
         # Save results

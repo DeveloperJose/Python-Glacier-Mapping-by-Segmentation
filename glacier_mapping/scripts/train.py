@@ -18,9 +18,11 @@ project_root = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from glacier_mapping.model.unet import Unet
+from glacier_mapping.model.losses import customloss
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
 from glacier_mapping.lightning.callbacks import FullTestEvaluationCallback
+from glacier_mapping.data.data import fetch_loaders
 # Import MLflow utilities
 try:
     from glacier_mapping.utils.mlflow_utils import MLflowManager
@@ -30,142 +32,7 @@ except ImportError as e:
     MLFLOW_AVAILABLE = False
 
 
-class SimpleGlacierModule(pl.LightningModule):
-    """Simple Lightning module for glacier segmentation."""
-    
-    def __init__(
-        self,
-        model_config: Dict[str, Any],
-        loss_config: Dict[str, Any],
-        optim_config: Dict[str, Any],
-        scheduler_config: Dict[str, Any],
-        use_channels: list,
-        output_classes: list,
-        class_names: list,
-    ):
-        super().__init__()
-        self.save_hyperparameters()
-        
-        # Model setup
-        model_args = model_config.get('args', {})
-        # For binary classification, output_classes has 1 element but we need 2 output channels (BG, class)
-        out_channels = 2 if len(output_classes) == 1 else len(output_classes)
-        self.model = Unet(
-            inchannels=len(use_channels),
-            outchannels=out_channels,
-            **model_args
-        )
-        
-        # Loss setup - filter only supported args
-        supported_loss_args = {'act', 'smooth', 'label_smoothing', 'masked', 'theta0', 'theta', 'foreground_classes', 'alpha'}
-        loss_args = {k: v for k, v in loss_config.items() if k in supported_loss_args}
-        self.loss_fn = customloss(**loss_args)
-        
-        # Learnable sigma parameters for loss weighting
-        self.sigma_list = nn.ParameterList([
-            nn.Parameter(torch.tensor(1.0)) for _ in range(2)
-        ])
-        
-        # Optimizer config
-        self.lr = float(optim_config.get('args', {}).get('lr', 0.0003))
-        self.weight_decay = float(optim_config.get('args', {}).get('weight_decay', 5e-5))
-        
-        # Scheduler config
-        self.scheduler_config = scheduler_config
-        
-        # Class info
-        self.class_names = class_names
-        self.output_classes = output_classes
-        self.use_channels = use_channels
-        
-    def forward(self, x):
-        return self.model(x)
-    
-    def training_step(self, batch, batch_idx):
-        x, y_onehot, y_int = batch
-        
-        # Convert from NHWC to NCHW format expected by Conv2D
-        x = x.permute(0, 3, 1, 2).contiguous()
-        y_onehot = y_onehot.permute(0, 3, 1, 2).contiguous()
-        y_int = y_int.squeeze(-1)  # Remove last dimension
-        
-        # Forward pass
-        y_hat = self(x)
-        
-        # Compute loss (customloss returns [dice_loss, boundary_loss])
-        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
-        loss = loss_list[0] + loss_list[1]  # Combine both losses
-        
-        # Log metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('lr', self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True)
-        
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        x, y_onehot, y_int = batch
-        
-        # Convert from NHWC to NCHW format expected by Conv2D
-        x = x.permute(0, 3, 1, 2).contiguous()
-        y_onehot = y_onehot.permute(0, 3, 1, 2).contiguous()
-        y_int = y_int.squeeze(-1)  # Remove last dimension
-        
-        # Forward pass
-        with torch.no_grad():
-            y_hat = self(x)
-        
-        # Compute loss
-        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
-        loss = loss_list[0] + loss_list[1]  # Combine both losses
-        
-        # Log metrics
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        
-        return loss
-    
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), 
-            lr=self.lr, 
-            weight_decay=self.weight_decay
-        )
-        
-        # Add scheduler if specified
-        if self.scheduler_config and self.scheduler_config.get('name') == 'OneCycleLR':
-            total_steps = int(self.trainer.estimated_stepping_batches)
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=self.scheduler_config.get('args', {}).get('max_lr', 0.001),
-                total_steps=total_steps,
-                pct_start=self.scheduler_config.get('args', {}).get('pct_start', 0.3),
-                anneal_strategy=self.scheduler_config.get('args', {}).get('anneal_strategy', 'cos')
-            )
-            return [optimizer], [scheduler]
-        
-        return optimizer
 
-
-class SimpleDataModule(pl.LightningDataModule):
-    """Simple data module using existing fetch_loaders function."""
-    
-    def __init__(self, loader_config: Dict[str, Any]):
-        super().__init__()
-        self.loader_config = loader_config
-        
-    def setup(self, stage=None):
-        # Use existing fetch_loaders function
-        self.train_loader, self.val_loader, self.test_loader = fetch_loaders(
-            **self.loader_config
-        )
-    
-    def train_dataloader(self):
-        return self.train_loader
-    
-    def val_dataloader(self):
-        return self.val_loader
-    
-    def test_dataloader(self):
-        return self.test_loader
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -319,8 +186,7 @@ def main():
             filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}"
         ),
         LearningRateMonitor(logging_interval='step'),
-        FullTestEvaluationCallback(
-            full_eval_every=training_opts.get('full_eval_every', 10),
+        BestModelFullEvaluationCallback(
             num_samples=training_opts.get('num_viz_samples', 4)
         )
     ]
