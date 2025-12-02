@@ -20,6 +20,18 @@ sys.path.insert(0, str(project_root))
 from glacier_mapping.model.unet import Unet
 from glacier_mapping.model.losses import customloss
 from glacier_mapping.data.data import fetch_loaders
+# Import MLflow utilities
+try:
+    import sys
+    import os
+    # Add utils directory to path
+    utils_path = os.path.join(os.path.dirname(__file__), '..', 'utils')
+    sys.path.insert(0, utils_path)
+    from mlflow_utils import MLflowManager
+    MLFLOW_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: MLflow utilities not available: {e}")
+    MLFLOW_AVAILABLE = False
 
 
 class SimpleGlacierModule(pl.LightningModule):
@@ -175,6 +187,11 @@ def main():
     parser.add_argument("--gpu", type=int, default=0, help="GPU device to use")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     
+    # MLflow arguments
+    parser.add_argument("--server", type=str, required=True, help="Server name (must exist in servers.yaml)")
+    parser.add_argument("--mlflow-enabled", type=str, default='true', help="Enable MLflow logging (true/false)")
+    parser.add_argument("--tracking-uri", type=str, default="https://mlflow.developerjose.duckdns.org/", help="MLflow tracking URI")
+    
     args = parser.parse_args()
     
     # Load configuration
@@ -183,6 +200,21 @@ def main():
         config_path = project_root / config_path
     
     config = load_config(str(config_path))
+    
+    # Parse MLflow arguments
+    mlflow_enabled = args.mlflow_enabled.lower() == 'true'
+    
+    # Load server configuration (explicit, no defaults)
+    servers_yaml_path = project_root / 'conf' / 'servers.yaml'
+    if MLFLOW_AVAILABLE:
+        server_config = MLflowManager.load_server_config(str(servers_yaml_path), args.server)
+    else:
+        # Fallback server config for when MLflow unavailable
+        with open(servers_yaml_path, 'r') as f:
+            servers = yaml.safe_load(f)
+        if args.server not in servers:
+            raise ValueError(f"Server '{args.server}' not found in {servers_yaml_path}")
+        server_config = servers[args.server]
     
     # Extract configuration sections
     training_opts = config.get('training_opts', {})
@@ -193,11 +225,28 @@ def main():
     scheduler_opts = config.get('scheduler_opts', {})
     
     # Get run name and output directory
-    run_name = training_opts.get('run_name', 'experiment')
+    base_run_name = training_opts.get('run_name', 'experiment')
     output_dir = training_opts.get('output_dir', 'output/')
     
+    # Generate MLflow experiment name and run name
+    if mlflow_enabled and MLFLOW_AVAILABLE:
+        experiment_name = MLflowManager.categorize_experiment(config)
+        run_name = MLflowManager.generate_run_name(base_run_name, args.server)
+        mlflow_params = MLflowManager.extract_mlflow_params(config, server_config)
+        mlflow_tags = MLflowManager.generate_run_tags(config, server_config, str(config_path))
+    else:
+        experiment_name = None
+        run_name = base_run_name
+        mlflow_params = {}
+        mlflow_tags = {}
+    
     print(f"Loaded config from: {config_path}")
-    print(f"Run name: {run_name}")
+    print(f"Server: {args.server}")
+    print(f"MLflow enabled: {mlflow_enabled}")
+    if mlflow_enabled and MLFLOW_AVAILABLE:
+        print(f"MLflow experiment: {experiment_name}")
+        print(f"MLflow run name: {run_name}")
+    print(f"Base run name: {base_run_name}")
     print(f"Output directory: {output_dir}")
     print(f"Data path: {loader_opts.get('processed_dir', 'NOT_SET')}")
     print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
@@ -221,10 +270,28 @@ def main():
     
     # Setup logging
     print("Setting up logging...")
-    logger = TensorBoardLogger(
+    loggers = [TensorBoardLogger(
         save_dir=f"{output_dir}/logs",
         name=run_name
-    )
+    )]
+    
+    # Add MLflow logger if enabled and available
+    mlflow_logger = None
+    if mlflow_enabled and MLFLOW_AVAILABLE and experiment_name:
+        try:
+            from pytorch_lightning.loggers import MLFlowLogger
+            mlflow_logger = MLFlowLogger(
+                experiment_name=experiment_name,
+                run_name=run_name,
+                tracking_uri=args.tracking_uri,
+                tags=mlflow_tags,
+                log_model=False  # We'll handle model logging separately
+            )
+            loggers.append(mlflow_logger)
+            print(f"MLflow logger setup complete for experiment: {experiment_name}")
+        except Exception as e:
+            print(f"Warning: Failed to setup MLflow logger: {e}")
+            mlflow_logger = None
     
     # Setup callbacks
     callbacks = [
@@ -245,7 +312,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu],
         max_epochs=args.max_epochs,
-        logger=logger,
+        logger=loggers,  # Support multiple loggers
         callbacks=callbacks,
         precision="16-mixed",
         log_every_n_steps=10,
