@@ -4,7 +4,6 @@
 import argparse
 import glob
 import os
-import subprocess
 import sys
 from typing import Dict, List, Any
 
@@ -13,235 +12,259 @@ import yaml
 try:
     import ray
     from ray import tune
-
     RAY_AVAILABLE = True
 except ImportError:
     RAY_AVAILABLE = False
     print("Warning: Ray not available. Install with: uv pip install ray[tune]")
 
 
+# -------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------
 def load_server_config(servers_yaml_path: str, server_name: str) -> Dict[str, Any]:
-    """Load server configuration from servers.yaml."""
     with open(servers_yaml_path, "r") as f:
         servers = yaml.safe_load(f)
-
     if server_name not in servers:
         raise ValueError(f"Server '{server_name}' not found in {servers_yaml_path}")
-
     return servers[server_name]
 
 
-def get_configs_for_server(
-    server_name: str, patterns: List[str] | None = None
-) -> List[str]:
-    """Get all experiment configs assigned to specified server."""
+def get_configs_for_server(server_name: str, patterns: List[str] | None = None) -> List[str]:
     configs = []
     config_files = glob.glob("configs/experiments/*.yaml")
 
-    for config_file in config_files:
-        # Skip debug and initial validation configs unless explicitly requested
-        if (
-            any(x in config_file for x in ["debug_", "initial_validation"])
-            and not patterns
-        ):
+    for config_path in config_files:
+        if any(x in config_path for x in ["debug_", "initial_validation"]) and not patterns:
             continue
 
-        with open(config_file) as f:
-            config = yaml.safe_load(f)
-            if config.get("server") == server_name:
-                # Apply pattern filtering if specified
-                if patterns:
-                    config_name = os.path.basename(config_file)
-                    if not any(
-                        pattern.replace("*", "") in config_name for pattern in patterns
-                    ):
-                        continue
-                configs.append(config_file)
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+
+        # server filter
+        if cfg.get("server") != server_name:
+            continue
+
+        # optional pattern filters
+        if patterns:
+            base = os.path.basename(config_path)
+            if not any(p.replace("*", "") in base for p in patterns):
+                continue
+
+        configs.append(config_path)
 
     return sorted(configs)
 
 
-def get_gpu_resources(
-    server_name: str, gpu_per_trial: float | None = None
-) -> Dict[str, float]:
-    """Calculate optimal GPU resources based on server hardware."""
+def get_gpu_resources(server_name: str, gpu_per_trial: float | None = None):
     if gpu_per_trial is not None:
         return {"gpu": gpu_per_trial}
 
-    resources = {
-        "desktop": 0.5,  # 2 trials on 8GB RTX 3060 Ti
-        "bilbo": 0.5,  # 2 trials on 24GB RTX 3090s (bigger datasets)
-        "frodo": 0.33,  # 3 trials on 11GB RTX 2080 Tis
+    defaults = {
+        "desktop": 0.5,
+        "bilbo":   0.5,
+        "frodo":   0.33,
     }
-    return {"gpu": resources[server_name]}
+    return {"gpu": defaults[server_name]}
 
 
+# -------------------------------------------------------------
+# Trainable
+# -------------------------------------------------------------
 def ray_train(config: Dict[str, Any]):
-    """Training function for Ray Tune."""
-    cmd = [
-        "uv",
-        "run",
-        "python",
-        "scripts/train.py",
-        "--config",
-        config["config_path"],
-        "--server",
-        config["server"],
-        "--max-epochs",
-        str(config["max_epochs"]),
-        "--mlflow-enabled",
-        "true",
-        "--tracking-uri",
-        config["tracking_uri"],
-        "--output-dir",
-        config["output_path"],
-    ]
+    """Ray trainable. Config is FLAT — no nested dicts."""
+    from ray import tune  # Import inside function to ensure it's available
+    
+    config_path   = config["config_path"]
+    server        = config["server"]
+    max_epochs    = config["max_epochs"]
+    tracking_uri  = config["tracking_uri"]
+    output_path   = config["output_path"]
 
-    print(f"Starting training: {config['config_path']} on {config['server']}")
+    print(f"[RAY] Running: {config_path}")
+    
+    # Find the actual working_dir (where Ray extracted the packaged code)
+    current_dir = os.getcwd()
+    print(f"[RAY] Current working directory: {current_dir}")
+    
+    # Find the packaged code directory by looking for where scripts module is
+    project_root = None
+    for path_entry in sys.path:
+        test_path = os.path.join(path_entry, "scripts", "train.py")
+        if os.path.exists(test_path):
+            project_root = path_entry
+            break
+    
+    if not project_root:
+        raise RuntimeError("Could not find project root in Ray worker")
+    
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+        print(f"[RAY] Added {project_root} to sys.path")
+    else:
+        print(f"[RAY] Found project root at: {project_root} (already in sys.path)")
+    
+    # Make config path absolute relative to project root
+    absolute_config_path = os.path.join(project_root, config_path)
+    if not os.path.exists(absolute_config_path):
+        raise FileNotFoundError(f"Config not found: {absolute_config_path}")
+    
+    print(f"[RAY] Using config: {absolute_config_path}")
 
+    original_argv = sys.argv.copy()
+    original_cwd = os.getcwd()
+    
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print(f"Completed training: {config['config_path']}")
-        return {"status": "completed", "output": result.stdout}
-    except subprocess.CalledProcessError as e:
-        print(f"Failed training: {config['config_path']}, error: {e.stderr}")
-        return {"status": "failed", "error": e.stderr}
+        # Change to project root so relative paths in train.py work
+        os.chdir(project_root)
+        print(f"[RAY] Changed to project root: {project_root}")
+        
+        # Set up arguments as if we called train.py from command line
+        sys.argv = [
+            "train.py",
+            "--config", absolute_config_path,
+            "--server", server,
+            "--max-epochs", str(max_epochs),
+            "--mlflow-enabled", "true",
+            "--tracking-uri", tracking_uri,
+            "--output-dir", output_path,
+            "--gpu", "0",  # Default to GPU 0 for Ray workers
+        ]
+        
+        # Import and call the train script's main function
+        from scripts.train import main as train_main
+        
+        train_main()
+        
+        print(f"[RAY] Success: {config_path}")
+        tune.report({"result": 1})
+        
+    except Exception as e:
+        print(f"[RAY] Failure: {config_path} → {str(e)}")
+        import traceback
+        traceback.print_exc()
+        tune.report({"result": 0})
+        
+    finally:
+        # Always restore original sys.argv and working directory
+        sys.argv = original_argv
+        os.chdir(original_cwd)
 
 
+# -------------------------------------------------------------
+# Main
+# -------------------------------------------------------------
 def main():
-    """Main orchestration function."""
     if not RAY_AVAILABLE:
-        print("Error: Ray is not available. Install with: uv pip install ray[tune]")
+        print("Ray not installed. Run: uv pip install ray[tune]")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="Ray Tune training orchestration")
-    parser.add_argument(
-        "--server",
-        required=True,
-        choices=["desktop", "bilbo", "frodo"],
-        help="Target server for experiment execution",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be executed without running",
-    )
-    parser.add_argument(
-        "--max-epochs",
-        type=int,
-        default=500,
-        help="Override max epochs for all experiments",
-    )
-    parser.add_argument(
-        "--gpu-per-trial", type=float, help="Override GPU allocation per trial"
-    )
-    parser.add_argument(
-        "--patterns",
-        nargs="+",
-        help="Run only configs matching these patterns (e.g., baseline_*)",
-    )
-    parser.add_argument(
-        "--resume", action="store_true", help="Resume from previous failed experiments"
-    )
-    parser.add_argument(
-        "--tracking-uri",
-        default="https://mlflow.developerjose.duckdns.org/",
-        help="MLflow tracking server URI",
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=1,
-        help="Number of samples per config (for hyperparameter sweeps)",
-    )
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server", required=True, choices=["desktop", "bilbo", "frodo"])
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--max-epochs", type=int, default=500)
+    parser.add_argument("--gpu-per-trial", type=float)
+    parser.add_argument("--patterns", nargs="+")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--tracking-uri", default="https://mlflow.developerjose.duckdns.org/")
+    parser.add_argument("--num-samples", type=int, default=1)
     args = parser.parse_args()
 
-    # Validate server and load configuration
-    server_config = load_server_config("configs/servers.yaml", args.server)
+    # Load server and configs
+    server_cfg = load_server_config("configs/servers.yaml", args.server)
     configs = get_configs_for_server(args.server, args.patterns)
 
     if not configs:
-        print(f"No experiment configs found for server '{args.server}'")
-        if args.patterns:
-            print(f"with patterns: {args.patterns}")
+        print("No configs found for server.")
         sys.exit(1)
 
-    print(f"Found {len(configs)} experiment configs for server '{args.server}':")
-    for config in configs:
-        print(f"  - {config}")
+    print("\nFound experiment configs:")
+    for c in configs:
+        print("  -", c)
 
     if args.dry_run:
-        print("\nDry run - not executing experiments")
-        return
+        print("\nDry run complete.")
+        sys.exit(0)
 
-    # Get GPU resources for this server
-    gpu_resources = get_gpu_resources(args.server, args.gpu_per_trial)
-    print(f"\nGPU allocation per trial: {gpu_resources}")
+    # Compute project root for Ray working_dir
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-    # Initialize Ray
-    if not ray.is_initialized():
-        ray.init()
+    print(f"[RAY] Project root: {project_root}")
 
-    # Prepare experiment configurations
-    experiment_configs = []
-    for config_path in configs:
-        experiment_configs.append(
-            {
-                "config_path": config_path,
-                "server": args.server,
-                "max_epochs": args.max_epochs,
-                "tracking_uri": args.tracking_uri,
-                "output_path": server_config["output_path"],
+    # Ray init (ray is guaranteed to be available due to RAY_AVAILABLE check above)
+    if not ray.is_initialized():  # type: ignore[possibly-unbound]
+        ray.init(  # type: ignore[possibly-unbound]
+            runtime_env={
+                # Pack the ENTIRE repo as working directory
+                "working_dir": project_root,
+
+                # Things to exclude to keep packaging fast
+                # Note: Be careful with excludes - they match recursively!
+                # We exclude large data directories but NOT glacier_mapping/data (the code module)
+                "excludes": [
+                    ".git",
+                    ".venv",
+                    "datasets/*",  # Exclude datasets directory contents
+                    "output/*",    # Exclude output directory contents
+                    "mlruns/*",    # Exclude mlruns directory contents
+                    "__pycache__",
+                    "*.pyc",
+                ],
             }
         )
 
-    # Configure Ray Tune
-    tuner = tune.Tuner(
-        tune.with_parameters(ray_train),
-        param_space={"config": tune.grid_search(experiment_configs)},
-        run_config=tune.RunConfig(
-            name=f"glacier_experiments_{args.server}",
-            stop={"training_iteration": 1},  # Each config runs once
-            failure_config=tune.FailureConfig(max_failures=3),
-            verbose=1,
-            checkpoint_config=tune.CheckpointConfig(
-                checkpoint_score_attribute="status",
-                checkpoint_score_order="max",
-            ),
+    # Build flat configs for Ray
+    experiment_configs = []
+    for c in configs:
+        experiment_configs.append({
+            "config_path": c,
+            "server": args.server,
+            "max_epochs": args.max_epochs,
+            "tracking_uri": args.tracking_uri,
+            "output_path": server_cfg["output_path"],
+        })
+
+    # Get GPU resource allocation
+    gpu_resources = get_gpu_resources(args.server, args.gpu_per_trial)
+    print(f"[RAY] GPU resources per trial: {gpu_resources}")
+    
+    tuner = tune.Tuner(  # type: ignore[possibly-unbound]
+        tune.with_resources(  # type: ignore[possibly-unbound]
+            ray_train,
+            resources=gpu_resources
         ),
-        tune_config=tune.TuneConfig(
-            metric="status",
+        param_space=tune.grid_search(experiment_configs),  # type: ignore[possibly-unbound]
+        tune_config=tune.TuneConfig(  # type: ignore[possibly-unbound]
+            metric="result",
             mode="max",
-            num_samples=args.num_samples,
         ),
+        run_config=tune.RunConfig(  # type: ignore[possibly-unbound]
+            name=f"glacier_experiments_{args.server}",
+            verbose=1,
+        )
     )
 
-    print(f"\nStarting Ray Tune on server '{args.server}'...")
-    print("Ray Tune dashboard: http://localhost:8265")
-    print(f"MLflow tracking: {args.tracking_uri}")
+    print("\nStarting Ray Tune...\n")
+    results = tuner.fit()
 
-    # Run experiments
-    result_grid = tuner.fit()
-
-    # Report results
-    print(f"\nExperiment Results for {args.server}:")
+    # Summaries
     completed = 0
     failed = 0
 
-    for result in result_grid:
-        if result.metrics.get("status") == "completed":
+    for r in results:
+        metrics = r.metrics or {}
+        cfg      = r.config or {}
+        cfg_path = cfg.get("config_path", "<unknown>")
+        val      = metrics.get("result", 0)
+
+        if val == 1:
             completed += 1
         else:
             failed += 1
-            print(f"Failed: {result.config['config']['config_path']}")
+            print("FAILED:", cfg_path)
 
-    print(f"Completed: {completed}, Failed: {failed}")
-
-    if failed > 0:
-        print("\nTo resume failed experiments, run:")
-        print(f"uv run python scripts/ray_train.py --server {args.server} --resume")
+    print(f"\nCompleted: {completed}, Failed: {failed}")
 
 
 if __name__ == "__main__":
     main()
+
