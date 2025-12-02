@@ -27,15 +27,20 @@ class MinimalGlacierModule(pl.LightningModule):
     """Minimal Lightning module for glacier segmentation."""
     
     def __init__(self, model_config: Dict, loss_config: Dict, 
-                 optim_config: Dict, scheduler_config: Optional[Dict] = None):
+                 optim_config: Dict, scheduler_config: Optional[Dict] = None,
+                 loader_config: Optional[Dict] = None):
         super().__init__()
         self.save_hyperparameters()
         
         # Model
         model_args = model_config.get('args', {})
+        # Get use_channels from loader_opts since that's where it's defined in config
+        use_channels = loader_config.get('use_channels', [0, 1, 2]) if loader_config else [0, 1, 2]
+        output_classes = loader_config.get('output_classes', [1, 2]) if loader_config else [1, 2]
+        
         self.model = Unet(
-            inchannels=len(model_args.get('use_channels', [0, 1, 2])),
-            outchannels=len(model_args.get('output_classes', [1, 2])),
+            inchannels=len(use_channels),
+            outchannels=len(output_classes),
             net_depth=model_args.get('net_depth', 4),
             dropout=model_args.get('dropout', 0.1),
             spatial=model_args.get('spatial', True),
@@ -53,8 +58,8 @@ class MinimalGlacierModule(pl.LightningModule):
         ])
         
         # Optimizer config
-        self.lr = optim_config.get('args', {}).get('lr', 0.0003)
-        self.weight_decay = optim_config.get('args', {}).get('weight_decay', 5e-5)
+        self.lr = float(optim_config.get('args', {}).get('lr', 0.0003))
+        self.weight_decay = float(optim_config.get('args', {}).get('weight_decay', 5e-5))
         
         # Scheduler config
         self.scheduler_config = scheduler_config
@@ -64,11 +69,16 @@ class MinimalGlacierModule(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         x, y_onehot, y_int = batch
+        # Convert from (N, H, W, C) to (N, C, H, W) format expected by Conv2D
+        x = x.permute(0, 3, 1, 2)
+        y_onehot = y_onehot.permute(0, 3, 1, 2)
+        y_int = y_int.squeeze(-1)  # Remove last dimension
+        
         y_hat = self(x)
         
-        # Compute loss with sigma
-        sigma_values = [sigma.item() for sigma in self.sigma_list]
-        loss = self.loss_fn(y_hat, y_onehot, y_int, sigma_values)
+        # Compute loss (customloss returns [dice_loss, boundary_loss])
+        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
+        loss = loss_list[0] + loss_list[1]  # Combine both losses
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('lr', self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True)
@@ -76,10 +86,15 @@ class MinimalGlacierModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         x, y_onehot, y_int = batch
+        # Convert from (N, H, W, C) to (N, C, H, W) format expected by Conv2D
+        x = x.permute(0, 3, 1, 2)
+        y_onehot = y_onehot.permute(0, 3, 1, 2)
+        y_int = y_int.squeeze(-1)  # Remove last dimension
+        
         y_hat = self(x)
         
-        sigma_values = [sigma.item() for sigma in self.sigma_list]
-        loss = self.loss_fn(y_hat, y_onehot, y_int, sigma_values)
+        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
+        loss = loss_list[0] + loss_list[1]  # Combine both losses
         
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
@@ -93,20 +108,15 @@ class MinimalGlacierModule(pl.LightningModule):
         
         # Add scheduler if specified
         if self.scheduler_config and self.scheduler_config.get('name') == 'OneCycleLR':
+            total_steps = int(self.trainer.estimated_stepping_batches)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=self.scheduler_config.get('args', {}).get('max_lr', 0.001),
-                total_steps=self.trainer.estimated_stepping_batches,
+                total_steps=total_steps,
                 pct_start=self.scheduler_config.get('args', {}).get('pct_start', 0.3),
                 anneal_strategy=self.scheduler_config.get('args', {}).get('anneal_strategy', 'cos')
             )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",
-                },
-            }
+            return [optimizer], [scheduler]
         
         return optimizer
 
@@ -114,18 +124,26 @@ class MinimalGlacierModule(pl.LightningModule):
 class MinimalDataModule(pl.LightningDataModule):
     """Minimal data module."""
     
-    def __init__(self, loader_config: Dict):
+    def __init__(self, loader_config: Dict, processed_dir: Optional[str] = None):
         super().__init__()
         self.loader_config = loader_config
-        self.processed_dir = os.environ.get(
-            'GLACIER_PROCESSED_DATA', 
-            "/home/devj/local-debian/processed_data/bibek_w512_o64_f1_v2"
-        )
+        
+        # Use provided processed_dir, or from config, or from env, or default
+        if processed_dir:
+            self.processed_dir = processed_dir
+        elif 'processed_dir' in loader_config:
+            self.processed_dir = loader_config['processed_dir']
+        else:
+            data_path = os.environ.get('GLACIER_DATA_PATH', '/home/devj/local-debian/datasets/HKH')
+            dataset_name = "bibek_w512_o64_f1_v2"
+            self.processed_dir = f"{data_path}/{dataset_name}/"
     
     def setup(self, stage=None):
+        # Remove processed_dir from loader_config to avoid passing it twice
+        loader_config = {k: v for k, v in self.loader_config.items() if k != 'processed_dir'}
         self.train_loader, self.val_loader, self.test_loader = fetch_loaders(
-            processed_dir=self.processed_dir,
-            **self.loader_config
+            self.processed_dir,
+            **loader_config
         )
     
     def train_dataloader(self):
@@ -147,6 +165,9 @@ def main():
     parser.add_argument("--experiment-name", type=str, default="minimal_lightning")
     parser.add_argument("--max-epochs", type=int, default=5)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--gpu", type=int, default=0, help="GPU device to use")
+    parser.add_argument("--mlflow-uri", type=str, default=None, help="MLflow tracking URI")
+    parser.add_argument("--data-path", type=str, default=None, help="Override data path")
     
     args = parser.parse_args()
     
@@ -162,24 +183,41 @@ def main():
     print(f"Experiment: {args.experiment_name}")
     print(f"Max epochs: {args.max_epochs}")
     
+    # Debug: Print loaded config
+    loader_opts = config.get('loader_opts', {})
+    print(f"DEBUG: Loaded loader_opts: {loader_opts}")
+    print(f"DEBUG: use_channels from config: {loader_opts.get('use_channels', 'NOT_FOUND')}")
+    print(f"DEBUG: output_classes from config: {loader_opts.get('output_classes', 'NOT_FOUND')}")
+    
     # Create components
     print("Creating model...")
     model = MinimalGlacierModule(
         model_config=config.get('model_opts', {}),
         loss_config=config.get('loss_opts', {}),
         optim_config=config.get('optim_opts', {}),
-        scheduler_config=config.get('scheduler_opts')
+        scheduler_config=config.get('scheduler_opts'),
+        loader_config=config.get('loader_opts', {})
     )
     
     print("Creating data module...")
-    datamodule = MinimalDataModule(config.get('loader_opts', {}))
+    # Use provided data path or from config
+    processed_dir = args.data_path or config['loader_opts'].get('processed_dir', None)
+    
+    # Create loader config without processed_dir to avoid conflicts
+    loader_config = {k: v for k, v in config.get('loader_opts', {}).items() if k != 'processed_dir'}
+    
+    datamodule = MinimalDataModule(
+        loader_config=loader_config,
+        processed_dir=processed_dir
+    )
     
     # Setup logging
     print("Setting up logging...")
+    mlflow_uri = args.mlflow_uri or "http://localhost:5000"
     mlflow_logger = MLFlowLogger(
         experiment_name="glacier_mapping",
         run_name=args.experiment_name,
-        tracking_uri="http://localhost:5000",
+        tracking_uri=mlflow_uri,
         tags={"framework": "pytorch_lightning", "test": "minimal"}
     )
     
@@ -204,7 +242,7 @@ def main():
     print("Creating trainer...")
     trainer = pl.Trainer(
         accelerator="gpu",
-        devices=1,
+        devices=[args.gpu],
         max_epochs=args.max_epochs,
         logger=[mlflow_logger, tb_logger],
         callbacks=callbacks,

@@ -3,6 +3,7 @@ analyze_training_run.py
 dissertation/
 original_code/
 netcdf4-glacier-code
+lightning_outputs**/
 
 **output/
 **pred_runs/
