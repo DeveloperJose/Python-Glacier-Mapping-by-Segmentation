@@ -6,19 +6,15 @@ import pathlib
 from typing import Dict, Any
 
 import torch
-import torch.nn as nn
 import yaml
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, DeviceStatsMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from glacier_mapping.model.unet import Unet
-from glacier_mapping.model.losses import customloss
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
 from glacier_mapping.lightning.best_model_callback import BestModelFullEvaluationCallback
 
-from glacier_mapping.data.data import fetch_loaders
 # Import MLflow utilities
 try:
     from glacier_mapping.utils.mlflow_utils import MLflowManager
@@ -183,7 +179,7 @@ def main():
             filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}"
         ),
         LearningRateMonitor(logging_interval='step'),
-        DeviceStatsMonitor(cpu_stats=True),  # Automatic system monitoring
+        # DeviceStatsMonitor(cpu_stats=True),  # Automatic system monitoring
         BestModelFullEvaluationCallback(
             num_samples=training_opts.get('num_viz_samples', 4)
         )

@@ -242,9 +242,16 @@ class BestModelFullEvaluationCallback(Callback):
                 y_gt_vis_binary[y_true_raw == 255] = 255
                 y_gt_vis = y_gt_vis_binary
             else:  # Multi-class
+                # Keep original 0,1,2 range - don't map to 1,2,3
+                y_gt_vis = y_true_raw.copy()
                 y_gt_vis[ignore] = 255
             
             y_pred_vis[ignore] = 255
+            
+            # Convert predictions from 1,2,3 back to 0,1,2 for consistent visualization (multi-class only)
+            if len(output_classes) > 1:  # Multi-class only
+                valid_pred = (y_pred_vis != 255) & (y_pred_vis > 0)
+                y_pred_vis[valid_pred] = y_pred_vis[valid_pred] - 1  # 1→0, 2→1, 3→2
             
             x_rgb = make_rgb_preview(x_full)
             
