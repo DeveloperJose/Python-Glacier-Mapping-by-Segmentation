@@ -18,16 +18,12 @@ project_root = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from glacier_mapping.model.unet import Unet
-from glacier_mapping.model.losses import customloss
-from glacier_mapping.data.data import fetch_loaders
+from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
+from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
+from glacier_mapping.lightning.callbacks import FullTestEvaluationCallback
 # Import MLflow utilities
 try:
-    import sys
-    import os
-    # Add utils directory to path
-    utils_path = os.path.join(os.path.dirname(__file__), '..', 'utils')
-    sys.path.insert(0, utils_path)
-    from mlflow_utils import MLflowManager
+    from glacier_mapping.utils.mlflow_utils import MLflowManager
     MLFLOW_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: MLflow utilities not available: {e}")
@@ -223,6 +219,7 @@ def main():
     loss_opts = config.get('loss_opts', {})
     optim_opts = config.get('optim_opts', {})
     scheduler_opts = config.get('scheduler_opts', {})
+    metrics_opts = config.get('metrics_opts', {})
     
     # Get run name and output directory
     base_run_name = training_opts.get('run_name', 'experiment')
@@ -252,17 +249,35 @@ def main():
     print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
     print(f"Output classes: {loader_opts.get('output_classes', 'NOT_SET')}")
     
+    # Save config as JSON for upload script
+    import json
+    config_output_dir = pathlib.Path(output_dir) / run_name
+    config_output_dir.mkdir(parents=True, exist_ok=True)
+    config_json_path = config_output_dir / "conf.json"
+    with open(config_json_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"Config saved to: {config_json_path}")
+    
     # Create data module
     print("Creating data module...")
-    datamodule = SimpleDataModule(loader_opts)
+    datamodule = GlacierDataModule(
+        processed_dir=loader_opts.get('processed_dir', '/tmp'),
+        batch_size=loader_opts.get('batch_size', 8),
+        use_channels=loader_opts.get('use_channels', [0, 1, 2]),
+        output_classes=loader_opts.get('output_classes', [1]),
+        class_names=loader_opts.get('class_names', ["BG", "CleanIce", "Debris"]),
+        normalize=loader_opts.get('normalize', 'mean-std'),
+    )
     
     # Create model
     print("Creating model...")
-    model = SimpleGlacierModule(
-        model_config=model_opts,
-        loss_config=loss_opts,
-        optim_config=optim_opts,
-        scheduler_config=scheduler_opts,
+    model = GlacierSegmentationModule(
+        model_opts=model_opts,
+        loss_opts=loss_opts,
+        optim_opts=optim_opts,
+        scheduler_opts=scheduler_opts,
+        metrics_opts=metrics_opts,
+        training_opts=training_opts,
         use_channels=loader_opts.get('use_channels', [0, 1, 2]),
         output_classes=loader_opts.get('output_classes', [1]),
         class_names=loader_opts.get('class_names', ["BG", "CleanIce", "Debris"]),
@@ -303,7 +318,11 @@ def main():
             save_last=True,
             filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}"
         ),
-        LearningRateMonitor(logging_interval='step')
+        LearningRateMonitor(logging_interval='step'),
+        FullTestEvaluationCallback(
+            full_eval_every=training_opts.get('full_eval_every', 10),
+            num_samples=training_opts.get('num_viz_samples', 4)
+        )
     ]
     
     # Create trainer

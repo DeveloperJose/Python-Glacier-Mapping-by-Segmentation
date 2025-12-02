@@ -48,13 +48,8 @@ class GlacierDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
 
-        # Data augmentation transforms for training
-        self.train_transform = transforms.Compose([
-            # DropoutChannels(0.5),  # Commented out from original
-            transforms.RandomHorizontalFlip(0.15),
-            transforms.RandomVerticalFlip(0.15),
-            # ElasticDeform(0.2),  # Commented out from original
-        ])
+        # Data augmentation transforms for training (disabled for debugging)
+        self.train_transform = None
 
         # No augmentation for validation/test
         self.val_transform = None

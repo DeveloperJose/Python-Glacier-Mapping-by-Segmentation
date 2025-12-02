@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
-from torchmetrics import IoU as TorchMetricsIoU
+from torchmetrics import JaccardIndex as TorchMetricsIoU
 from torchmetrics import Precision, Recall
 
 import pytorch_lightning as pl
@@ -78,11 +78,20 @@ class GlacierSegmentationModule(pl.LightningModule):
         self.output_classes = output_classes
         self.use_channels = use_channels
         
-        # Initialize model
-        self.model = Unet(**model_opts.args)
+        # Initialize model with proper parameters
+        model_args = model_opts.get('args', {})
+        # For binary classification, output_classes has 1 element but we need 2 output channels (BG, class)
+        out_channels = 2 if len(output_classes) == 1 else len(output_classes)
+        self.model = Unet(
+            inchannels=len(use_channels),
+            outchannels=out_channels,
+            **model_args
+        )
         
-        # Initialize loss function
-        self.loss_fn = customloss(**loss_opts)
+        # Initialize loss function - filter only supported args
+        supported_loss_args = {'act', 'smooth', 'label_smoothing', 'masked', 'theta0', 'theta', 'foreground_classes', 'alpha'}
+        loss_args = {k: v for k, v in loss_opts.items() if k in supported_loss_args}
+        self.loss_fn = customloss(**loss_args)
         
         # Initialize learnable sigma parameters for loss weighting
         self.sigma_list = nn.ParameterList([
@@ -92,8 +101,8 @@ class GlacierSegmentationModule(pl.LightningModule):
         # Initialize metrics
         self._setup_metrics()
         
-        # For mixed precision training
-        self.automatic_optimization = False  # Manual optimization for custom loss with sigma
+        # For mixed precision training - use automatic optimization
+        self.automatic_optimization = True
         
         # Track best validation loss
         self.best_val_loss = float('inf')
@@ -110,7 +119,7 @@ class GlacierSegmentationModule(pl.LightningModule):
                 
             class_name = self.class_names[class_idx]
             
-            # IoU
+            # IoU (JaccardIndex)
             self.train_metrics[f'{class_name}_iou'] = TorchMetricsIoU(
                 task="binary", average='macro'
             )
@@ -138,7 +147,7 @@ class GlacierSegmentationModule(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
-        """Training step with manual optimization for custom loss."""
+        """Training step with automatic optimization."""
         x, y_onehot, y_int = batch
         
         # Convert from NHWC to NCHW format expected by Conv2D
@@ -146,32 +155,12 @@ class GlacierSegmentationModule(pl.LightningModule):
         y_onehot = y_onehot.permute(0, 3, 1, 2)
         y_int = y_int.squeeze(-1)  # Remove last dimension
         
-        optimizer = self.optimizers()
-        scaler = GradScaler() if self.use_amp else None
-        
-        # Forward pass with autocast
-        if self.use_amp:
-            with autocast():
-                y_hat = self(x)
-                loss = self.compute_loss(y_hat, y_onehot, y_int)
-        else:
-            y_hat = self(x)
-            loss = self.compute_loss(y_hat, y_onehot, y_int)
-        
-        # Manual backward pass
-        if self.use_amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
-        
-        optimizer.zero_grad()
+        # Forward pass
+        y_hat = self(x)
+        loss = self.compute_loss(y_hat, y_onehot, y_int)
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('lr', optimizer.param_groups[0]['lr'], on_step=True, on_epoch=True)
         
         # Update and log additional metrics
         self._update_metrics(y_hat, y_int, self.train_metrics, 'train')
@@ -227,33 +216,39 @@ class GlacierSegmentationModule(pl.LightningModule):
             
             # Update metrics
             if f'{class_name}_iou' in metrics_dict:
-                metrics_dict[f'{class_name}_iou'].update(y_pred_class, y_true_class)
-                self.log(f'{prefix}_{class_name}_iou', 
-                        metrics_dict[f'{class_name}_iou'].compute(), 
+                metrics_dict[f'{class_name}_iou'].update(y_pred_class, y_true_class.int())
+                iou_value = metrics_dict[f'{class_name}_iou'].compute()
+                self.log(f'{prefix}_{class_name}_iou', iou_value, 
                         on_step=False, on_epoch=True)
             
             if f'{class_name}_precision' in metrics_dict:
-                metrics_dict[f'{class_name}_precision'].update(y_pred_class, y_true_class)
-                self.log(f'{prefix}_{class_name}_precision', 
-                        metrics_dict[f'{class_name}_precision'].compute(), 
+                metrics_dict[f'{class_name}_precision'].update(y_pred_class, y_true_class.int())
+                precision_value = metrics_dict[f'{class_name}_precision'].compute()
+                self.log(f'{prefix}_{class_name}_precision', precision_value, 
                         on_step=False, on_epoch=True)
             
             if f'{class_name}_recall' in metrics_dict:
-                metrics_dict[f'{class_name}_recall'].update(y_pred_class, y_true_class)
-                self.log(f'{prefix}_{class_name}_recall', 
-                        metrics_dict[f'{class_name}_recall'].compute(), 
+                metrics_dict[f'{class_name}_recall'].update(y_pred_class, y_true_class.int())
+                recall_value = metrics_dict[f'{class_name}_recall'].compute()
+                self.log(f'{prefix}_{class_name}_recall', recall_value, 
                         on_step=False, on_epoch=True)
 
     def compute_loss(self, y_hat: torch.Tensor, y_onehot: torch.Tensor, 
                    y_int: torch.Tensor) -> torch.Tensor:
         """Compute custom loss with sigma weighting."""
-        # Get sigma values for loss weighting
-        sigma_values = [sigma.item() for sigma in self.sigma_list]
+        # Compute custom loss (returns list of losses)
+        losses = self.loss_fn(y_hat, y_onehot, y_int)
         
-        # Compute custom loss
-        loss = self.loss_fn(y_hat, y_onehot, y_int, sigma_values)
+        # Apply sigma weighting like in original Framework
+        total_loss = torch.zeros(1, device=y_hat.device)
+        sigma_mult = torch.ones(1, device=y_hat.device)
         
-        return loss
+        for _loss, sig in zip(losses, self.sigma_list):
+            weighted_loss = _loss / (len(self.sigma_list) * sig**2)
+            total_loss += weighted_loss
+            sigma_mult *= sig
+        
+        return total_loss[0]
 
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers."""
@@ -276,7 +271,7 @@ class GlacierSegmentationModule(pl.LightningModule):
             
             if scheduler_name == 'OneCycleLR':
                 # Need total_steps for OneCycleLR
-                total_steps = self.trainer.estimated_stepping_batches
+                total_steps = int(self.trainer.estimated_stepping_batches)
                 scheduler = OneCycleLR(optimizer, total_steps=total_steps, **scheduler_args)
             elif scheduler_name == 'ReduceLROnPlateau':
                 scheduler = ReduceLROnPlateau(optimizer, **scheduler_args)

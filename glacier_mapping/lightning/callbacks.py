@@ -11,6 +11,13 @@ from pytorch_lightning.loggers import MLFlowLogger
 
 from glacier_mapping.model.visualize import make_eight_panel
 
+# Import MLflow utilities with error handling
+try:
+    from glacier_mapping.utils.mlflow_utils import MLflowManager
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+
 
 class GlacierVisualizationCallback(Callback):
     """Callback for generating visualization samples during training."""
@@ -42,8 +49,12 @@ class GlacierVisualizationCallback(Callback):
     def _generate_visualizations(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """Generate and save visualization samples."""
         # Get a batch from validation dataloader
-        val_dataloader = trainer.val_dataloaders[0]
-        batch = next(iter(val_dataloader))
+        if trainer.val_dataloaders and len(trainer.val_dataloaders) > 0:
+            val_dataloader = trainer.val_dataloaders[0]
+            batch = next(iter(val_dataloader))
+        else:
+            print("Warning: No validation dataloader available for visualization")
+            return
         
         x, y_onehot, y_int = batch
         
@@ -60,23 +71,37 @@ class GlacierVisualizationCallback(Callback):
             
             # Create 8-panel visualization
             viz = make_eight_panel(
-                sample_x, sample_y, sample_pred,
-                class_names=pl_module.class_names,
-                use_channels=pl_module.use_channels
+                x_rgb=sample_x, gt_rgb=sample_y, pr_rgb=sample_pred,
+                conf_rgb=None, tp_rgb=None, fp_rgb=None, fn_rgb=None, entropy_rgb=None,
+                metrics_text=None
             )
             
             # Save visualization
             if self.save_dir:
                 self.save_dir.mkdir(parents=True, exist_ok=True)
                 save_path = self.save_dir / f"epoch_{trainer.current_epoch}_sample_{i}.png"
-                viz.save(save_path)
+                from matplotlib import pyplot as plt
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                plt.close()
                 
                 # Log to MLflow if available
                 if isinstance(trainer.logger, MLFlowLogger):
-                    trainer.logger.experiment.log_artifact(
-                        str(save_path), 
-                        artifact_path=f"visualizations/epoch_{trainer.current_epoch}"
-                    )
+                    try:
+                        trainer.logger.experiment.log_artifact(
+                            str(save_path), 
+                            artifact_path=f"visualizations/epoch_{trainer.current_epoch}"
+                        )
+                    except Exception as e:
+                        print(f"Warning: Failed to log visualization to MLflow: {e}")
+                elif MLFLOW_AVAILABLE:
+                    # Try to log using MLflowManager if MLflow is available but not using MLFlowLogger
+                    try:
+                        MLflowManager.log_artifact_safe(
+                            str(save_path), 
+                            artifact_path=f"visualizations/epoch_{trainer.current_epoch}"
+                        )
+                    except Exception as e:
+                        print(f"Warning: Failed to log visualization via MLflowManager: {e}")
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):
@@ -155,6 +180,168 @@ class GlacierTrainingMonitor(Callback):
             pl_module.log('epoch', trainer.current_epoch, on_step=False, on_epoch=True)
             
             # Log improvement over best
-            if hasattr(pl_module, 'best_val_loss'):
+            if hasattr(pl_module, 'best_val_loss') and pl_module.best_val_loss is not None:
                 improvement = pl_module.best_val_loss - val_loss
                 pl_module.log('val_loss_improvement', improvement, on_step=False, on_epoch=True)
+
+
+class FullTestEvaluationCallback(Callback):
+    """Callback for periodic full test set evaluation with MLflow artifact logging."""
+    
+    def __init__(self, full_eval_every: int = 10, num_samples: int = 4):
+        """
+        Initialize full test evaluation callback.
+        
+        Args:
+            full_eval_every: How often to run full evaluation (in epochs)
+            num_samples: Number of visualization samples to generate
+        """
+        super().__init__()
+        self.full_eval_every = full_eval_every
+        self.num_samples = num_samples
+    
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        """Run full test evaluation at specified intervals."""
+        if (trainer.current_epoch + 1) % self.full_eval_every == 0:
+            self._run_full_evaluation(trainer, pl_module)
+    
+    def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        """Run full test set evaluation and log results."""
+        try:
+            # Import Framework for evaluation functionality
+            from glacier_mapping.core.frame import Framework
+            
+            # Create temporary Framework instance for evaluation
+            # We need to reconstruct the config from the Lightning module
+            config = self._reconstruct_config_from_module(pl_module)
+            
+            # Initialize Framework with config (without loading data)
+            framework = Framework(config)
+            
+            # Load the Lightning module's state into Framework
+            framework.model = pl_module.model
+            framework.model_opts = pl_module.model_opts
+            framework.loader_opts = pl_module.hparams.loader_opts if hasattr(pl_module.hparams, 'loader_opts') else {}
+            framework.metrics_opts = pl_module.metrics_opts
+            framework.class_names = pl_module.class_names
+            framework.output_classes = pl_module.output_classes
+            
+            # Create output directory for this evaluation
+            output_dir = Path(trainer.default_root_dir) / "test_evaluations" / f"epoch_{trainer.current_epoch + 1}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Run full evaluation
+            framework.evaluate_full_test_tiles(
+                writer=None,  # We'll handle logging ourselves
+                epoch=trainer.current_epoch + 1,
+                output_dir=str(output_dir),
+                num_samples=self.num_samples
+            )
+            
+            # Log results to MLflow and TensorBoard
+            self._log_evaluation_results(trainer, pl_module, output_dir)
+            
+        except Exception as e:
+            print(f"Warning: Full test evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _reconstruct_config_from_module(self, pl_module: pl.LightningModule) -> Dict[str, Any]:
+        """Reconstruct configuration dict from Lightning module hyperparameters."""
+        config = {}
+        
+        # Training options
+        if hasattr(pl_module, 'training_opts'):
+            config['training_opts'] = pl_module.training_opts
+        else:
+            config['training_opts'] = {
+                'full_eval_every': self.full_eval_every,
+                'num_viz_samples': self.num_samples
+            }
+        
+        # Model options
+        config['model_opts'] = pl_module.model_opts
+        
+        # Loss options
+        config['loss_opts'] = pl_module.loss_opts
+        
+        # Metrics options
+        config['metrics_opts'] = pl_module.metrics_opts
+        
+        # Loader options
+        if hasattr(pl_module, 'use_channels') and hasattr(pl_module, 'output_classes'):
+            config['loader_opts'] = {
+                'use_channels': pl_module.use_channels,
+                'output_classes': pl_module.output_classes,
+                'class_names': pl_module.class_names,
+                'processed_dir': getattr(pl_module, 'processed_dir', '/tmp')
+            }
+        
+        return config
+    
+    def _log_evaluation_results(self, trainer: pl.Trainer, pl_module: pl.LightningModule, output_dir: Path):
+        """Log evaluation results to MLflow and TensorBoard."""
+        epoch = trainer.current_epoch + 1
+        
+        # Find and log CSV results
+        csv_files = list(output_dir.glob("*.csv"))
+        for csv_file in csv_files:
+            # Log to MLflow as artifact
+            if MLFLOW_AVAILABLE:
+                try:
+                    MLflowManager.log_artifact_safe(
+                        str(csv_file), 
+                        artifact_path=f"test_evaluations/epoch_{epoch}"
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to log CSV to MLflow: {e}")
+            
+            # Parse CSV and log metrics
+            try:
+                import pandas as pd
+                df = pd.read_csv(csv_file)
+                
+                # Log summary metrics to both loggers
+                for class_name in ['CleanIce', 'Debris']:
+                    if f'{class_name}_iou' in df.columns:
+                        iou_mean = df[f'{class_name}_iou'].mean()
+                        pl_module.log(f'test_{class_name}_iou', iou_mean, on_step=False, on_epoch=True)
+                    
+                    if f'{class_name}_precision' in df.columns:
+                        precision_mean = df[f'{class_name}_precision'].mean()
+                        pl_module.log(f'test_{class_name}_precision', precision_mean, on_step=False, on_epoch=True)
+                    
+                    if f'{class_name}_recall' in df.columns:
+                        recall_mean = df[f'{class_name}_recall'].mean()
+                        pl_module.log(f'test_{class_name}_recall', recall_mean, on_step=False, on_epoch=True)
+                        
+            except Exception as e:
+                print(f"Warning: Failed to parse CSV metrics: {e}")
+        
+        # Log visualization images
+        viz_files = list(output_dir.glob("*.png"))
+        for viz_file in viz_files:
+            # Log to MLflow as artifact
+            if MLFLOW_AVAILABLE:
+                try:
+                    MLflowManager.log_artifact_safe(
+                        str(viz_file), 
+                        artifact_path=f"test_evaluations/epoch_{epoch}/visualizations"
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to log visualization to MLflow: {e}")
+            
+            # Log to TensorBoard
+            if hasattr(trainer, 'logger') and trainer.logger:
+                try:
+                    from matplotlib import pyplot as plt
+                    img = plt.imread(viz_file)
+                    trainer.logger.experiment.add_image(
+                        f"test_evaluation/{viz_file.stem}", 
+                        img, 
+                        dataformats='HWC',
+                        global_step=epoch
+                    )
+                    plt.close()
+                except Exception as e:
+                    print(f"Warning: Failed to log visualization to TensorBoard: {e}")
