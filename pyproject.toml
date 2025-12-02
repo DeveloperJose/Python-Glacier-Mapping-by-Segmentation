@@ -37,6 +37,7 @@ dependencies = [
   "hydra-core>=1.3.0",
   "torchmetrics>=1.0.0",
   "psutil>=7.1.3",
+  "ray[data,serve,server,train,tune]>=2.52.1",
 ]
 
 [project.optional-dependencies]
