@@ -163,7 +163,7 @@ def main():
                 run_name=run_name,
                 tracking_uri=args.tracking_uri,
                 tags=mlflow_tags,
-                log_model="all"  # Let Lightning handle model logging
+                log_model=False  # Disable automatic model logging to save MLflow storage
             )
             loggers.append(mlflow_logger)
             print(f"MLflow logger setup complete for experiment: {experiment_name}")

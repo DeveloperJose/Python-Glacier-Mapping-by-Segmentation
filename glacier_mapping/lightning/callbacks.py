@@ -85,24 +85,7 @@ class GlacierVisualizationCallback(Callback):
                 plt.savefig(save_path, dpi=150, bbox_inches='tight')
                 plt.close()
                 
-                # Log to MLflow if available
-                if isinstance(trainer.logger, MLFlowLogger):
-                    try:
-                        trainer.logger.experiment.log_artifact(
-                            str(save_path), 
-                            artifact_path=f"visualizations/epoch_{trainer.current_epoch}"
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to log visualization to MLflow: {e}")
-                elif MLFLOW_AVAILABLE:
-                    # Try to log using MLflowManager if MLflow is available but not using MLFlowLogger
-                    try:
-                        MLflowManager.log_artifact_safe(
-                            str(save_path), 
-                            artifact_path=f"visualizations/epoch_{trainer.current_epoch}"
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to log visualization via MLflowManager: {e}")
+                # Local save only - no MLflow logging to save storage
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):

@@ -1418,6 +1418,7 @@ dev = [
 dev = [
     { name = "pyright" },
     { name = "ruff" },
+    { name = "tensorboard" },
 ]
 
 [package.metadata]
@@ -1461,6 +1462,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "pyright", specifier = ">=1.1.407" },
     { name = "ruff", specifier = ">=0.14.6" },
+    { name = "tensorboard", specifier = ">=2.20.0" },
 ]
 
 [[package]]

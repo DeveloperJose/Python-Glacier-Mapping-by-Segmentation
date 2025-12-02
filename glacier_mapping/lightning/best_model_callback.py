@@ -139,17 +139,18 @@ class BestModelFullEvaluationCallback(Callback):
         self._generate_visualizations(pl_module, test_tiles[:self.num_samples], output_dir, trainer.current_epoch + 1)
         print(f"Visualizations completed.")
         
-        # Log to MLflow if available
+        # Log only PNG files to MLflow if available
         for logger in trainer.loggers:
             if isinstance(logger, MLFlowLogger):
                 try:
-                    logger.experiment.log_artifact(
-                        logger.run_id,
-                        str(output_dir), 
-                        artifact_path=f"full_evaluations/epoch_{trainer.current_epoch + 1}"
-                    )
+                    for png_file in output_dir.glob("*.png"):
+                        logger.experiment.log_artifact(
+                            logger.run_id,
+                            str(png_file),
+                            artifact_path=f"eval_epoch_{trainer.current_epoch + 1}"
+                        )
                 except Exception as e:
-                    print(f"Warning: Failed to log full evaluation to MLflow: {e}")
+                    print(f"Warning: Failed to log PNGs to MLflow: {e}")
     
     def _select_informative_tiles(self, tile_paths, pl_module, num_samples):
         """Select tiles with most target class pixels."""
