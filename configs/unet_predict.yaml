@@ -1,0 +1,17 @@
+# Prediction configuration
+gpu_rank: 0
+visualization:
+  mode: "scaled"
+  max_width: 2400
+
+# Model references
+cleanice:
+  run_name: "initial_validation_baseline_ci"
+  threshold: 0.5
+  model_type: "best"
+
+# debris:
+#   run_name: "replicate_bibek_debrisice_all_channels_v2_phys64_v4"
+#   run_name: "baseline_debris_v2_bilbo_gpu1"
+#   threshold: 0.5
+#   model_type: "best"

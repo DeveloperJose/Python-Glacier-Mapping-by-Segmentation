@@ -269,6 +269,19 @@ class GlacierSegmentationModule(pl.LightningModule):
         optimizer_name = self.optim_opts.get('name', 'AdamW')
         optimizer_args = self.optim_opts.get('args', {})
         
+        # Convert string values to proper types (fix for YAML parsing issues)
+        if 'weight_decay' in optimizer_args and isinstance(optimizer_args['weight_decay'], str):
+            try:
+                optimizer_args['weight_decay'] = float(optimizer_args['weight_decay'])
+            except ValueError:
+                optimizer_args['weight_decay'] = float(optimizer_args['weight_decay'].replace('e', 'e-'))
+        
+        if 'lr' in optimizer_args and isinstance(optimizer_args['lr'], str):
+            try:
+                optimizer_args['lr'] = float(optimizer_args['lr'])
+            except ValueError:
+                optimizer_args['lr'] = float(optimizer_args['lr'].replace('e', 'e-'))
+        
         if optimizer_name == 'AdamW':
             optimizer = torch.optim.AdamW(self.parameters(), **optimizer_args)
         elif optimizer_name == 'Adam':
@@ -325,11 +338,13 @@ class GlacierSegmentationModule(pl.LightningModule):
         norm_path = Path(self.processed_dir) / "normalize_train.npy"
         if norm_path.exists():
             self.norm_arr_full = np.load(norm_path)
-            self.norm_arr = self.norm_arr_full[:, self.use_channels]
+            # Use first 2 rows (mean, std) for mean-std normalization
+            self.norm_arr = self.norm_arr_full[:2, self.use_channels]
         else:
-            # Fallback if normalization file doesn't exist
-            self.norm_arr_full = np.array([[0, 1], [0, 1], [0, 1], [0, 1]])  # mean, std, min, max
-            self.norm_arr = self.norm_arr_full[:, self.use_channels]
+            # Fallback if normalization file doesn't exist - create array with proper channel dimensions
+            num_channels = len(self.use_channels)
+            self.norm_arr_full = np.array([[0] * num_channels, [1] * num_channels, [0] * num_channels, [1] * num_channels])  # mean, std, min, max
+            self.norm_arr = self.norm_arr_full[:2, self.use_channels]
     
     def normalize(self, x):
         """Normalize input data (from Framework)."""
@@ -337,18 +352,20 @@ class GlacierSegmentationModule(pl.LightningModule):
             _mean, _std = self.norm_arr[0], self.norm_arr[1]
             return (x - _mean) / _std
         elif self.normalization == "min-max":
-            _min, _max = self.norm_arr[2], self.norm_arr[3]
+            # Use full normalization array for min/max values (following original Framework)
+            _min = self.norm_arr_full[2, self.use_channels]  # mins for used channels
+            _max = self.norm_arr_full[3, self.use_channels]  # maxs for used channels
             return (np.clip(x, _min, _max) - _min) / (_max - _min)
         else:
             raise Exception("Invalid normalization")
     
     def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
         """Predict on single slice (from Framework)."""
-        _mask = np.sum(slice_arr, axis=2) == 0
-        
         if preprocess:
             slice_arr = slice_arr[:, :, self.use_channels]
             slice_arr = self.normalize(slice_arr)
+        
+        _mask = np.sum(slice_arr, axis=2) == 0
         
         _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float().to(self.device)
         _y = self.forward(_x.permute(0, 3, 1, 2))  # NCHW format
@@ -364,15 +381,23 @@ class GlacierSegmentationModule(pl.LightningModule):
                 threshold = [0.5]
             
             _y = torch.sigmoid(_y)
-            _y = np.squeeze(_y.cpu())  # (H, W, 2)
-            y_pred = (_y[..., 1] >= threshold[0]).astype(np.uint8)
+            _y = _y.detach().cpu().numpy()  # (1, 2, H, W)
+            if _y.shape[0] == 1:  # Remove batch dimension
+                _y = _y[0]  # (2, H, W)
+            y_pred = (_y[1] >= threshold[0]).astype(np.uint8)  # Use positive class logits
         else:  # Multi-class
             _y = torch.nn.functional.softmax(_y, dim=1)
-            _y = np.squeeze(_y.cpu())  # (H, W, C)
-            y_pred = np.argmax(_y, axis=2).astype(np.uint8) + 1  # 1..C
+            _y = _y.detach().cpu().numpy()  # (1, C, H, W)
+            if _y.shape[0] == 1:  # Remove batch dimension
+                _y = _y[0]  # (C, H, W)
+            y_pred = np.argmax(_y, axis=0).astype(np.uint8) + 1  # 1..C
         
         if use_mask:
-            y_pred[_mask] = 0
+            # Ensure mask matches y_pred shape
+            if y_pred.ndim == 2:  # (H, W)
+                y_pred[_mask] = 0
+            elif y_pred.ndim == 1:  # (H*W,) flattened
+                y_pred[_mask.flatten()] = 0
             return y_pred, _mask
         return y_pred
     

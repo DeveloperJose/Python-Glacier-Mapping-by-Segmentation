@@ -4,11 +4,9 @@ import pathlib
 from typing import List, Optional
 
 import pytorch_lightning as pl
-import torch
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
+from torch.utils.data import DataLoader
 
-from glacier_mapping.data.data import GlacierDataset, BAND_NAMES
+from glacier_mapping.data.data import GlacierDataset
 
 
 class GlacierDataModule(pl.LightningDataModule):
@@ -26,10 +24,10 @@ class GlacierDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
     ):
         """
-        Initialize the Glacier data module.
+        Initialize Glacier data module.
 
         Args:
-            processed_dir: Root of prepared dataset (contains train/val/test subfolders)
+            processed_dir: Root of prepared dataset (contains train/val subfolders)
             batch_size: Batch size for DataLoaders
             use_channels: Indices into BAND_NAMES
             output_classes: 0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls)
@@ -55,7 +53,7 @@ class GlacierDataModule(pl.LightningDataModule):
         self.val_transform = None
 
     def setup(self, stage: Optional[str] = None):
-        """Setup datasets for training, validation, and testing."""
+        """Setup datasets for training and validation."""
         if stage == "fit" or stage is None:
             self.train_dataset = GlacierDataset(
                 self.processed_dir / "train",
@@ -67,15 +65,6 @@ class GlacierDataModule(pl.LightningDataModule):
             
             self.val_dataset = GlacierDataset(
                 self.processed_dir / "val",
-                self.use_channels,
-                self.output_classes,
-                self.normalize,
-                transforms=self.val_transform,
-            )
-
-        if stage == "test" or stage is None:
-            self.test_dataset = GlacierDataset(
-                self.processed_dir / "test",
                 self.use_channels,
                 self.output_classes,
                 self.normalize,
@@ -104,13 +93,3 @@ class GlacierDataModule(pl.LightningDataModule):
             drop_last=False,
         )
 
-    def test_dataloader(self) -> DataLoader:
-        """Return the test dataloader."""
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            drop_last=False,
-        )

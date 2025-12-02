@@ -2,10 +2,7 @@ import torch
 
 
 def precision(tp, fp, fn):
-    try:
-        return tp / (tp + fp)
-    except ZeroDivisionError:
-        return 0
+    return tp / (tp + fp + 1e-10)
 
 
 def tp_fp_fn(pred, true, label=1):
@@ -17,24 +14,15 @@ def tp_fp_fn(pred, true, label=1):
 
 
 def recall(tp, fp, fn):
-    try:
-        return tp / (tp + fn)
-    except ZeroDivisionError:
-        return 0
+    return tp / (tp + fn + 1e-10)
 
 
 def dice(tp, fp, fn):
-    try:
-        return (2 * tp) / (2 * tp + fp + fn)
-    except ZeroDivisionError:
-        return 0
+    return (2 * tp) / (2 * tp + fp + fn + 1e-10)
 
 
 def IoU(tp, fp, fn):
-    try:
-        return tp / (tp + fp + fn)
-    except ZeroDivisionError:
-        return 0
+    return tp / (tp + fp + fn + 1e-10)
 
 
 def l1_reg(params, lambda_reg, device):

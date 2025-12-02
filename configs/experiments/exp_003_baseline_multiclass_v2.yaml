@@ -1,0 +1,65 @@
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: baseline_multiclass_v2
+  epochs: 500
+  fine_tune: false
+  find_lr: false
+  early_stopping: 250
+  full_eval_every: 10
+  num_viz_samples: 4
+loader_opts:
+  batch_size: 8
+  use_channels:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  output_classes:
+  - 0
+  - 1
+  - 2
+  normalize: mean-std
+  class_names:
+  - BG
+  - CleanIce
+  - Debris
+  processed_dir: /home/jperez/datasets/HKH/bibek_w512_o64_f1_v2/
+metrics_opts:
+  metrics:
+  - IoU
+  - precision
+  - recall
+  threshold:
+  - 0.5
+  - 0.5
+loss_opts:
+  name: custom
+  masked: false
+  gaussian_blur_sigma: None
+  label_smoothing: 0
+  use_unified: false
+model_opts:
+  args:
+    net_depth: 4
+    dropout: 0.1
+    spatial: true
+    first_channel_output: 32
+optim_opts:
+  name: AdamW
+  args:
+    lr: 0.0003
+    weight_decay: 5e-5
+scheduler_opts:
+  name: OneCycleLR
+  args:
+    max_lr: 0.001
+    pct_start: 0.3
+    anneal_strategy: cos
+server: frodo
+gpu_rank: 0

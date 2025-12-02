@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.loggers import MLFlowLogger
 from tqdm import tqdm
 
 from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
@@ -45,8 +46,14 @@ class BestModelFullEvaluationCallback(Callback):
     
     def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """Full-tile evaluation using Lightning module directly."""
-        # Create output directory
-        output_dir = Path(trainer.default_root_dir) / "full_evaluations" / f"epoch_{trainer.current_epoch + 1}"
+        # Create output directory - use checkpoint directory as base
+        if hasattr(trainer, 'checkpoint_callback') and trainer.checkpoint_callback:
+            base_dir = Path(trainer.checkpoint_callback.dirpath).parent
+        else:
+            # Fallback to default_root_dir or current directory
+            base_dir = Path(trainer.default_root_dir) if trainer.default_root_dir else Path(".")
+        
+        output_dir = base_dir / "full_evaluations" / f"epoch_{trainer.current_epoch + 1}"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Get test tiles
@@ -128,14 +135,21 @@ class BestModelFullEvaluationCallback(Callback):
             pl_module.log(f'full_test_{cname}_iou', iou, on_step=False, on_epoch=True)
         
         # Generate visualizations for selected tiles
+        print(f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles...")
         self._generate_visualizations(pl_module, test_tiles[:self.num_samples], output_dir, trainer.current_epoch + 1)
+        print(f"Visualizations completed.")
         
         # Log to MLflow if available
-        if MLFLOW_AVAILABLE:
-            try:
-                MLflowManager.log_artifact_safe(str(output_dir), artifact_path=f"full_evaluations/epoch_{trainer.current_epoch + 1}")
-            except Exception as e:
-                print(f"Warning: Failed to log full evaluation to MLflow: {e}")
+        for logger in trainer.loggers:
+            if isinstance(logger, MLFlowLogger):
+                try:
+                    logger.experiment.log_artifact(
+                        logger.run_id,
+                        str(output_dir), 
+                        artifact_path=f"full_evaluations/epoch_{trainer.current_epoch + 1}"
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to log full evaluation to MLflow: {e}")
     
     def _select_informative_tiles(self, tile_paths, pl_module, num_samples):
         """Select tiles with most target class pixels."""
@@ -180,12 +194,12 @@ class BestModelFullEvaluationCallback(Callback):
             logits = pl_module.forward(inp.permute(0, 3, 1, 2))
             
             if len(pl_module.output_classes) == 1:  # Binary
-                probs = torch.sigmoid(logits)[0].cpu().numpy()
-                y_pred = (probs[..., 1] >= threshold[0]).astype(np.uint8)
-                conf = probs[..., 1]
+                probs = torch.sigmoid(logits)[0].cpu().numpy()  # (2, H, W)
+                y_pred_viz = (probs[1] >= threshold[0]).astype(np.uint8)  # Use foreground channel
+                conf = probs[1]
             else:  # Multi-class
                 probs = torch.nn.functional.softmax(logits, dim=1)[0].cpu().numpy()
-                y_pred = np.argmax(probs, axis=2).astype(np.uint8) + 1
+                y_pred_viz = np.argmax(probs, axis=2).astype(np.uint8) + 1
                 conf = np.max(probs, axis=-1)
             
             # Generate 8-panel visualization
@@ -194,7 +208,7 @@ class BestModelFullEvaluationCallback(Callback):
             
             # GT/PRED for visualization
             y_gt_vis = y_true_raw.copy()
-            y_pred_vis = y_pred.copy()
+            y_pred_vis = y_pred_viz.copy()
             
             if len(pl_module.output_classes) == 1:  # Binary
                 class_idx = pl_module.output_classes[0]
@@ -211,7 +225,11 @@ class BestModelFullEvaluationCallback(Callback):
             
             # Confidence / entropy
             conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
-            entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+            if len(pl_module.output_classes) == 1:  # Binary
+                # For binary, transpose probs to (H, W, 2) for entropy calculation
+                entropy_rgb = make_entropy_map(probs.transpose(1, 2, 0), invalid_mask=ignore)
+            else:  # Multi-class
+                entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
             
             # TP / FP / FN masks
             tp_mask = (
@@ -262,4 +280,9 @@ class BestModelFullEvaluationCallback(Callback):
             )
             
             out_path = output_dir / f"fulltile_{idx}_epoch{epoch}.png"
-            cv2.imwrite(str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+            print(f"Saving visualization to: {out_path}")
+            try:
+                success = cv2.imwrite(str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR))
+                print(f"Save successful: {success}")
+            except Exception as e:
+                print(f"Error saving visualization: {e}")
