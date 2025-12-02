@@ -26,7 +26,6 @@ from tqdm import tqdm
 
 import torch
 import cv2
-from scipy.ndimage import binary_fill_holes
 import matplotlib.pyplot as plt
 import matplotlib
 
@@ -42,7 +41,9 @@ from glacier_mapping.model.visualize import (
     make_eight_panel,
 )
 from glacier_mapping.data.data import BAND_NAMES
-# softmax_probs and merge_ci_debris are defined in this file
+from glacier_mapping.utils.prediction import (
+    get_probabilities, merge_ci_debris, create_invalid_mask
+)
 
 def load_lightning_module(checkpoint_path, device):
     """Load Lightning module from checkpoint."""
@@ -56,46 +57,7 @@ matplotlib.use("Agg")
 
 
 # Helpers
-def softmax_probs(module, x_full):
-    """
-    Returns probability cube (H, W, C) for a single model.
-    """
-    use_ch = module.use_channels
-    x = x_full[:, :, use_ch]
-    x_norm = module.normalize(x)
-
-    inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float().to(module.device)
-    logits = module.forward(inp.permute(0, 3, 1, 2))
-    probs = torch.nn.functional.softmax(logits, dim=1)[0].cpu().numpy()
-    return probs
-
-
-def merge_ci_debris(prob_ci, prob_deb, thr_ci, thr_deb):
-    """
-    Combine two binary models into a 3-class map:
-        0 = BG, 1 = CI, 2 = Debris
-    """
-    ci_mask = binary_fill_holes(prob_ci[:, :, 1] >= thr_ci)
-    deb_mask = binary_fill_holes(prob_deb[:, :, 1] >= thr_deb)
-
-    # Ensure masks are not None
-    if ci_mask is None:
-        ci_mask = prob_ci[:, :, 1] >= thr_ci
-    if deb_mask is None:
-        deb_mask = prob_deb[:, :, 1] >= thr_deb
-
-    H, W = ci_mask.shape
-    merged = np.zeros((H, W), dtype=np.uint8)
-    merged[ci_mask] = 1
-    merged[deb_mask] = 2
-
-    # probability cube (3-class)
-    probs = np.zeros((H, W, 3), dtype=np.float32)
-    probs[:, :, 1] = prob_ci[:, :, 1]
-    probs[:, :, 2] = prob_deb[:, :, 1]
-    probs[:, :, 0] = np.minimum(prob_ci[:, :, 0], prob_deb[:, :, 0])
-
-    return merged, probs
+# Removed duplicate functions - now using shared utilities from glacier_mapping.utils.prediction
 
 
 def get_pr_iou(pred, true):
@@ -515,7 +477,7 @@ def run_prediction(
 
         x_full = np.load(tile)
         y_full = np.load(tile.parent / name.replace("tiff", "mask")).astype(np.uint8)
-        invalid = (np.sum(x_full, axis=2) == 0) | (y_full == 255)
+        invalid = create_invalid_mask(x_full, y_full)
         valid = ~invalid
 
         x_rgb = make_rgb_preview(x_full)
@@ -531,7 +493,7 @@ def run_prediction(
             model_name = "CleanIce" if has_ci else "Debris"
             thr = thr_ci if has_ci else thr_deb
 
-            probs = softmax_probs(frame, x_full)  # (H,W,2)
+            probs = get_probabilities(frame, x_full)  # (H,W,2)
             np.save(prob_path, probs)
 
             pred_bin = (probs[:, :, 1] >= thr).astype(np.uint8)
@@ -600,8 +562,8 @@ def run_prediction(
         # MERGED CI + DEBRIS BINARY MODELS
         # ===============================================================
         else:
-            prob_ci = softmax_probs(frame_ci, x_full)
-            prob_db = softmax_probs(frame_deb, x_full)
+            prob_ci = get_probabilities(frame_ci, x_full)
+            prob_db = get_probabilities(frame_deb, x_full)
 
             merged, probs = merge_ci_debris(prob_ci, prob_db, thr_ci, thr_deb)
             np.save(prob_path, probs)

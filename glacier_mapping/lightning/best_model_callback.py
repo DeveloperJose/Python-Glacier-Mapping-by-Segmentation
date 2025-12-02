@@ -1,8 +1,6 @@
 """Best-model full evaluation callback for glacier mapping."""
 
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,6 +15,7 @@ from glacier_mapping.model.visualize import (
     build_cmap_from_mask_names, make_rgb_preview, label_to_color, 
     make_confidence_map, make_entropy_map, make_tp_fp_fn_masks, make_eight_panel
 )
+from glacier_mapping.utils.prediction import get_probabilities, predict_from_probs, create_invalid_mask
 
 # Import MLflow utilities with error handling
 try:
@@ -70,7 +69,6 @@ class BestModelFullEvaluationCallback(Callback):
         # Setup metrics
         n_classes = len(pl_module.class_names)
         threshold = pl_module.metrics_opts.get('threshold', [0.5, 0.5])
-        cmap = build_cmap_from_mask_names(pl_module.class_names)
         
         rows = []
         tp_sum = np.zeros(n_classes)
@@ -137,7 +135,7 @@ class BestModelFullEvaluationCallback(Callback):
         # Generate visualizations for selected tiles
         print(f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles...")
         self._generate_visualizations(pl_module, test_tiles[:self.num_samples], output_dir, trainer.current_epoch + 1)
-        print(f"Visualizations completed.")
+        print("Visualizations completed.")
         
         # Log only PNG files to MLflow if available
         for logger in trainer.loggers:
@@ -186,26 +184,18 @@ class BestModelFullEvaluationCallback(Callback):
             x_full = np.load(x_path)
             y_true_raw = np.load(x_path.with_name(x_path.name.replace("tiff", "mask"))).astype(np.uint8)
             
-            # Predict using Lightning module
-            use_ch = pl_module.use_channels
-            x = x_full[:, :, use_ch]
-            x_norm = pl_module.normalize(x)
+            # Predict using shared utilities
+            probs = get_probabilities(pl_module, x_full)
+            y_pred_viz = predict_from_probs(probs, pl_module, threshold[0] if threshold else None)
             
-            inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float().to(pl_module.device)
-            logits = pl_module.forward(inp.permute(0, 3, 1, 2))
-            
+            # Get confidence for visualization
             if len(pl_module.output_classes) == 1:  # Binary
-                probs = torch.sigmoid(logits)[0].cpu().numpy()  # (2, H, W)
-                y_pred_viz = (probs[1] >= threshold[0]).astype(np.uint8)  # Use foreground channel
-                conf = probs[1]
+                conf = probs[:, :, 1]  # Foreground probability
             else:  # Multi-class
-                probs = torch.nn.functional.softmax(logits, dim=1)[0].cpu().numpy()
-                y_pred_viz = np.argmax(probs, axis=2).astype(np.uint8) + 1
                 conf = np.max(probs, axis=-1)
             
             # Generate 8-panel visualization
             ignore = y_true_raw == 255
-            invalid_mask = np.sum(x, axis=2) == 0
             
             # GT/PRED for visualization
             y_gt_vis = y_true_raw.copy()

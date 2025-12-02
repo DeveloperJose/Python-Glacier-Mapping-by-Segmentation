@@ -2,8 +2,7 @@
 
 import numpy as np
 import torch
-from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 from scipy.ndimage import binary_fill_holes
 
 
@@ -77,15 +76,16 @@ def get_y_true(label_mask, output_classes, is_binary, binary_class_idx=None, mas
     return y_true
 
 
-def softmax_probs(module, x_full):
-    """Get probability cube from Lightning module.
+def get_probabilities(module, x_full):
+    """
+    Get probability cube from Lightning module using unified softmax approach.
     
     Args:
         module: Lightning module with forward method
         x_full: Full image array (H, W, C)
         
     Returns:
-        Probability cube (H, W, C)
+        Probability cube (H, W, C) - always uses softmax for consistency
     """
     use_ch = module.use_channels
     x = x_full[:, :, use_ch]
@@ -93,8 +93,69 @@ def softmax_probs(module, x_full):
     
     inp = torch.from_numpy(np.expand_dims(x_norm, 0)).float().to(module.device)
     logits = module.forward(inp.permute(0, 3, 1, 2))
-    probs = torch.nn.functional.softmax(logits, dim=1)[0].cpu().numpy()
+    probs = torch.nn.functional.softmax(logits, dim=1)[0].permute(1, 2, 0).cpu().numpy()
     return probs
+
+
+def predict_from_probs(probs, module, threshold=None):
+    """
+    Convert probabilities to hard predictions using module configuration.
+    
+    Args:
+        probs: Probability cube (H, W, C) from get_probabilities()
+        module: Lightning module for configuration access
+        threshold: Optional threshold override (uses module config if None)
+        
+    Returns:
+        Hard predictions (H, W)
+    """
+    if len(module.output_classes) == 1:  # Binary
+        if threshold is None:
+            # Use module's configured threshold
+            config_threshold = module.metrics_opts.get('threshold', [0.5])
+            threshold = config_threshold[0] if isinstance(config_threshold, list) else config_threshold
+        return (probs[:, :, 1] >= threshold).astype(np.uint8)
+    else:  # Multi-class
+        return np.argmax(probs, axis=2).astype(np.uint8) + 1
+
+
+def predict_with_probs(module, x_full, threshold=None):
+    """
+    Unified prediction function combining probability extraction and hard prediction.
+    
+    Args:
+        module: Lightning module
+        x_full: Full image array (H, W, C)
+        threshold: Optional threshold override
+        
+    Returns:
+        Tuple of (probs, prediction)
+        probs: Probability cube (H, W, C)
+        prediction: Hard predictions (H, W)
+    """
+    probs = get_probabilities(module, x_full)
+    prediction = predict_from_probs(probs, module, threshold)
+    return probs, prediction
+
+
+def create_invalid_mask(x_full, y_true):
+    """
+    Create standardized invalid mask for glacier mapping.
+    
+    Args:
+        x_full: Full image array (H, W, C)
+        y_true: Ground truth mask (H, W)
+        
+    Returns:
+        Invalid mask (H, W) where True = invalid pixel
+    """
+    return (np.sum(x_full, axis=2) == 0) | (y_true == 255)
+
+
+# Backward compatibility alias
+def softmax_probs(module, x_full):
+    """Deprecated: Use get_probabilities() instead."""
+    return get_probabilities(module, x_full)
 
 
 def merge_ci_debris(prob_ci: np.ndarray, prob_deb: np.ndarray, thr_ci: float, thr_deb: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -112,8 +173,18 @@ def merge_ci_debris(prob_ci: np.ndarray, prob_deb: np.ndarray, thr_ci: float, th
         probability_cube: 3-class probability cube (H, W, 3)
     """
     
+    # Ensure inputs are valid
+    if prob_ci is None or prob_deb is None:
+        raise ValueError("Both prob_ci and prob_deb must be provided")
+    
     ci_mask = binary_fill_holes(prob_ci[:, :, 1] >= thr_ci)
     deb_mask = binary_fill_holes(prob_deb[:, :, 1] >= thr_deb)
+    
+    # Ensure masks are not None (binary_fill_holes can return None)
+    if ci_mask is None:
+        ci_mask = prob_ci[:, :, 1] >= thr_ci
+    if deb_mask is None:
+        deb_mask = prob_deb[:, :, 1] >= thr_deb
     
     H, W = ci_mask.shape
     merged = np.zeros((H, W), dtype=np.uint8)

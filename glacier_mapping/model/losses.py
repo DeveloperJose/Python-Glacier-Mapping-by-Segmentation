@@ -52,14 +52,10 @@ class customloss(nn.Module):
             ignore_mask = target.sum(dim=1) == 1
         ignore_mask_exp = ignore_mask.unsqueeze(1).float().to(device)
 
-        if c == 2:
-            pred_prob = torch.sigmoid(pred[:, 1:2])
-            target_prob = target[:, 1:2]
-            C_eff = 1
-        else:
-            pred_prob = self.act(pred)
-            target_prob = target
-            C_eff = c
+        # Use softmax for all cases (binary treated as 2-class)
+        pred_prob = self.act(pred)
+        target_prob = target
+        C_eff = c
 
         pred_prob = pred_prob * ignore_mask_exp
         target_prob = target_prob * ignore_mask_exp
