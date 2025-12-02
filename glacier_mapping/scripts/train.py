@@ -1,471 +1,281 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Train a U-Net model on the prepared glacier dataset.
-
-Includes:
- - AMP + sigma-weighted custom loss
- - OneCycleLR or ReduceLROnPlateau (configured in YAML)
- - Dataset statistics (optional)
- - Per-epoch metrics
- - Full-tile evaluation with unified 8-panel visuals
- - Best-epoch metrics printed at end
- - notify-send desktop notification (Linux)
-"""
+"""Simple Lightning training for glacier mapping."""
 
 import argparse
-import gc
-import json
-import logging
 import pathlib
-import random
-import re
-import subprocess
-import warnings
-from timeit import default_timer as timer
+import sys
+from typing import Dict, Any
 
-import numpy as np
 import torch
+import torch.nn as nn
 import yaml
-from addict import Dict
-from torch.utils.tensorboard import SummaryWriter
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import TensorBoardLogger
 
-import mlflow
-import glacier_mapping.utils.logging as fn
-from glacier_mapping.core.frame import Framework
+# Add project root to path for imports
+project_root = pathlib.Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from glacier_mapping.model.unet import Unet
+from glacier_mapping.model.losses import customloss
 from glacier_mapping.data.data import fetch_loaders
 
-random.seed(41)
-np.random.seed(41)
-torch.manual_seed(41)
-torch.cuda.manual_seed(41)
-torch.cuda.manual_seed_all(41)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-warnings.filterwarnings("ignore")
+
+class SimpleGlacierModule(pl.LightningModule):
+    """Simple Lightning module for glacier segmentation."""
+    
+    def __init__(
+        self,
+        model_config: Dict[str, Any],
+        loss_config: Dict[str, Any],
+        optim_config: Dict[str, Any],
+        scheduler_config: Dict[str, Any],
+        use_channels: list,
+        output_classes: list,
+        class_names: list,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        
+        # Model setup
+        model_args = model_config.get('args', {})
+        # For binary classification, output_classes has 1 element but we need 2 output channels (BG, class)
+        out_channels = 2 if len(output_classes) == 1 else len(output_classes)
+        self.model = Unet(
+            inchannels=len(use_channels),
+            outchannels=out_channels,
+            **model_args
+        )
+        
+        # Loss setup - filter only supported args
+        supported_loss_args = {'act', 'smooth', 'label_smoothing', 'masked', 'theta0', 'theta', 'foreground_classes', 'alpha'}
+        loss_args = {k: v for k, v in loss_config.items() if k in supported_loss_args}
+        self.loss_fn = customloss(**loss_args)
+        
+        # Learnable sigma parameters for loss weighting
+        self.sigma_list = nn.ParameterList([
+            nn.Parameter(torch.tensor(1.0)) for _ in range(2)
+        ])
+        
+        # Optimizer config
+        self.lr = float(optim_config.get('args', {}).get('lr', 0.0003))
+        self.weight_decay = float(optim_config.get('args', {}).get('weight_decay', 5e-5))
+        
+        # Scheduler config
+        self.scheduler_config = scheduler_config
+        
+        # Class info
+        self.class_names = class_names
+        self.output_classes = output_classes
+        self.use_channels = use_channels
+        
+    def forward(self, x):
+        return self.model(x)
+    
+    def training_step(self, batch, batch_idx):
+        x, y_onehot, y_int = batch
+        
+        # Convert from NHWC to NCHW format expected by Conv2D
+        x = x.permute(0, 3, 1, 2).contiguous()
+        y_onehot = y_onehot.permute(0, 3, 1, 2).contiguous()
+        y_int = y_int.squeeze(-1)  # Remove last dimension
+        
+        # Forward pass
+        y_hat = self(x)
+        
+        # Compute loss (customloss returns [dice_loss, boundary_loss])
+        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
+        loss = loss_list[0] + loss_list[1]  # Combine both losses
+        
+        # Log metrics
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('lr', self.trainer.optimizers[0].param_groups[0]['lr'], on_step=True)
+        
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        x, y_onehot, y_int = batch
+        
+        # Convert from NHWC to NCHW format expected by Conv2D
+        x = x.permute(0, 3, 1, 2).contiguous()
+        y_onehot = y_onehot.permute(0, 3, 1, 2).contiguous()
+        y_int = y_int.squeeze(-1)  # Remove last dimension
+        
+        # Forward pass
+        with torch.no_grad():
+            y_hat = self(x)
+        
+        # Compute loss
+        loss_list = self.loss_fn(y_hat, y_onehot, y_int)
+        loss = loss_list[0] + loss_list[1]  # Combine both losses
+        
+        # Log metrics
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=self.lr, 
+            weight_decay=self.weight_decay
+        )
+        
+        # Add scheduler if specified
+        if self.scheduler_config and self.scheduler_config.get('name') == 'OneCycleLR':
+            total_steps = int(self.trainer.estimated_stepping_batches)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=self.scheduler_config.get('args', {}).get('max_lr', 0.001),
+                total_steps=total_steps,
+                pct_start=self.scheduler_config.get('args', {}).get('pct_start', 0.3),
+                anneal_strategy=self.scheduler_config.get('args', {}).get('anneal_strategy', 'cos')
+            )
+            return [optimizer], [scheduler]
+        
+        return optimizer
+
+
+class SimpleDataModule(pl.LightningDataModule):
+    """Simple data module using existing fetch_loaders function."""
+    
+    def __init__(self, loader_config: Dict[str, Any]):
+        super().__init__()
+        self.loader_config = loader_config
+        
+    def setup(self, stage=None):
+        # Use existing fetch_loaders function
+        self.train_loader, self.val_loader, self.test_loader = fetch_loaders(
+            **self.loader_config
+        )
+    
+    def train_dataloader(self):
+        return self.train_loader
+    
+    def val_dataloader(self):
+        return self.val_loader
+    
+    def test_dataloader(self):
+        return self.test_loader
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load YAML configuration file."""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
+
+
+def main():
+    """Main training function."""
+    parser = argparse.ArgumentParser(description="Train glacier mapping with Lightning")
+    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("--max-epochs", type=int, default=3, help="Maximum epochs to train")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU device to use")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    
+    args = parser.parse_args()
+    
+    # Load configuration
+    config_path = pathlib.Path(args.config)
+    if not config_path.is_absolute():
+        config_path = project_root / config_path
+    
+    config = load_config(str(config_path))
+    
+    # Extract configuration sections
+    training_opts = config.get('training_opts', {})
+    loader_opts = config.get('loader_opts', {})
+    model_opts = config.get('model_opts', {})
+    loss_opts = config.get('loss_opts', {})
+    optim_opts = config.get('optim_opts', {})
+    scheduler_opts = config.get('scheduler_opts', {})
+    
+    # Get run name and output directory
+    run_name = training_opts.get('run_name', 'experiment')
+    output_dir = training_opts.get('output_dir', 'output/')
+    
+    print(f"Loaded config from: {config_path}")
+    print(f"Run name: {run_name}")
+    print(f"Output directory: {output_dir}")
+    print(f"Data path: {loader_opts.get('processed_dir', 'NOT_SET')}")
+    print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
+    print(f"Output classes: {loader_opts.get('output_classes', 'NOT_SET')}")
+    
+    # Create data module
+    print("Creating data module...")
+    datamodule = SimpleDataModule(loader_opts)
+    
+    # Create model
+    print("Creating model...")
+    model = SimpleGlacierModule(
+        model_config=model_opts,
+        loss_config=loss_opts,
+        optim_config=optim_opts,
+        scheduler_config=scheduler_opts,
+        use_channels=loader_opts.get('use_channels', [0, 1, 2]),
+        output_classes=loader_opts.get('output_classes', [1]),
+        class_names=loader_opts.get('class_names', ["BG", "CleanIce", "Debris"]),
+    )
+    
+    # Setup logging
+    print("Setting up logging...")
+    logger = TensorBoardLogger(
+        save_dir=f"{output_dir}/logs",
+        name=run_name
+    )
+    
+    # Setup callbacks
+    callbacks = [
+        ModelCheckpoint(
+            dirpath=f"{output_dir}/{run_name}/checkpoints",
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            save_last=True,
+            filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}"
+        ),
+        LearningRateMonitor(logging_interval='step')
+    ]
+    
+    # Create trainer
+    print("Creating trainer...")
+    trainer = pl.Trainer(
+        accelerator="gpu",
+        devices=[args.gpu],
+        max_epochs=args.max_epochs,
+        logger=logger,
+        callbacks=callbacks,
+        precision="16-mixed",
+        log_every_n_steps=10,
+        val_check_interval=1.0,
+        enable_progress_bar=True,
+        num_sanity_val_steps=2,  # Quick sanity check
+    )
+    
+    print(f"Starting training for {args.max_epochs} epochs...")
+    print(f"GPU available: {torch.cuda.is_available()}")
+    print(f"TensorBoard logs: {output_dir}/logs/{run_name}")
+    print(f"Checkpoints: {output_dir}/{run_name}/checkpoints")
+    
+    try:
+        trainer.fit(
+            model,
+            datamodule=datamodule,
+            ckpt_path=args.resume if args.resume else None
+        )
+        
+        print("Training completed successfully!")
+        
+    except KeyboardInterrupt:
+        print("Training interrupted by user")
+    except Exception as e:
+        print(f"Training failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        help="Path to experiment config YAML (e.g., conf/experiments/exp_001_baseline_ci_v2.yaml)",
-    )
-    parser.add_argument(
-        "--config-dict",
-        help="Config dict as JSON string (alternative to --config)",
-    )
-    args = parser.parse_args()
-
-    # Load experiment config from file or dict
-    if args.config_dict:
-        conf = Dict(json.loads(args.config_dict))
-    elif args.config:
-        config_path = args.config
-        conf = Dict(yaml.safe_load(open(config_path)))
-    else:
-        parser.error("Either --config or --config-dict must be provided")
-
-    run_name: str = conf.training_opts.run_name
-    output_dir = pathlib.Path(conf.training_opts.output_dir)
-    model_output_dir = output_dir / "models"
-    early_stopping: int = conf.training_opts.early_stopping
-
-    full_eval_every: int = int(getattr(conf.training_opts, "full_eval_every", 5))
-    num_viz_samples: int = int(getattr(conf.training_opts, "num_viz_samples", 4))
-
-    train_loader, val_loader, test_loader = fetch_loaders(**conf.loader_opts)
-
-    # Check for existing checkpoints to resume from
-    start_epoch = 1
-    resume_checkpoint = None
-
-    # Look for existing checkpoints in output directory
-    if output_dir.exists():
-        models_dir = output_dir / "models"
-        if models_dir.exists():
-            # Priority 1: Check for best model
-            best_model_path = models_dir / "model_best.pt"
-            if best_model_path.exists():
-                resume_checkpoint = best_model_path
-                fn.log(logging.INFO, f"Found best checkpoint: {best_model_path}")
-            else:
-                # Priority 2: Find the latest epoch checkpoint
-                epoch_checkpoints = list(models_dir.glob("model_*.pt"))
-                # Filter out improvement checkpoints (model_epochXXXX_valXXXXXX.pt)
-                epoch_checkpoints = [
-                    cp
-                    for cp in epoch_checkpoints
-                    if not re.search(r"model_epoch\d+_val", cp.name)
-                ]
-
-                if epoch_checkpoints:
-                    # Sort by epoch number
-                    def get_epoch_from_path(path):
-                        match = re.search(r"model_(\d+)\.pt", path.name)
-                        return int(match.group(1)) if match else 0
-
-                    epoch_checkpoints.sort(key=get_epoch_from_path)
-                    resume_checkpoint = epoch_checkpoints[-1]
-                    fn.log(
-                        logging.INFO,
-                        f"Found latest epoch checkpoint: {resume_checkpoint}",
-                    )
-
-    # Initialize framework from experiment config
-    if resume_checkpoint and not conf.training_opts.get("disable_resume", False):
-        fn.log(logging.INFO, f"Resuming training from checkpoint: {resume_checkpoint}")
-        frame = Framework.from_checkpoint(resume_checkpoint, testing=False)
-
-        # Extract the epoch from checkpoint
-        if resume_checkpoint.name == "model_best.pt":
-            # For best model, we need to check the checkpoints summary to get the epoch
-            summary_path = output_dir / "checkpoints_summary.json"
-            if summary_path.exists():
-                with open(summary_path, "r") as f:
-                    summary = json.load(f)
-                    start_epoch = summary.get("best_epoch", 1) + 1
-                    fn.log(
-                        logging.INFO,
-                        f"Resuming from epoch {start_epoch} (best model was epoch {summary.get('best_epoch', '?')})",
-                    )
-            else:
-                start_epoch = 1
-                fn.log(
-                    logging.WARNING,
-                    "Could not determine epoch from best model, starting from epoch 1",
-                )
-        else:
-            # Extract epoch from filename like "model_15.pt"
-            epoch_match = re.search(r"model_(\d+)\.pt", resume_checkpoint.name)
-            if epoch_match:
-                start_epoch = int(epoch_match.group(1)) + 1
-                fn.log(
-                    logging.INFO,
-                    f"Resuming from epoch {start_epoch} (checkpoint was epoch {epoch_match.group(1)})",
-                )
-            else:
-                start_epoch = 1
-                fn.log(
-                    logging.WARNING,
-                    "Could not determine epoch from checkpoint, starting from epoch 1",
-                )
-    else:
-        # Fresh start
-        if args.config_dict:
-            frame = Framework.from_dict(conf)
-        else:
-            frame = Framework.from_config(args.config)
-
-        if resume_checkpoint and conf.training_opts.get("disable_resume", False):
-            fn.log(logging.INFO, "Resume disabled by config, starting fresh training")
-
-    if conf.training_opts.fine_tune:
-        fn.log(logging.INFO, "Finetuning from previous final model…")
-        final_model_path = output_dir / "models" / "model_final.pt"
-
-        frame = Framework.from_checkpoint(
-            final_model_path,
-            testing=False,
-        )
-        frame.freeze_layers()
-
-    if conf.training_opts.find_lr:
-        frame.lr_finder(train_loader, init_value=1e-9, final_value=1.0)
-        raise SystemExit
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    model_output_dir.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------
-    # TensorBoard
-    # ------------------------------------------------------------
-    writer = SummaryWriter(output_dir / "logs")
-    writer.add_text("Configuration", json.dumps(conf, indent=4))
-
-    fn.print_conf(conf)
-    fn.log(
-        logging.INFO,
-        f"#Train={len(train_loader)}, #Val={len(val_loader)}, #Test={len(test_loader)}",
-    )
-
-    # Save conf
-    with open(output_dir / "conf.json", "w") as f:
-        json.dump(conf, f, indent=4, sort_keys=True)
-
-    # Load normalization info for logging thumbnails (still passed into log_images)
-    norm_path = pathlib.Path(conf.loader_opts.processed_dir) / "normalize_train.npy"
-    _normalize = np.load(norm_path)
-    if conf.loader_opts.normalize == "min-max":
-        _normalize = (
-            _normalize[2][conf.loader_opts.use_channels],
-            _normalize[3][conf.loader_opts.use_channels],
-        )
-    else:
-        _normalize = (
-            np.append(_normalize[0], 0)[conf.loader_opts.use_channels],
-            np.append(_normalize[1], 1)[conf.loader_opts.use_channels],
-        )
-
-    # ------------------------------------------------------------
-    # Training loop
-    # ------------------------------------------------------------
-    # Load existing metrics if resuming
-    if resume_checkpoint and start_epoch > 1:
-        summary_path = output_dir / "checkpoints_summary.json"
-        if summary_path.exists():
-            with open(summary_path, "r") as f:
-                summary = json.load(f)
-                best_val_loss = summary.get("best_val_loss", np.inf)
-                best_epoch = summary.get("best_epoch", None)
-                # Note: We don't restore the detailed metrics to avoid complexity
-                best_train_metric = None
-                best_val_metric = None
-                epochs_without_improvement = 0
-                improvement_checkpoints = summary.get("improvement_checkpoints", [])
-                fn.log(
-                    logging.INFO,
-                    f"Loaded training history: best_val_loss={best_val_loss:.6f}, best_epoch={best_epoch}",
-                )
-        else:
-            # Reset metrics if no summary found
-            best_val_loss = np.inf
-            best_epoch = None
-            best_train_metric = None
-            best_val_metric = None
-            epochs_without_improvement = 0
-            improvement_checkpoints = []
-            fn.log(logging.WARNING, "No training history found, starting fresh metrics")
-    else:
-        # Fresh start
-        best_val_loss = np.inf
-        best_epoch = None
-        best_train_metric = None
-        best_val_metric = None
-        epochs_without_improvement = 0
-        improvement_checkpoints = []  # List of dicts: {epoch, val_loss, train_metric, val_metric}
-
-    start_time = timer()
-    final_epoch = 0
-
-    fn.log(
-        logging.INFO,
-        f"Starting training from epoch {start_epoch} to {conf.training_opts.epochs}",
-    )
-    for epoch in range(start_epoch, conf.training_opts.epochs + 1):
-        # ------------------------ TRAIN ------------------------
-        loss_train, train_metric, loss_alpha = frame.train_one_epoch(
-            epoch, train_loader
-        )
-        frame.log_metrics(writer, train_metric, epoch, "train")
-
-        # ------------------------ VALIDATE ---------------------
-        loss_val, val_metric = frame.validate_one_epoch(epoch, val_loader, test=False)
-        frame.log_metrics(writer, val_metric, epoch, "val")
-
-        # ------------------------ LOG IMAGES -------------------
-        if (epoch - 1) % 5 == 0:
-            frame.log_images(
-                writer, train_loader, epoch, "train", _normalize, num_viz_samples
-            )
-            frame.log_images(
-                writer, val_loader, epoch, "val", _normalize, num_viz_samples
-            )
-
-        # ------------------------ FULL TILE EVAL ---------------
-        if epoch % full_eval_every == 0:
-            fn.log(logging.INFO, f"Full-tile eval at epoch {epoch}…")
-            frame.evaluate_full_test_tiles(
-                writer=writer,
-                epoch=epoch,
-                output_dir=output_dir / "full_eval",
-            )
-
-        # ------------------------ LOG SCALARS -------------------
-        writer.add_scalar("loss_train", loss_train, epoch)
-        writer.add_scalar("loss_val", loss_val, epoch)
-        writer.add_scalar("lr", frame.get_current_lr(), epoch)
-
-        for idx, sigma in enumerate(loss_alpha):
-            writer.add_scalar(f"sigma/{idx + 1}", sigma, epoch)
-
-        # Print epoch summary (now using Framework method)
-        frame.print_epoch_summary(
-            epoch,
-            train_metric=train_metric,
-            val_metric=val_metric,
-            # test_metric=val_metric,  # formatting only
-        )
-
-        # Save checkpoint if validation loss improved
-        if loss_val < best_val_loss:
-            best_val_loss = float(loss_val)
-            best_epoch = epoch
-            best_train_metric = train_metric
-            best_val_metric = val_metric
-            epochs_without_improvement = 0
-
-            # Save two checkpoints:
-            # 1. Always save as "best" (overwrites previous best)
-            frame.save(model_output_dir, "best")
-
-            # 2. Save with epoch and val_loss for historical tracking
-            frame.save_improvement(model_output_dir, epoch, float(loss_val))
-
-            # Track this improvement
-            checkpoint_data = {
-                "epoch": epoch,
-                "val_loss": float(loss_val),
-                "train_metric": train_metric,
-                "val_metric": val_metric,
-            }
-            improvement_checkpoints.append(checkpoint_data)
-        else:
-            epochs_without_improvement += 1
-
-        if epochs_without_improvement >= early_stopping:
-            fn.log(
-                logging.INFO,
-                f"Early stopping at epoch {epoch} (best={best_val_loss:.4f})",
-            )
-            break
-
-        # housekeeping
-        torch.cuda.empty_cache()
-        gc.collect()
-        writer.flush()
-        final_epoch = epoch
-
-    # ------------------------------------------------------------
-    # Save final model
-    # ------------------------------------------------------------
-    frame.save(model_output_dir, "final")
-    writer.close()
-    elapsed = timer() - start_time
-
-    fn.log(logging.INFO, f"Finished training {run_name} in {elapsed:.2f}s")
-
-    # ------------------------------------------------------------
-    # Print IMPROVEMENTS SUMMARY
-    # ------------------------------------------------------------
-    print("\n================ CHECKPOINT IMPROVEMENTS ================\n")
-    print(f"Best epoch: {best_epoch}")
-    print(f"Best validation loss: {best_val_loss:.6f}")
-    print(f"Total improvements saved: {len(improvement_checkpoints)}\n")
-    print(
-        "{:<8} {:<12} {:<10} {:<10} {:<10}".format(
-            "Epoch", "Val Loss", "Precision", "Recall", "IoU"
-        )
-    )
-    print("-" * 58)
-
-    def to_float(x):
-        if isinstance(x, torch.Tensor):
-            if x.numel() == 1:
-                return float(x.detach().cpu().item())
-            else:
-                return x.detach().cpu().tolist()
-        return float(x)
-
-    for checkpoint in improvement_checkpoints:
-        epoch = checkpoint["epoch"]
-        val_loss = checkpoint["val_loss"]
-        val_metric = checkpoint["val_metric"]
-
-        precision_vals = to_float(val_metric["precision"])
-        recall_vals = to_float(val_metric["recall"])
-        iou_vals = to_float(val_metric["IoU"])
-
-        # Use first class values for summary display
-        # Extract first value for display (works for scalars, lists, and tensors)
-        def get_first(val):  # type: ignore
-            if isinstance(val, (int, float)):
-                return float(val)
-            elif isinstance(val, (list, tuple)) and len(val) > 0:
-                return float(val[0])  # type: ignore
-            else:
-                # Assume it's indexable (tensor, array, etc.)
-                try:
-                    return float(val[0])  # type: ignore
-                except (TypeError, IndexError):
-                    return float(val)  # type: ignore
-
-        p = get_first(precision_vals)
-        r = get_first(recall_vals)
-        iou = get_first(iou_vals)
-
-        print(f"{epoch:<8} {val_loss:<12.6f} {p:<10.4f} {r:<10.4f} {iou:<10.4f}")
-    print("-" * 58 + "\n")
-
-    # ------------------------------------------------------------
-    # Print BEST-EPOCH SUMMARY (detailed)
-    # ------------------------------------------------------------
-    if best_val_metric is not None:
-        print("\n================ BEST EPOCH DETAILED ================\n")
-        print(
-            "{:<12} {:<10} {:<10} {:<10}".format("Class", "Precision", "Recall", "IoU")
-        )
-        print("-" * 48)
-        for cname, (p, r, i) in zip(
-            frame.mask_names,
-            zip(
-                best_val_metric["precision"],
-                best_val_metric["recall"],
-                best_val_metric["IoU"],
-            ),
-        ):
-            p_float = float(p.detach().cpu().item())
-            r_float = float(r.detach().cpu().item())
-            i_float = float(i.detach().cpu().item())
-            print(f"{cname:<12} {p_float:.4f}     {r_float:.4f}     {i_float:.4f}")
-        print("-" * 48 + "\n")
-
-    # ------------------------------------------------------------
-    # Save checkpoints summary
-    # ------------------------------------------------------------
-    def convert_tensors_to_python(obj):
-        """Recursively convert tensors in nested dicts/lists to Python types."""
-        if isinstance(obj, torch.Tensor):
-            if obj.numel() == 1:
-                return float(obj.detach().cpu().item())
-            else:
-                return obj.detach().cpu().tolist()
-        elif isinstance(obj, dict):
-            return {k: convert_tensors_to_python(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_tensors_to_python(item) for item in obj]
-        else:
-            return obj
-
-    # Convert all tensors in improvement_checkpoints to Python types
-    serializable_checkpoints = [
-        convert_tensors_to_python(checkpoint) for checkpoint in improvement_checkpoints
-    ]
-
-    checkpoints_summary = {
-        "total_epochs_trained": final_epoch,
-        "best_epoch": best_epoch,
-        "best_val_loss": float(best_val_loss)
-        if isinstance(best_val_loss, torch.Tensor)
-        else best_val_loss,
-        "total_improvements": len(improvement_checkpoints),
-        "improvement_checkpoints": serializable_checkpoints,
-    }
-    with open(output_dir / "checkpoints_summary.json", "w") as f:
-        json.dump(checkpoints_summary, f, indent=4)
-
-    # ------------------------------------------------------------
-    # Desktop Notification (Linux)
-    # ------------------------------------------------------------
-    try:
-        import shutil
-
-        if shutil.which("notify-send") is not None:
-            subprocess.run(
-                ["notify-send", "Training Completed", f"Run {run_name} finished."],
-                check=False,
-            )
-    except Exception:
-        pass
-
-    print(f"Training run complete: {run_name}")
+    main()

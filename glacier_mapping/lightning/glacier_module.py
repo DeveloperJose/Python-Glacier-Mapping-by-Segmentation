@@ -141,6 +141,11 @@ class GlacierSegmentationModule(pl.LightningModule):
         """Training step with manual optimization for custom loss."""
         x, y_onehot, y_int = batch
         
+        # Convert from NHWC to NCHW format expected by Conv2D
+        x = x.permute(0, 3, 1, 2)
+        y_onehot = y_onehot.permute(0, 3, 1, 2)
+        y_int = y_int.squeeze(-1)  # Remove last dimension
+        
         optimizer = self.optimizers()
         scaler = GradScaler() if self.use_amp else None
         
@@ -176,6 +181,11 @@ class GlacierSegmentationModule(pl.LightningModule):
     def validation_step(self, batch: tuple, batch_idx: int) -> torch.Tensor:
         """Validation step."""
         x, y_onehot, y_int = batch
+        
+        # Convert from NHWC to NCHW format expected by Conv2D
+        x = x.permute(0, 3, 1, 2)
+        y_onehot = y_onehot.permute(0, 3, 1, 2)
+        y_int = y_int.squeeze(-1)  # Remove last dimension
         
         with torch.no_grad():
             y_hat = self(x)
