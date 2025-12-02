@@ -4,7 +4,7 @@ training_opts:
   epochs: 500
   fine_tune: false
   find_lr: false
-  early_stopping: 100
+  early_stopping: 200
   full_eval_every: 10
   num_viz_samples: 4
 loader_opts:
@@ -58,5 +58,5 @@ scheduler_opts:
     max_lr: 0.001
     pct_start: 0.3
     anneal_strategy: cos
-server: bilbo
-gpu_rank: 1
+server: frodo
+gpu_rank: 2

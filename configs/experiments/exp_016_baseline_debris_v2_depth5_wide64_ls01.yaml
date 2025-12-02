@@ -4,7 +4,7 @@ training_opts:
   epochs: 500
   fine_tune: false
   find_lr: false
-  early_stopping: 100
+  early_stopping: 200
   full_eval_every: 10
   num_viz_samples: 4
 loader_opts:
@@ -27,7 +27,7 @@ loader_opts:
     - BG
     - CleanIce
     - Debris
-  processed_dir: /home/devj/local-debian/datasets/HKH/bibek_w512_o64_f1_v2/
+  processed_dir: /home/jperez/datasets/HKH/bibek_w512_o64_f1_v2/
 metrics_opts:
   metrics:
     - IoU
@@ -58,5 +58,5 @@ scheduler_opts:
     max_lr: 0.001
     pct_start: 0.3
     anneal_strategy: cos
-server: desktop
-gpu_rank: 0
+server: frodo
+gpu_rank: 1

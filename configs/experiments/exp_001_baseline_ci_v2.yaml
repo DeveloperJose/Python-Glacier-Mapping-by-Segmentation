@@ -4,7 +4,7 @@ training_opts:
   epochs: 500
   fine_tune: false
   find_lr: false
-  early_stopping: 250
+  early_stopping: 200
   full_eval_every: 10
   num_viz_samples: 4
 loader_opts:
