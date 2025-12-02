@@ -1,13 +1,14 @@
 """Best-model full evaluation callback for glacier mapping."""
 
 from pathlib import Path
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.loggers import MLFlowLogger
+from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from tqdm import tqdm
 
 from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
@@ -46,8 +47,9 @@ class BestModelFullEvaluationCallback(Callback):
     def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """Full-tile evaluation using Lightning module directly."""
         # Create output directory - use checkpoint directory as base
-        if hasattr(trainer, 'checkpoint_callback') and trainer.checkpoint_callback:
-            base_dir = Path(trainer.checkpoint_callback.dirpath).parent
+        checkpoint_callback = trainer.checkpoint_callback
+        if checkpoint_callback is not None and hasattr(checkpoint_callback, 'dirpath'):
+            base_dir = Path(getattr(checkpoint_callback, 'dirpath', '.')).parent
         else:
             # Fallback to default_root_dir or current directory
             base_dir = Path(trainer.default_root_dir) if trainer.default_root_dir else Path(".")
@@ -56,7 +58,8 @@ class BestModelFullEvaluationCallback(Callback):
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Get test tiles
-        data_dir = Path(pl_module.processed_dir) / "test"
+        processed_dir = getattr(pl_module, 'processed_dir', 'data/processed')
+        data_dir = Path(processed_dir) / "test"  # type: ignore[arg-type]
         test_tiles_all = sorted(data_dir.glob("tiff*"))
         
         if not test_tiles_all:
@@ -66,9 +69,12 @@ class BestModelFullEvaluationCallback(Callback):
         # Select informative tiles for visualization
         test_tiles = self._select_informative_tiles(test_tiles_all, pl_module, self.num_samples)
         
-        # Setup metrics
-        n_classes = len(pl_module.class_names)
-        threshold = pl_module.metrics_opts.get('threshold', [0.5, 0.5])
+        # Setup metrics with proper type handling
+        class_names = getattr(pl_module, 'class_names', getattr(pl_module.hparams, 'class_names', ['background', 'target']))
+        n_classes = len(class_names)
+        metrics_opts = getattr(pl_module, 'metrics_opts', {'threshold': [0.5, 0.5]})
+        threshold = metrics_opts.get('threshold', [0.5, 0.5])
+        output_classes = getattr(pl_module, 'output_classes', [1])
         
         rows = []
         tp_sum = np.zeros(n_classes)
@@ -78,7 +84,7 @@ class BestModelFullEvaluationCallback(Callback):
         # Evaluate all test tiles
         for x_path in tqdm(test_tiles_all, desc="Full-tile evaluation"):
             x = np.load(x_path)
-            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
+            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
             
             y_true_raw = np.load(x_path.with_name(x_path.name.replace("tiff", "mask"))).astype(np.uint8)
             
@@ -93,13 +99,13 @@ class BestModelFullEvaluationCallback(Callback):
             # Per-tile metrics
             row = [x_path.name]
             for ci in range(n_classes):
-                if len(pl_module.output_classes) == 1:  # Binary
+                if len(output_classes) == 1:  # Binary
                     pred_label = ci + 1
                     p = (y_pred_valid == pred_label).astype(np.uint8)
                     if ci == 0:
-                        t = (y_true_valid_raw != pl_module.output_classes[0]).astype(np.uint8)
+                        t = (y_true_valid_raw != output_classes[0]).astype(np.uint8)
                     else:
-                        t = (y_true_valid_raw == pl_module.output_classes[0]).astype(np.uint8)
+                        t = (y_true_valid_raw == output_classes[0]).astype(np.uint8)
                 else:  # Multi-class
                     label = ci + 1
                     p = (y_pred_valid == label).astype(np.uint8)
@@ -114,15 +120,16 @@ class BestModelFullEvaluationCallback(Callback):
             
             rows.append(row)
         
-        # Save CSV
+        # Save CSV with proper column handling
         cols = ["tile"]
-        for cname in pl_module.class_names:
+        for cname in class_names:
             cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
         
-        pd.DataFrame(rows, columns=cols).to_csv(output_dir / f"full_eval_epoch{trainer.current_epoch + 1}.csv", index=False)
+        df = pd.DataFrame(rows, columns=cols)  # type: ignore[arg-type]
+        df.to_csv(output_dir / f"full_eval_epoch{trainer.current_epoch + 1}.csv", index=False)
         
         # Log metrics to both loggers
-        for ci, cname in enumerate(pl_module.class_names):
+        for ci, cname in enumerate(class_names):
             tp_, fp_, fn_ = tp_sum[ci], fp_sum[ci], fn_sum[ci]
             prec = precision(tp_, fp_, fn_)
             rec = recall(tp_, fp_, fn_)
@@ -137,29 +144,51 @@ class BestModelFullEvaluationCallback(Callback):
         self._generate_visualizations(pl_module, test_tiles[:self.num_samples], output_dir, trainer.current_epoch + 1)
         print("Visualizations completed.")
         
-        # Log only PNG files to MLflow if available
+        # Log PNG files to both TensorBoard and MLflow
+        self._log_visualizations_to_all_loggers(trainer, output_dir, trainer.current_epoch + 1)
+    
+    def _log_visualizations_to_all_loggers(self, trainer: pl.Trainer, output_dir: Path, epoch: int):
+        """Log PNGs to both TensorBoard and MLflow."""
+        import matplotlib.pyplot as plt
+        
         for logger in trainer.loggers:
-            if isinstance(logger, MLFlowLogger):
-                try:
+            try:
+                # MLflow logging
+                if isinstance(logger, MLFlowLogger):
                     for png_file in output_dir.glob("*.png"):
                         logger.experiment.log_artifact(
                             logger.run_id,
                             str(png_file),
-                            artifact_path=f"eval_epoch_{trainer.current_epoch + 1}"
+                            artifact_path=f"eval_epoch_{epoch}"
                         )
-                except Exception as e:
-                    print(f"Warning: Failed to log PNGs to MLflow: {e}")
+                
+                # TensorBoard logging
+                elif isinstance(logger, TensorBoardLogger):
+                    for png_file in output_dir.glob("*.png"):
+                        # Load PNG and convert to tensor for TensorBoard
+                        img = plt.imread(png_file)  # HWC format
+                        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+                        logger.experiment.add_image(
+                            f"evaluation/{png_file.stem}", 
+                            img_tensor, 
+                            global_step=epoch,
+                            dataformats='CHW'
+                        )
+                        
+            except Exception as e:
+                print(f"Warning: Failed to log to {type(logger).__name__}: {e}")
     
-    def _select_informative_tiles(self, tile_paths, pl_module, num_samples):
+    def _select_informative_tiles(self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int) -> List[Path]:
         """Select tiles with most target class pixels."""
         tile_class_counts = []
+        output_classes = getattr(pl_module, 'output_classes', [1])
         
         for x_path in tile_paths:
             mask_path = x_path.with_name(x_path.name.replace("tiff", "mask"))
             mask = np.load(mask_path)
             
-            if len(pl_module.output_classes) == 1:  # Binary
-                class_pixels = (mask == pl_module.output_classes[0]).sum()
+            if len(output_classes) == 1:  # Binary
+                class_pixels = (mask == output_classes[0]).sum()
             else:  # Multi-class
                 class_pixels = ((mask > 0) & (mask != 255)).sum()
             
@@ -173,12 +202,17 @@ class BestModelFullEvaluationCallback(Callback):
         
         return selected[:num_samples]
     
-    def _generate_visualizations(self, pl_module, test_tiles, output_dir, epoch):
+    def _generate_visualizations(self, pl_module: pl.LightningModule, test_tiles: List[Path], output_dir: Path, epoch: int) -> None:
         """Generate 8-panel visualizations."""
         import cv2
         
-        threshold = pl_module.metrics_opts.get('threshold', [0.5, 0.5])
-        cmap = build_cmap_from_mask_names(pl_module.class_names)
+        # Get module attributes with fallbacks
+        metrics_opts = getattr(pl_module, 'metrics_opts', {'threshold': [0.5, 0.5]})
+        threshold = metrics_opts.get('threshold', [0.5, 0.5])
+        class_names = getattr(pl_module, 'class_names', ['background', 'target'])
+        output_classes = getattr(pl_module, 'output_classes', [1])
+        
+        cmap = build_cmap_from_mask_names(class_names)
         
         for idx, x_path in enumerate(test_tiles):
             x_full = np.load(x_path)
@@ -189,7 +223,7 @@ class BestModelFullEvaluationCallback(Callback):
             y_pred_viz = predict_from_probs(probs, pl_module, threshold[0] if threshold else None)
             
             # Get confidence for visualization
-            if len(pl_module.output_classes) == 1:  # Binary
+            if len(output_classes) == 1:  # Binary
                 conf = probs[:, :, 1]  # Foreground probability
             else:  # Multi-class
                 conf = np.max(probs, axis=-1)
@@ -201,8 +235,8 @@ class BestModelFullEvaluationCallback(Callback):
             y_gt_vis = y_true_raw.copy()
             y_pred_vis = y_pred_viz.copy()
             
-            if len(pl_module.output_classes) == 1:  # Binary
-                class_idx = pl_module.output_classes[0]
+            if len(output_classes) == 1:  # Binary
+                class_idx = output_classes[0]
                 y_gt_vis_binary = np.zeros_like(y_true_raw)
                 y_gt_vis_binary[y_true_raw == class_idx] = 1
                 y_gt_vis_binary[y_true_raw == 255] = 255
@@ -216,9 +250,13 @@ class BestModelFullEvaluationCallback(Callback):
             
             # Confidence / entropy
             conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
-            if len(pl_module.output_classes) == 1:  # Binary
-                # For binary, transpose probs to (H, W, 2) for entropy calculation
-                entropy_rgb = make_entropy_map(probs.transpose(1, 2, 0), invalid_mask=ignore)
+            if len(output_classes) == 1:  # Binary
+                # For binary, reshape probs to (H, W, 2) for entropy calculation
+                if probs.shape[-1] == 2:
+                    entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+                else:
+                    # Handle case where probs might be in different format
+                    entropy_rgb = make_confidence_map(conf, invalid_mask=ignore)  # Fallback
             else:  # Multi-class
                 entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
             
@@ -246,7 +284,7 @@ class BestModelFullEvaluationCallback(Callback):
             
             # Per-class metrics string
             metric_string_parts = []
-            for ci, cname in enumerate(pl_module.class_names):
+            for ci, cname in enumerate(class_names):
                 pred_c = (y_pred_vis == ci).astype(np.uint8)
                 true_c = (y_gt_vis == ci).astype(np.uint8)
                 

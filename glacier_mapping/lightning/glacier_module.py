@@ -220,7 +220,7 @@ class GlacierSegmentationModule(pl.LightningModule):
             class_name = self.class_names[class_idx]
             
             # Get binary predictions for this class
-            if len(self.output_classes) == 2:  # Binary case
+            if len(self.output_classes) == 1:  # Binary case
                 y_pred_class = (y_prob[:, 1] > 0.5).float()
                 y_true_class = (y_int == class_idx).float()
             else:  # Multi-class case

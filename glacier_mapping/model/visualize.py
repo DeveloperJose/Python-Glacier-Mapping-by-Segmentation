@@ -120,21 +120,26 @@ def make_confidence_map(prob, invalid_mask=None):
     """Convert probability map to RGB VIRIDIS heatmap."""
     rgb = _viridis_from_scalar(prob)
     if invalid_mask is not None:
-        rgb[invalid_mask] = 0
+        rgb[invalid_mask, :] = 0
     return rgb
 
 
 def make_entropy_map(prob_cube, invalid_mask=None):
     """Compute pixelwise entropy H = -sum(p * log(p)) and convert to RGB VIRIDIS heatmap."""
     p = np.clip(prob_cube, 1e-8, 1.0)
-    entropy = -(p * np.log(p)).sum(axis=2)
+    
+    # Handle both 2D (single class) and 3D (multi-class) probability cubes
+    if len(p.shape) == 2:
+        entropy = -(p * np.log(p))
+    else:
+        entropy = -(p * np.log(p)).sum(axis=-1)
 
     max_e = np.max(entropy) + 1e-8
     entropy_norm = entropy / max_e
 
     rgb = _viridis_from_scalar(entropy_norm)
     if invalid_mask is not None:
-        rgb[invalid_mask] = 0
+        rgb[invalid_mask, :] = 0
     return rgb
 
 

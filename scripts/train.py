@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import yaml
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, DeviceStatsMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.model.unet import Unet
@@ -65,7 +65,7 @@ def main():
     # Load server configuration (explicit, no defaults)
     servers_yaml_path = pathlib.Path('configs') / 'servers.yaml'
     if MLFLOW_AVAILABLE:
-        server_config = MLflowManager.load_server_config(str(servers_yaml_path), args.server)
+        server_config = MLflowManager.load_server_config(str(servers_yaml_path), args.server)  # type: ignore[arg-type]
     else:
         # Fallback server config for when MLflow unavailable
         with open(servers_yaml_path, 'r') as f:
@@ -89,10 +89,10 @@ def main():
     
     # Generate MLflow experiment name and run name
     if mlflow_enabled and MLFLOW_AVAILABLE:
-        experiment_name = args.experiment_name or MLflowManager.categorize_experiment(config)
-        run_name = MLflowManager.generate_run_name(base_run_name, args.server)
-        mlflow_params = MLflowManager.extract_mlflow_params(config, server_config)
-        mlflow_tags = MLflowManager.generate_run_tags(config, server_config, str(config_path))
+        experiment_name = args.experiment_name or MLflowManager.categorize_experiment(config)  # type: ignore[assignment]
+        run_name = MLflowManager.generate_run_name(base_run_name, args.server)  # type: ignore[assignment]
+        mlflow_params = MLflowManager.extract_mlflow_params(config, server_config)  # type: ignore[assignment]
+        mlflow_tags = MLflowManager.generate_run_tags(config, server_config, str(config_path))  # type: ignore[assignment]
     else:
         experiment_name = None
         run_name = base_run_name
@@ -148,7 +148,8 @@ def main():
     
     # Setup logging
     print("Setting up logging...")
-    loggers = [TensorBoardLogger(
+    from pytorch_lightning.loggers import Logger
+    loggers: list[Logger] = [TensorBoardLogger(
         save_dir=f"{output_dir}/{run_name}/logs",
         name=""
     )]
@@ -182,6 +183,7 @@ def main():
             filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}"
         ),
         LearningRateMonitor(logging_interval='step'),
+        DeviceStatsMonitor(cpu_stats=True),  # Automatic system monitoring
         BestModelFullEvaluationCallback(
             num_samples=training_opts.get('num_viz_samples', 4)
         )
@@ -220,8 +222,7 @@ def main():
         print("Training interrupted by user")
     except Exception as e:
         print(f"Training failed with error: {e}")
-        import traceback
-        traceback.print_exc()
+        # Lightning's DeviceStatsMonitor and dual loggers handle error logging automatically
         raise
 
 
