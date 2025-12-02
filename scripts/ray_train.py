@@ -93,6 +93,8 @@ def ray_train(config: Dict[str, Any]):
         "true",
         "--tracking-uri",
         config["tracking_uri"],
+        "--output-dir",
+        config["output_path"],
     ]
 
     print(f"Starting training: {config['config_path']} on {config['server']}")
@@ -190,6 +192,7 @@ def main():
                 "server": args.server,
                 "max_epochs": args.max_epochs,
                 "tracking_uri": args.tracking_uri,
+                "output_path": server_config["output_path"],
             }
         )
 

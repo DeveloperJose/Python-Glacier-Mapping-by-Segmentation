@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--mlflow-enabled", type=str, default='true', help="Enable MLflow logging (true/false)")
     parser.add_argument("--tracking-uri", type=str, default="https://mlflow.developerjose.duckdns.org/", help="MLflow tracking URI")
     parser.add_argument("--experiment-name", type=str, default=None, help="Override MLflow experiment name (bypasses automatic categorization)")
+    parser.add_argument("--output-dir", type=str, default=None, help="Override output directory from server config")
     
     args = parser.parse_args()
     
@@ -81,7 +82,7 @@ def main():
     
     # Get run name and output directory
     base_run_name = training_opts.get('run_name', 'experiment')
-    output_dir = training_opts.get('output_dir', 'output/')
+    output_dir = args.output_dir or training_opts.get('output_dir', 'output/')
     
     # Generate MLflow experiment name and run name
     if mlflow_enabled and MLFLOW_AVAILABLE:
