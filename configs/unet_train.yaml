@@ -6,8 +6,12 @@ training_opts:
   fine_tune: False
   find_lr: False
   early_stopping: 100 # Epochs to wait for improvement
-  full_eval_every: 10
-  num_viz_samples: 4
+  # Slice visualizations (validation batch samples, every N epochs)
+  num_slice_viz: 4                # 1+ to generate, 0 or less to skip
+  slice_viz_every_n_epochs: 10
+  # Full-tile evaluation (on best model only)
+  run_full_eval: true             # Run full-tile test set evaluation
+  num_full_viz: 4                 # 1+ to generate PNGs, 0 or less for metrics only
 
 loader_opts:
   batch_size: 8 # 8 (original paper), 12 (debian 512x512) or 46-48 (debian 256x256)

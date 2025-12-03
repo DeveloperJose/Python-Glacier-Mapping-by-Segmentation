@@ -249,22 +249,23 @@ class BestModelFullEvaluationCallback(Callback):
                     f"best_full_test_{cname}_recall", rec, on_step=False, on_epoch=True
                 )
 
-        # Generate visualizations for selected tiles
-        print(
-            f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles..."
-        )
-        self._generate_visualizations(
-            pl_module,
-            test_tiles[: self.num_samples],
-            output_dir,
-            trainer.current_epoch + 1,
-        )
-        print("Visualizations completed.")
+        # Generate visualizations for selected tiles (only if num_samples >= 1)
+        if self.num_samples >= 1:
+            print(
+                f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles..."
+            )
+            self._generate_visualizations(
+                pl_module,
+                test_tiles[: self.num_samples],
+                output_dir,
+                trainer.current_epoch + 1,
+            )
+            print("Visualizations completed.")
 
-        # Log PNG files to both TensorBoard and MLflow
-        self._log_visualizations_to_all_loggers(
-            trainer, output_dir, trainer.current_epoch + 1
-        )
+            # Log PNG files to both TensorBoard and MLflow
+            self._log_visualizations_to_all_loggers(
+                trainer, output_dir, trainer.current_epoch + 1
+            )
 
     def _log_visualizations_to_all_loggers(
         self, trainer: pl.Trainer, output_dir: Path, epoch: int

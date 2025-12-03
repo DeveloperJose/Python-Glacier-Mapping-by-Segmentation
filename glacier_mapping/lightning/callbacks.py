@@ -67,6 +67,9 @@ class GlacierVisualizationCallback(Callback):
         with torch.no_grad():
             y_hat = pl_module(x)
 
+        # Track saved paths for MLflow logging
+        saved_paths = []
+
         # Generate visualizations for first N samples
         for i in range(min(self.num_samples, x.shape[0])):
             sample_x = x[i : i + 1]
@@ -75,10 +78,10 @@ class GlacierVisualizationCallback(Callback):
 
             # Create and save 8-panel visualization
             if self.save_dir:
-                # New structure: fulltile_XXXX/epochYYYY.png
-                tile_dir = self.save_dir / f"fulltile_{i:04d}"
-                tile_dir.mkdir(parents=True, exist_ok=True)
-                save_path = tile_dir / f"epoch{trainer.current_epoch:04d}.png"
+                # Structure: slice_XXXX/epochYYYY.png
+                slice_dir = self.save_dir / f"slice_{i:04d}"
+                slice_dir.mkdir(parents=True, exist_ok=True)
+                save_path = slice_dir / f"epoch{trainer.current_epoch + 1:04d}.png"
 
                 from matplotlib import pyplot as plt
 
@@ -98,7 +101,25 @@ class GlacierVisualizationCallback(Callback):
                 plt.savefig(save_path, dpi=150, bbox_inches="tight")
                 plt.close()
 
-                # Local save only - no MLflow logging to save storage
+                saved_paths.append((slice_dir, save_path))
+
+        # Log to MLflow
+        self._log_to_mlflow(trainer, saved_paths)
+
+    def _log_to_mlflow(self, trainer: pl.Trainer, saved_paths: list):
+        """Log saved visualizations to MLflow."""
+        for logger in trainer.loggers:
+            if isinstance(logger, MLFlowLogger):
+                try:
+                    for slice_dir, save_path in saved_paths:
+                        # Log individual PNG file
+                        logger.experiment.log_artifact(
+                            logger.run_id,
+                            str(save_path),
+                            artifact_path=f"slice_visualizations/{slice_dir.name}",
+                        )
+                except Exception as e:
+                    print(f"Warning: Failed to log slice visualization to MLflow: {e}")
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):

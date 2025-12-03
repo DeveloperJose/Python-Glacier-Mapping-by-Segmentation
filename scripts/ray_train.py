@@ -2,10 +2,12 @@
 """Ray Tune hyperparameter search for glacier mapping - Set it and forget it."""
 
 import argparse
+import json
 import os
 import sys
 import tempfile
 import yaml
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -51,7 +53,7 @@ SERVER_CONFIGS = {
         "skip_tier1": True,
         "datasets": ["bibek_w512_o64_f1_v2"],  # Using available dataset only
         "num_samples": 4,  # 2 batch_sizes × 2 samples
-        "max_epochs": 1,  # Quick validation: 1 epoch only
+        "max_epochs": 500,  # Quick validation: 1 epoch only
         "gpu_per_trial": 1.0,  # 1 trial at a time
         "batch_sizes": [4, 8],
     },
@@ -116,6 +118,11 @@ TIER1_FIXED_PARAMS = {
 # =============================================================================
 
 
+def get_ray_results_dir(server_config: Dict[str, Any]) -> Path:
+    """Get Ray results directory from server config (alongside other outputs)."""
+    return Path(server_config["output_path"]) / "ray_results"
+
+
 def load_server_config(servers_yaml_path: str, server_name: str) -> Dict[str, Any]:
     """Load server configuration from YAML."""
     with open(servers_yaml_path, "r") as f:
@@ -140,8 +147,19 @@ def build_base_config(
     server_config: Dict[str, Any],
     max_epochs: int,
     experiment_name: str,
+    enable_viz: bool = False,
 ) -> Dict[str, Any]:
-    """Build complete training configuration."""
+    """Build complete training configuration.
+
+    Args:
+        task: Task type (ci, debris, multiclass)
+        dataset: Dataset name
+        hyperparams: Hyperparameter dict
+        server_config: Server configuration
+        max_epochs: Maximum epochs to train
+        experiment_name: MLflow experiment name
+        enable_viz: Enable visualizations (True for test-suite, False for HP search)
+    """
 
     task_config = TASK_CONFIGS[task]
     use_channels = get_channels_from_dataset(dataset)
@@ -154,8 +172,11 @@ def build_base_config(
             "fine_tune": False,
             "find_lr": False,
             "early_stopping": 100,
-            "full_eval_every": 10000000000000000000000000000000000,
-            "num_viz_samples": 0,
+            # Visualization settings - enabled for test-suite, disabled for HP search
+            "num_slice_viz": 4 if enable_viz else 0,
+            "slice_viz_every_n_epochs": 1 if enable_viz else 10,
+            "run_full_eval": enable_viz,
+            "num_full_viz": 4 if enable_viz else 0,
         },
         "loader_opts": {
             "batch_size": hyperparams.get("batch_size", 8),
@@ -217,18 +238,20 @@ def validate_dataset_paths(server_config: Dict[str, Any], datasets: List[str]) -
         raise FileNotFoundError(f"Datasets not found: {missing_datasets}")
 
 
-def detect_resume(server: str, task: Optional[str] = None) -> Optional[str]:
+def detect_resume(
+    server_config: Dict[str, Any], server: str, task: Optional[str] = None
+) -> Optional[str]:
     """Auto-detect resume path from existing Ray results.
-    
+
     Prefers tier2 over tier1 for specific tasks.
     """
-    ray_results_dir = Path.home() / "ray_results"
+    ray_results_dir = get_ray_results_dir(server_config)
 
     if task:
         # Specific task resume - look for most recent tier (prefer tier2)
         tier2_path = ray_results_dir / f"glacier_search_{task}_{server}_tier2"
         tier1_path = ray_results_dir / f"glacier_search_{task}_{server}_tier1"
-        
+
         # Prefer tier2, fallback to tier1
         if tier2_path.exists():
             return str(tier2_path)
@@ -245,9 +268,11 @@ def detect_resume(server: str, task: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def get_best_datasets_from_tier1(task: str, server: str, top_k: int = 3) -> List[str]:
+def get_best_datasets_from_tier1(
+    server_config: Dict[str, Any], task: str, server: str, top_k: int = 3
+) -> List[str]:
     """Extract best datasets from Tier 1 results."""
-    ray_results_dir = Path.home() / "ray_results"
+    ray_results_dir = get_ray_results_dir(server_config)
     tier1_dir = ray_results_dir / f"glacier_search_{task}_{server}_tier1"
 
     if not tier1_dir.exists():
@@ -291,6 +316,7 @@ def ray_trainable(config: Dict[str, Any]):
     max_epochs = config["max_epochs"]
     experiment_name = config["experiment_name"]
     hyperparams = config["hyperparams"]
+    enable_viz = config.get("enable_viz", False)
 
     # Load server configuration (use absolute path for Ray workers)
     project_root = Path(__file__).parent.parent
@@ -299,7 +325,13 @@ def ray_trainable(config: Dict[str, Any]):
 
     # Build complete training configuration
     full_config = build_base_config(
-        task, dataset, hyperparams, server_config, max_epochs, experiment_name
+        task,
+        dataset,
+        hyperparams,
+        server_config,
+        max_epochs,
+        experiment_name,
+        enable_viz=enable_viz,
     )
 
     # Create temporary config file
@@ -327,14 +359,20 @@ def ray_trainable(config: Dict[str, Any]):
             str(max_epochs),
             "--experiment-name",
             experiment_name,
-            "--mlflow-enabled",
-            "true",
             "--tracking-uri",
             MLFLOW_URI,
             "--output-dir",
             server_config["output_path"],
             # GPU auto-detected via Ray's CUDA_VISIBLE_DEVICES
         ]
+
+        # Conditional flags based on mode
+        if enable_viz:
+            # Test suite mode: enable MLflow, save outputs
+            sys.argv.extend(["--mlflow-enabled", "true"])
+        else:
+            # Hyperparameter search mode: disable MLflow, skip disk writes
+            sys.argv.extend(["--mlflow-enabled", "false", "--no-output"])
 
         # Import and run training
         from scripts.train import main as train_main
@@ -363,30 +401,48 @@ def ray_trainable(config: Dict[str, Any]):
 
 
 def run_post_evaluation(
-    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str, top_k: int = 10
+    task: str,
+    server_config: Dict[str, Any],
+    server_name: str,
+    experiment_name: str,
+    top_k: int = 10,
+    search_space_info: Optional[Dict[str, Any]] = None,
 ):
-    """Run post-search evaluation of top-K checkpoints."""
+    """Run post-search evaluation of top-K checkpoints.
+
+    Args:
+        task: Task type (ci, debris, multiclass)
+        server_config: Server configuration dict
+        server_name: Server name string
+        experiment_name: MLflow experiment name
+        top_k: Number of top trials to evaluate
+        search_space_info: Search space configuration for metadata
+    """
 
     print(f"\n{'=' * 60}")
     print(f"POST-SEARCH EVALUATION: {task.upper()}")
     print(f"{'=' * 60}")
 
-    ray_results_dir = Path.home() / "ray_results"
-    tier2_dir = (
-        ray_results_dir / f"glacier_search_{task}_{server_name}_tier2"
-    )
+    ray_results_dir = get_ray_results_dir(server_config)
 
-    if not tier2_dir.exists():
-        print(f"No Tier 2 results found for {task}, skipping evaluation")
+    # Check for tier2 results first, then test_suite results
+    tier2_dir = ray_results_dir / f"glacier_search_{task}_{server_name}_tier2"
+    test_suite_dir = ray_results_dir / f"glacier_test_suite_{task}_{server_name}"
+
+    if tier2_dir.exists():
+        results_dir = tier2_dir
+    elif test_suite_dir.exists():
+        results_dir = test_suite_dir
+    else:
+        print(f"No results found for {task}, skipping evaluation")
         return
 
     try:
         # Load analysis and get best trials
-        analysis = ExperimentAnalysis(str(tier2_dir))
+        analysis = ExperimentAnalysis(str(results_dir))
         best_trials = analysis.get_best_trial(metric="val_loss", mode="min")
 
         results = []
-        task_config = TASK_CONFIGS[task]
 
         # Handle single best trial case
         if best_trials:
@@ -417,7 +473,8 @@ def run_post_evaluation(
             }
             results.append(result)
 
-        # Save comparison CSV
+        # Save comparison CSV with unique timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = (
             Path(server_config["output_path"])
             / "hyperparameter_search_results"
@@ -425,7 +482,8 @@ def run_post_evaluation(
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        comparison_path = output_dir / f"{task}_top_{top_k}_comparison.csv"
+        csv_filename = f"{task}_{server_name}_{timestamp}_top{top_k}.csv"
+        comparison_path = output_dir / csv_filename
 
         # Create CSV with all hyperparameters and metrics
         csv_data = []
@@ -441,12 +499,35 @@ def run_post_evaluation(
         print("\n✓ Post-search evaluation complete!")
         print(f"  Results saved to: {comparison_path}")
 
+        # Save metadata JSON with search space info
+        best_result = results[0] if results else None
+        metadata = {
+            "task": task,
+            "server": server_name,
+            "experiment_name": experiment_name,
+            "timestamp": timestamp,
+            "top_k": top_k,
+            "results_dir": str(results_dir),
+            "search_space": search_space_info or {},
+            "best_trial": {
+                "trial_id": best_result["trial_id"],
+                "hyperparameters": best_result["hyperparameters"],
+                "metrics": best_result["test_metrics"],
+            }
+            if best_result
+            else None,
+        }
+        metadata_path = output_dir / f"{task}_{server_name}_{timestamp}_metadata.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"  Metadata saved to: {metadata_path}")
+
         # Print recommendation
-        best_result = results[0]
-        print(f"\n🏆 RECOMMENDED CONFIGURATION for {task.upper()}:")
-        print(f"  Trial ID: {best_result['trial_id']}")
-        print(f"  IoU: {best_result['test_metrics']['IoU']:.3f}")
-        print(f"  Hyperparameters: {best_result['hyperparameters']}")
+        if best_result:
+            print(f"\nRECOMMENDED CONFIGURATION for {task.upper()}:")
+            print(f"  Trial ID: {best_result['trial_id']}")
+            print(f"  IoU: {best_result['test_metrics']['IoU']:.3f}")
+            print(f"  Hyperparameters: {best_result['hyperparameters']}")
 
     except Exception as e:
         print(f"Post-search evaluation failed: {e}")
@@ -458,8 +539,11 @@ def run_post_evaluation(
 
 
 def run_tier1_search(
-    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str,
-    resume_path: Optional[str] = None
+    task: str,
+    server_config: Dict[str, Any],
+    server_name: str,
+    experiment_name: str,
+    resume_path: Optional[str] = None,
 ):
     """Run Tier 1 search: dataset search with fixed model."""
 
@@ -468,6 +552,7 @@ def run_tier1_search(
     server_cfg = SERVER_CONFIGS[server_name]
     datasets = server_cfg["tier1_datasets"]
     max_epochs = server_cfg["max_epochs_tier1"]
+    ray_results_dir = get_ray_results_dir(server_config)
 
     # Validate datasets exist
     validate_dataset_paths(server_config, datasets)
@@ -506,14 +591,18 @@ def run_tier1_search(
         tuner = tune.Tuner(
             tune.with_resources(ray_trainable, resources=gpu_resources),
             param_space=search_space,
-            tune_config=tune.TuneConfig(metric="val_loss", mode="min", scheduler=scheduler),
+            tune_config=tune.TuneConfig(
+                metric="val_loss", mode="min", scheduler=scheduler
+            ),
             run_config=tune.RunConfig(
                 name=f"glacier_search_{task}_{server_name}_tier1",
+                storage_path=str(ray_results_dir),
                 verbose=1,
                 failure_config=FailureConfig(max_failures=100, fail_fast=False),
             ),
         )
 
+    print(f"Ray results will be saved to: {ray_results_dir}")
     print(f"Starting Tier 1 search with {len(datasets)} datasets...")
     results = tuner.fit()
 
@@ -522,14 +611,18 @@ def run_tier1_search(
 
 
 def run_tier2_search(
-    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str,
-    resume_path: Optional[str] = None
+    task: str,
+    server_config: Dict[str, Any],
+    server_name: str,
+    experiment_name: str,
+    resume_path: Optional[str] = None,
 ):
     """Run Tier 2 search: hyperparameter search on best datasets."""
 
     print(f"\n--- TIER 2: Model hyperparameter search for {task} ---")
 
     server_cfg = SERVER_CONFIGS[server_name]
+    ray_results_dir = get_ray_results_dir(server_config)
 
     # Get datasets for Tier 2
     if server_cfg["skip_tier1"]:
@@ -537,7 +630,9 @@ def run_tier2_search(
         # Validate datasets exist for desktop
         validate_dataset_paths(server_config, datasets)
     else:
-        datasets = get_best_datasets_from_tier1(task, server_name, top_k=3)
+        datasets = get_best_datasets_from_tier1(
+            server_config, task, server_name, top_k=3
+        )
 
     max_epochs = server_cfg.get("max_epochs_tier2", server_cfg.get("max_epochs", 500))
     num_samples = server_cfg["num_samples"]
@@ -565,6 +660,12 @@ def run_tier2_search(
                 "pct_start": 0.3,
             },
         }
+        # Capture search space info for metadata
+        search_space_info = {
+            "datasets": datasets,
+            "batch_sizes": server_cfg["batch_sizes"],
+            "hyperparams": "fixed (desktop mode)",
+        }
     else:
         # Production: Focused hyperparameter exploration
         search_space = {
@@ -589,6 +690,17 @@ def run_tier2_search(
                 # Primary dimension: batch size
                 "batch_size": tune.choice(server_cfg["batch_sizes"]),
             },
+        }
+        # Capture search space info for metadata
+        search_space_info = {
+            "datasets": datasets,
+            "batch_sizes": server_cfg["batch_sizes"],
+            "net_depth": [4, 5],
+            "first_channel_output": [64, 128],
+            "lr": [0.0001, 0.0003],
+            "max_lr": [0.001, 0.003],
+            "dropout": [0.1, 0.2],
+            "weight_decay": [1e-5, 5e-5],
         }
 
     # Configure Ray
@@ -616,20 +728,25 @@ def run_tier2_search(
             tune.with_resources(ray_trainable, resources=gpu_resources),
             param_space=search_space,
             tune_config=tune.TuneConfig(
-                metric="val_loss", mode="min", scheduler=scheduler, num_samples=num_samples
+                metric="val_loss",
+                mode="min",
+                scheduler=scheduler,
+                num_samples=num_samples,
             ),
             run_config=tune.RunConfig(
                 name=f"glacier_search_{task}_{server_name}_tier2",
+                storage_path=str(ray_results_dir),
                 verbose=1,
                 failure_config=FailureConfig(max_failures=100, fail_fast=False),
             ),
         )
 
+    print(f"Ray results will be saved to: {ray_results_dir}")
     print(f"Starting Tier 2 search with {num_samples} trials...")
     results = tuner.fit()
 
     print(f"✓ Tier 2 search completed for {task}")
-    return results
+    return results, search_space_info
 
 
 def run_single_task(task: str, args, server_config: Dict[str, Any]):
@@ -637,7 +754,7 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
 
     server_name = args.server
     task_config = TASK_CONFIGS[task]
-    experiment_name = TEST_EXPERIMENT if args.test_suite else task_config["experiment_suffix"]
+    experiment_name = task_config["experiment_suffix"]
 
     print(f"\n{'=' * 60}")
     print(f"STARTING TASK: {task.upper()}")
@@ -649,7 +766,7 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
     resume_path = None
     if args.resume:
         if args.resume == "auto":
-            resume_path = detect_resume(server_name, task)
+            resume_path = detect_resume(server_config, server_name, task)
             if resume_path:
                 print(f"Auto-detected resume path for {task}: {resume_path}")
             else:
@@ -662,18 +779,122 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
 
     # Tier 1: Dataset search (skip for desktop or if resuming tier2)
     server_cfg = SERVER_CONFIGS[server_name]
-    skip_tier1 = server_cfg["skip_tier1"] or (resume_path and "tier2" in str(resume_path))
-    
+    skip_tier1 = server_cfg["skip_tier1"] or (
+        resume_path and "tier2" in str(resume_path)
+    )
+
     if not skip_tier1:
         run_tier1_search(task, server_config, server_name, experiment_name, resume_path)
 
     # Tier 2: Model hyperparameter search
-    run_tier2_search(task, server_config, server_name, experiment_name, resume_path)
+    _, search_space_info = run_tier2_search(
+        task, server_config, server_name, experiment_name, resume_path
+    )
 
     # Post-search evaluation
-    run_post_evaluation(task, server_config, server_name, experiment_name, top_k=10)
+    run_post_evaluation(
+        task,
+        server_config,
+        server_name,
+        experiment_name,
+        top_k=10,
+        search_space_info=search_space_info,
+    )
 
     print(f"\n✓ COMPLETED TASK: {task.upper()}")
+
+
+def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
+    """Run single 2-epoch test with visualizations (no hyperparameter search).
+
+    This mode is for:
+    1. Testing the full Ray -> train.py pipeline
+    2. Running a final trained model after hyperparameter search with all viz enabled
+
+    Args:
+        task: Task type (ci, debris, multiclass)
+        server_config: Server configuration dict
+        server_name: Server name string
+    """
+
+    print(f"\n{'=' * 60}")
+    print(f"TEST SUITE: {task.upper()}")
+    print(f"Server: {server_name}")
+    print("Epochs: 2")
+    print("Visualizations: ENABLED")
+    print("MLflow: ENABLED")
+    print(f"{'=' * 60}")
+
+    server_cfg = SERVER_CONFIGS[server_name]
+    ray_results_dir = get_ray_results_dir(server_config)
+
+    # Get dataset - use first available
+    datasets = server_cfg.get("datasets", server_cfg.get("tier1_datasets", []))
+    if not datasets:
+        raise ValueError(f"No datasets configured for server {server_name}")
+    dataset = datasets[0]
+
+    # Validate dataset exists
+    validate_dataset_paths(server_config, [dataset])
+
+    # Fixed hyperparams for test suite (no search)
+    hyperparams = TIER1_FIXED_PARAMS.copy()
+
+    # Search space info for metadata
+    search_space_info = {
+        "datasets": [dataset],
+        "hyperparams": hyperparams,
+        "mode": "test_suite",
+        "note": "Single 2-epoch test run with visualizations - no hyperparameter search",
+    }
+
+    # Config for single trial with viz enabled
+    param_space = {
+        "task": task,
+        "dataset": dataset,  # Single dataset, not tune.choice
+        "server": server_name,
+        "max_epochs": 2,
+        "experiment_name": TEST_EXPERIMENT,
+        "enable_viz": True,  # Enable all visualizations
+        "hyperparams": hyperparams,
+    }
+
+    # Configure Ray - single trial, no scheduler
+    gpu_resources = {"gpu": server_cfg["gpu_per_trial"]}
+
+    tuner = tune.Tuner(
+        tune.with_resources(ray_trainable, resources=gpu_resources),
+        param_space=param_space,
+        tune_config=tune.TuneConfig(
+            metric="val_loss",
+            mode="min",
+            num_samples=1,  # Single trial
+            # No scheduler - let it run to completion
+        ),
+        run_config=tune.RunConfig(
+            name=f"glacier_test_suite_{task}_{server_name}",
+            storage_path=str(ray_results_dir),
+            verbose=1,
+        ),
+    )
+
+    print(f"Ray results will be saved to: {ray_results_dir}")
+    print(f"Dataset: {dataset}")
+    print("Starting test suite run...")
+    results = tuner.fit()
+
+    # Post-evaluation (even for test suite)
+    run_post_evaluation(
+        task=task,
+        server_config=server_config,
+        server_name=server_name,
+        experiment_name=TEST_EXPERIMENT,
+        top_k=1,
+        search_space_info=search_space_info,
+    )
+
+    print(f"\n✓ Test suite completed for {task}")
+    return results
 
 
 # =============================================================================
@@ -702,19 +923,23 @@ def main():
         "--test-suite",
         action="store_true",
         default=False,
-        help="Use test_suite experiment for validation (default: False for production)",
+        help="Run single 2-epoch test with visualizations (no HP search). Requires --task.",
     )
     parser.add_argument(
-        "--resume", 
+        "--resume",
         type=str,
         default=None,
-        help="Resume from experiment path (use 'auto' for latest)"
+        help="Resume from experiment path (use 'auto' for latest)",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Dry run - print configuration only"
     )
 
     args = parser.parse_args()
+
+    # Validate --test-suite requires --task
+    if args.test_suite and not args.task:
+        parser.error("--test-suite requires --task to be specified")
 
     # Validate Ray availability
     try:
@@ -733,6 +958,31 @@ def main():
     # Load server configuration
     server_config = load_server_config("configs/servers.yaml", args.server)
 
+    # Handle test-suite mode separately
+    if args.test_suite:
+        print("\n🧪 STARTING TEST SUITE")
+        print(f"Server: {args.server}")
+        print(f"Task: {args.task}")
+        print(f"Experiment: {TEST_EXPERIMENT}")
+        print(f"MLflow URI: {MLFLOW_URI}")
+
+        try:
+            run_test_suite(args.task, server_config, args.server)
+        except Exception as e:
+            print(f"❌ TEST SUITE FAILED: {e}")
+            raise
+
+        # Cleanup Ray
+        if ray.is_initialized():
+            ray.shutdown()
+            print("\nRay shutdown complete")
+
+        print("\n🎉 TEST SUITE COMPLETE!")
+        print(f"Check MLflow at: {MLFLOW_URI}")
+        print(f"Experiment: {TEST_EXPERIMENT}")
+        return
+
+    # Normal hyperparameter search mode
     # Determine tasks to run
     if args.task:
         tasks_to_run = [args.task]
@@ -742,7 +992,7 @@ def main():
     print("\n🚀 STARTING HYPERPARAMETER SEARCH")
     print(f"Server: {args.server}")
     print(f"Tasks: {', '.join(tasks_to_run)}")
-    print(f"Experiment: {TEST_EXPERIMENT if args.test_suite else 'production'}")
+    print("Experiment: production")
     print(f"MLflow URI: {MLFLOW_URI}")
 
     # Run each task sequentially
@@ -760,10 +1010,7 @@ def main():
 
     print("\n🎉 HYPERPARAMETER SEARCH COMPLETE!")
     print(f"Check MLflow at: {MLFLOW_URI}")
-    if args.test_suite:
-        print(f"Experiment: {TEST_EXPERIMENT}")
-    else:
-        print(f"Experiments: clean_ice, debris_ice, multi_class")
+    print("Experiments: clean_ice, debris_ice, multi_class")
 
 
 if __name__ == "__main__":

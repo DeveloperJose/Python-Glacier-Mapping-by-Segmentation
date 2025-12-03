@@ -13,6 +13,10 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
+from glacier_mapping.lightning.callbacks import GlacierVisualizationCallback
+from glacier_mapping.lightning.best_model_callback import (
+    BestModelFullEvaluationCallback,
+)
 
 # Import MLflow utilities
 try:
@@ -85,6 +89,18 @@ def main():
         default=None,
         help="Override output directory from server config",
     )
+    parser.add_argument(
+        "--no-output",
+        action="store_true",
+        default=False,
+        help="Disable all output (checkpoints, logs, config). Used for Ray hyperparameter search.",
+    )
+    parser.add_argument(
+        "--skip-full-eval",
+        action="store_true",
+        default=False,
+        help="Skip full-tile test evaluation (overrides config)",
+    )
 
     args = parser.parse_args()
 
@@ -151,15 +167,18 @@ def main():
     print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
     print(f"Output classes: {loader_opts.get('output_classes', 'NOT_SET')}")
 
-    # Save config as JSON for upload script
-    import json
+    # Save config as JSON for upload script (skip if --no-output)
+    if not args.no_output:
+        import json
 
-    config_output_dir = pathlib.Path(output_dir) / run_name
-    config_output_dir.mkdir(parents=True, exist_ok=True)
-    config_json_path = config_output_dir / "conf.json"
-    with open(config_json_path, "w") as f:
-        json.dump(config, f, indent=2)
-    print(f"Config saved to: {config_json_path}")
+        config_output_dir = pathlib.Path(output_dir) / run_name
+        config_output_dir.mkdir(parents=True, exist_ok=True)
+        config_json_path = config_output_dir / "conf.json"
+        with open(config_json_path, "w") as f:
+            json.dump(config, f, indent=2)
+        print(f"Config saved to: {config_json_path}")
+    else:
+        print("Skipping config save (--no-output mode)")
 
     # Create data module
     print("Creating data module...")
@@ -187,36 +206,39 @@ def main():
         class_names=loader_opts.get("class_names", ["BG", "CleanIce", "Debris"]),
     )
 
-    # Setup logging
+    # Setup logging (skip if --no-output for Ray hyperparameter search)
     print("Setting up logging...")
     from pytorch_lightning.loggers import Logger
 
-    loggers: list[Logger] = [
-        TensorBoardLogger(save_dir=f"{output_dir}/{run_name}/logs", name="")
-    ]
-
-    # Add MLflow logger if enabled and available
     mlflow_logger = None
-    if mlflow_enabled and MLFLOW_AVAILABLE and experiment_name:
-        try:
-            from pytorch_lightning.loggers import MLFlowLogger
+    if args.no_output:
+        # No output mode: no loggers, no callbacks
+        loggers: list[Logger] = []
+        print("Skipping loggers (--no-output mode)")
+    else:
+        loggers = [TensorBoardLogger(save_dir=f"{output_dir}/{run_name}/logs", name="")]
 
-            mlflow_logger = MLFlowLogger(
-                experiment_name=experiment_name,
-                run_name=run_name,
-                tracking_uri=args.tracking_uri,
-                tags=mlflow_tags,
-                log_model=False,  # Disable automatic model logging to save MLflow storage
-            )
-            loggers.append(mlflow_logger)
-            print(f"MLflow logger setup complete for experiment: {experiment_name}")
-        except Exception as e:
-            print(f"Warning: Failed to setup MLflow logger: {e}")
-            mlflow_logger = None
+        # Add MLflow logger if enabled and available
+        if mlflow_enabled and MLFLOW_AVAILABLE and experiment_name:
+            try:
+                from pytorch_lightning.loggers import MLFlowLogger
 
-    # Setup error handler
+                mlflow_logger = MLFlowLogger(
+                    experiment_name=experiment_name,
+                    run_name=run_name,
+                    tracking_uri=args.tracking_uri,
+                    tags=mlflow_tags,
+                    log_model=False,  # Disable automatic model logging to save MLflow storage
+                )
+                loggers.append(mlflow_logger)
+                print(f"MLflow logger setup complete for experiment: {experiment_name}")
+            except Exception as e:
+                print(f"Warning: Failed to setup MLflow logger: {e}")
+                mlflow_logger = None
+
+    # Setup error handler (skip if --no-output)
     error_handler = None
-    if ERROR_HANDLER_AVAILABLE:
+    if not args.no_output and ERROR_HANDLER_AVAILABLE:
         error_handler = setup_error_handler(
             output_dir=output_dir,
             run_name=run_name,
@@ -224,25 +246,48 @@ def main():
         )
 
     # Setup callbacks
-    callbacks = [
-        ModelCheckpoint(
-            dirpath=f"{output_dir}/{run_name}/checkpoints",
-            monitor="val_loss",
-            mode="min",
-            save_top_k=-1,  # Keep all improving checkpoints
-            save_last=True,
-            filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}",
-        ),
-        LearningRateMonitor(logging_interval="step"),
-        # DeviceStatsMonitor(cpu_stats=True),  # Automatic system monitoring
-        # BestModelFullEvaluationCallback(
-        #     num_samples=training_opts.get("num_viz_samples", 4)
-        # ),
-    ]
+    callbacks = []
+
+    if not args.no_output:
+        callbacks.extend(
+            [
+                ModelCheckpoint(
+                    dirpath=f"{output_dir}/{run_name}/checkpoints",
+                    monitor="val_loss",
+                    mode="min",
+                    save_top_k=1,  # Keep only the best checkpoint
+                    save_last=True,
+                    filename=f"{run_name}_{{epoch:03d}}_{{val_loss:.4f}}",
+                ),
+                LearningRateMonitor(logging_interval="step"),
+            ]
+        )
+
+        # Slice visualization callback (only if output enabled and num >= 1)
+        num_slice_viz = training_opts.get("num_slice_viz", 4)
+        if num_slice_viz >= 1:
+            callbacks.append(
+                GlacierVisualizationCallback(
+                    num_samples=num_slice_viz,
+                    log_every_n_epochs=training_opts.get(
+                        "slice_viz_every_n_epochs", 10
+                    ),
+                    save_dir=f"{output_dir}/{run_name}/slice_visualizations",
+                )
+            )
+
+    # Full-tile evaluation (runs even with --no-output for metrics, but no PNGs)
+    run_full_eval = training_opts.get("run_full_eval", True) and not args.skip_full_eval
+    if run_full_eval:
+        num_full_viz = training_opts.get("num_full_viz", 4) if not args.no_output else 0
+        callbacks.append(BestModelFullEvaluationCallback(num_samples=num_full_viz))
+
+    if not callbacks:
+        print("No callbacks enabled")
 
     # Create trainer
     print("Creating trainer...")
-    
+
     # Handle GPU device selection
     if args.gpu is not None:
         # Explicit GPU specified
@@ -252,7 +297,7 @@ def main():
         # Auto-detect (for Ray or single-GPU systems)
         devices = 1  # Use 1 GPU (Ray sets CUDA_VISIBLE_DEVICES)
         print("Using auto-detected GPU (Ray controlled)")
-    
+
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=devices,
@@ -268,8 +313,11 @@ def main():
 
     print(f"Starting training for {args.max_epochs} epochs...")
     print(f"GPU available: {torch.cuda.is_available()}")
-    print(f"TensorBoard logs: {output_dir}/{run_name}/logs")
-    print(f"Checkpoints: {output_dir}/{run_name}/checkpoints")
+    if args.no_output:
+        print("No-output mode: skipping all disk writes (Ray hyperparameter search)")
+    else:
+        print(f"TensorBoard logs: {output_dir}/{run_name}/logs")
+        print(f"Checkpoints: {output_dir}/{run_name}/checkpoints")
 
     try:
         trainer.fit(
