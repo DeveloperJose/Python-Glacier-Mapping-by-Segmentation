@@ -13,9 +13,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
-from glacier_mapping.lightning.best_model_callback import (
-    BestModelFullEvaluationCallback,
-)
 
 # Import MLflow utilities
 try:
@@ -236,9 +233,9 @@ def main():
         ),
         LearningRateMonitor(logging_interval="step"),
         # DeviceStatsMonitor(cpu_stats=True),  # Automatic system monitoring
-        BestModelFullEvaluationCallback(
-            num_samples=training_opts.get("num_viz_samples", 4)
-        ),
+        # BestModelFullEvaluationCallback(
+        #     num_samples=training_opts.get("num_viz_samples", 4)
+        # ),
     ]
 
     # Create trainer
@@ -252,7 +249,8 @@ def main():
         precision="16-mixed",
         log_every_n_steps=10,
         val_check_interval=1.0,
-        enable_progress_bar=True,
+        # enable_progress_bar=True,
+        enable_progress_bar=False,
         num_sanity_val_steps=2,  # Quick sanity check
     )
 
@@ -267,6 +265,11 @@ def main():
         )
 
         print("Training completed successfully!")
+
+        # Extract final validation loss for Ray Tune integration
+        final_val_loss = float(trainer.callback_metrics.get("val_loss", 999.0))
+        print(f"Final validation loss: {final_val_loss:.4f}")
+        return final_val_loss
 
     except KeyboardInterrupt as e:
         print("Training interrupted by user")

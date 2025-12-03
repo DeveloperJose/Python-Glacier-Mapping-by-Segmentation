@@ -1,11 +1,10 @@
 """MLflow utilities for glacier mapping experiment tracking."""
 
-import os
 import warnings
 import yaml
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Optional
 
 import mlflow
 

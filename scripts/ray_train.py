@@ -6,34 +6,16 @@ import os
 import sys
 import tempfile
 import yaml
-import json
 from pathlib import Path
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Optional
 
 import pandas as pd
 import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
-from ray.tune import ExperimentAnalysis
+from ray.tune import ExperimentAnalysis, FailureConfig
 
 # Import project modules
-from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
-from glacier_mapping.utils.prediction import (
-    get_probabilities,
-    predict_with_probs,
-    calculate_binary_metrics,
-    create_invalid_mask,
-)
-from glacier_mapping.model.visualize import (
-    make_eight_panel,
-    make_rgb_preview,
-    label_to_color,
-    make_confidence_map,
-    make_entropy_map,
-    make_tp_fp_fn_masks,
-    build_cmap,
-)
-from glacier_mapping.model.metrics import precision, recall, IoU
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -65,37 +47,40 @@ TASK_CONFIGS = {
 # Server-specific configurations
 SERVER_CONFIGS = {
     "desktop": {
+        # Desktop: Quick validation tests
         "skip_tier1": True,
-        "datasets": ["bibek_w512_o64_f1_v2"],
-        "num_samples": 10,
-        "max_epochs": 3,
-        "gpu_per_trial": 1.0,
+        "datasets": ["bibek_w512_o64_f1_v2"],  # Using available dataset only
+        "num_samples": 4,  # 2 batch_sizes × 2 samples
+        "max_epochs": 5,
+        "gpu_per_trial": 1.0,  # 1 trial at a time
         "batch_sizes": [4, 8],
     },
+    # ORIGINAL_DESKTOP_CONFIG: {
+    #     "skip_tier1": True,
+    #     "datasets": ["bibek_w512_o64_f1_v2"],
+    #     "num_samples": 10,
+    #     "max_epochs": 3,
+    #     "gpu_per_trial": 1.0,
+    #     "batch_sizes": [4, 8],
+    # },
     "frodo": {
+        # Frodo: Dataset exploration (window/overlap/filter variations)
         "skip_tier1": False,
         "tier1_datasets": [
-            "bibek_w256_o32_f00001_v2",
-            "bibek_w256_o32_f0001_v2",
-            "bibek_w256_o32_f001_v2",
-            "bibek_w256_o32_f01_v2",
-            "bibek_w256_o32_f02_v2",
             "bibek_w256_o32_f1_v2",
-            "bibek_w256_o32_f15_v2",
-            "bibek_w256_o32_f20_v2",
-            "bibek_w512_o64_f00001_v2",
-            "bibek_w512_o64_f0001_v2",
-            "bibek_w512_o64_f001_v2",
-            "bibek_w512_o64_f01_v2",
+            "bibek_w256_o32_f02_v2",
+            "bibek_w512_o64_f1_v2",
             "bibek_w512_o64_f02_v2",
+            "bibek_w512_o64_f001_v2",
         ],
-        "num_samples": 100,
-        "max_epochs_tier1": 150,
-        "max_epochs_tier2": 500,
-        "gpu_per_trial": 0.33,
-        "batch_sizes": [4, 8],
+        "num_samples": 20,
+        "max_epochs_tier1": 100,
+        "max_epochs_tier2": 100,
+        "gpu_per_trial": 1.0,  # 1 trial per GPU = 3 concurrent
+        "batch_sizes": [4, 8, 16],
     },
     "bilbo": {
+        # Bilbo: Physics exploration + push batch size boundaries
         "skip_tier1": False,
         "tier1_datasets": [
             "bibek_w512_o64_f1_v2",
@@ -103,14 +88,13 @@ SERVER_CONFIGS = {
             "bibek_w512_o64_f1_v2_phys64_s1",
             "bibek_w512_o64_f1_v2_phys128_s1",
             "bibek_w512_o64_f1_v2_phys64_s05",
-            "bibek_w512_o64_f1_v2_phys64_s075",
             "bibek_w512_o64_f1_v2_physfull_s05",
         ],
-        "num_samples": 100,
-        "max_epochs_tier1": 150,
-        "max_epochs_tier2": 500,
-        "gpu_per_trial": 0.5,
-        "batch_sizes": [8, 16],
+        "num_samples": 20,
+        "max_epochs_tier1": 100,
+        "max_epochs_tier2": 100,
+        "gpu_per_trial": 1.0,  # 1 trial per GPU = 3 concurrent
+        "batch_sizes": [8, 16, 32, 64],  # Push boundaries on 4090s
     },
 }
 
@@ -170,8 +154,8 @@ def build_base_config(
             "fine_tune": False,
             "find_lr": False,
             "early_stopping": 100,
-            "full_eval_every": 10,
-            "num_viz_samples": 4,
+            "full_eval_every": 10000000000000000000000000000000000,
+            "num_viz_samples": 0,
         },
         "loader_opts": {
             "batch_size": hyperparams.get("batch_size", 8),
@@ -301,8 +285,10 @@ def ray_trainable(config: Dict[str, Any]):
     experiment_name = config["experiment_name"]
     hyperparams = config["hyperparams"]
 
-    # Load server configuration
-    server_config = load_server_config("configs/servers.yaml", server)
+    # Load server configuration (use absolute path for Ray workers)
+    project_root = Path(__file__).parent.parent
+    servers_yaml_path = project_root / "configs" / "servers.yaml"
+    server_config = load_server_config(str(servers_yaml_path), server)
 
     # Build complete training configuration
     full_config = build_base_config(
@@ -347,15 +333,17 @@ def ray_trainable(config: Dict[str, Any]):
         # Import and run training
         from scripts.train import main as train_main
 
-        train_main()
+        final_val_loss = train_main()  # Capture return value
 
-        # Extract final validation loss (simplified - in real implementation would parse logs)
-        # For now, report a dummy value that Ray can optimize
-        tune.report({"val_loss": 0.5})  # Will be overridden by actual implementation
+        # Report real validation loss to Ray
+        if final_val_loss is not None:
+            tune.report({"val_loss": final_val_loss})
+        else:
+            tune.report({"val_loss": 999.0})  # Fallback if None returned
 
     except Exception as e:
         print(f"[RAY] Training failed: {e}")
-        tune.report({"val_loss": 1.0})  # High loss for failed trials
+        tune.report({"val_loss": 999.0})  # High loss for failed trials
     finally:
         # Cleanup
         sys.argv = original_argv
@@ -444,7 +432,7 @@ def run_post_evaluation(
         df = pd.DataFrame(csv_data)
         df.to_csv(comparison_path, index=False)
 
-        print(f"\n✓ Post-search evaluation complete!")
+        print("\n✓ Post-search evaluation complete!")
         print(f"  Results saved to: {comparison_path}")
 
         # Print recommendation
@@ -494,7 +482,12 @@ def run_tier1_search(
     # Configure Ray
     gpu_resources = {"gpu": server_cfg["gpu_per_trial"]}
 
-    scheduler = ASHAScheduler(grace_period=30, max_t=max_epochs, reduction_factor=3)
+    grace_period = min(25, max_epochs // 4)  # Let trials run 25% before judging
+    scheduler = ASHAScheduler(
+        grace_period=grace_period,
+        max_t=max_epochs,
+        reduction_factor=3,  # Less aggressive early stopping
+    )
 
     # Run search
     tuner = tune.Tuner(
@@ -502,7 +495,9 @@ def run_tier1_search(
         param_space=tune.grid_search(search_space),
         tune_config=tune.TuneConfig(metric="val_loss", mode="min", scheduler=scheduler),
         run_config=tune.RunConfig(
-            name=f"glacier_search_{task}_{server_name}_tier1", verbose=1
+            name=f"glacier_search_{task}_{server_name}_tier1",
+            verbose=1,
+            failure_config=FailureConfig(max_failures=100, fail_fast=False),
         ),
     )
 
@@ -533,32 +528,61 @@ def run_tier2_search(
 
     print(f"Using datasets for Tier 2: {datasets}")
 
-    # Build search space
-    search_space = {
-        "task": task,
-        "dataset": tune.choice(datasets),
-        "server": server_name,
-        "max_epochs": max_epochs,
-        "experiment_name": experiment_name,
-        "hyperparams": {
-            "net_depth": tune.choice([3, 4, 5]),
-            "first_channel_output": tune.choice([32, 64, 128]),
-            "lr": tune.loguniform(1e-4, 1e-2),
-            "max_lr": tune.choice([0.001, 0.003, 0.005]),
-            "dropout": tune.uniform(0.0, 0.3),
-            "weight_decay": tune.loguniform(1e-6, 1e-3),
-            "label_smoothing": tune.choice([0.0, 0.1, 0.2]),
-            "batch_size": tune.choice(server_cfg["batch_sizes"]),
-            "pct_start": tune.choice([0.2, 0.3, 0.4]),
-        },
-    }
+    # Build search space - simplified for initial exploration
+    if server_name == "desktop":
+        # Desktop: Fixed model, vary batch size only
+        search_space = {
+            "task": task,
+            "dataset": tune.choice(datasets),
+            "server": server_name,
+            "max_epochs": max_epochs,
+            "experiment_name": experiment_name,
+            "hyperparams": {
+                "net_depth": 4,
+                "first_channel_output": 64,
+                "lr": 0.0003,
+                "max_lr": 0.001,
+                "dropout": 0.1,
+                "weight_decay": 5e-5,
+                "label_smoothing": 0.0,
+                "batch_size": tune.choice(server_cfg["batch_sizes"]),
+                "pct_start": 0.3,
+            },
+        }
+    else:
+        # Production: Focused hyperparameter exploration
+        search_space = {
+            "task": task,
+            "dataset": tune.choice(datasets),
+            "server": server_name,
+            "max_epochs": max_epochs,
+            "experiment_name": experiment_name,
+            "hyperparams": {
+                # Architecture
+                "net_depth": tune.choice([4, 5]),
+                "first_channel_output": tune.choice([64, 128]),
+                # Learning rates
+                "lr": tune.choice([0.0001, 0.0003]),
+                "max_lr": tune.choice([0.001, 0.003]),
+                # Regularization
+                "dropout": tune.choice([0.1, 0.2]),
+                "weight_decay": tune.choice([1e-5, 5e-5]),
+                # Fixed for now
+                "label_smoothing": 0.0,
+                "pct_start": 0.3,
+                # Primary dimension: batch size
+                "batch_size": tune.choice(server_cfg["batch_sizes"]),
+            },
+        }
 
     # Configure Ray
     gpu_resources = {"gpu": server_cfg["gpu_per_trial"]}
 
-    grace_period = min(50, max_epochs // 2) if max_epochs > 1 else 1
+    grace_period = min(25, max_epochs // 4) if max_epochs > 1 else 1
     scheduler = ASHAScheduler(
-        grace_period=grace_period, max_t=max_epochs, reduction_factor=3
+        grace_period=grace_period,
+        max_t=max_epochs,
+        reduction_factor=3,  # Less aggressive early stopping
     )
 
     # Run search
@@ -569,7 +593,9 @@ def run_tier2_search(
             metric="val_loss", mode="min", scheduler=scheduler, num_samples=num_samples
         ),
         run_config=tune.RunConfig(
-            name=f"glacier_search_{task}_{server_name}_tier2", verbose=1
+            name=f"glacier_search_{task}_{server_name}_tier2",
+            verbose=1,
+            failure_config=FailureConfig(max_failures=100, fail_fast=False),
         ),
     )
 
@@ -644,7 +670,12 @@ def main():
     # Validate Ray availability
     try:
         if not ray.is_initialized():
-            ray.init()
+            ray.init(
+                runtime_env={
+                    "working_dir": None,  # Disable packaging entirely
+                    "env_vars": {"PYTHONPATH": ".", "RAY_DISABLE_IMPORT_WARNING": "1"},
+                }
+            )
     except Exception as e:
         print(f"Failed to initialize Ray: {e}")
         print("Install Ray with: uv pip install ray[tune]")
@@ -665,7 +696,7 @@ def main():
         # In full implementation, would parse resume path and continue from there
         # For now, just note that resume was requested
 
-    print(f"\n🚀 STARTING HYPERPARAMETER SEARCH")
+    print("\n🚀 STARTING HYPERPARAMETER SEARCH")
     print(f"Server: {args.server}")
     print(f"Tasks: {', '.join(tasks_to_run)}")
     print(f"Experiment: {TEST_EXPERIMENT if args.test_suite else 'production'}")
@@ -679,7 +710,7 @@ def main():
             print(f"❌ FAILED TASK: {task.upper()} - {e}")
             continue
 
-    print(f"\n🎉 HYPERPARAMETER SEARCH COMPLETE!")
+    print("\n🎉 HYPERPARAMETER SEARCH COMPLETE!")
     print(f"Check MLflow at: {MLFLOW_URI}")
     if args.test_suite:
         print(f"Experiment: {TEST_EXPERIMENT}")
