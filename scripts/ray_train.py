@@ -60,7 +60,7 @@ def get_gpu_resources(server_name: str, gpu_per_trial: float | None = None):
         return {"gpu": gpu_per_trial}
 
     defaults = {
-        "desktop": 0.5,
+        "desktop": 1,
         "bilbo":   0.5,
         "frodo":   0.33,
     }

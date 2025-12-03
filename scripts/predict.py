@@ -42,8 +42,12 @@ from glacier_mapping.model.visualize import (
 )
 from glacier_mapping.data.data import BAND_NAMES
 from glacier_mapping.utils.prediction import (
-    get_probabilities, merge_ci_debris, create_invalid_mask
+    get_probabilities,
+    merge_ci_debris,
+    create_invalid_mask,
+    calculate_binary_metrics,
 )
+
 
 def load_lightning_module(checkpoint_path, device):
     """Load Lightning module from checkpoint."""
@@ -51,6 +55,7 @@ def load_lightning_module(checkpoint_path, device):
     module.eval()
     module.to(device)
     return module
+
 
 # Use non-interactive backend for plotting
 matplotlib.use("Agg")
@@ -156,7 +161,12 @@ def compute_feature_importance(
         channel_gradients += channel_grad
 
         # Save spatial map if requested
-        if save_spatial and idx < max_spatial and output_dir is not None and grads is not None:
+        if (
+            save_spatial
+            and idx < max_spatial
+            and output_dir is not None
+            and grads is not None
+        ):
             spatial_maps.append((tile_path.name, grads[0].cpu().numpy()))  # (C, H, W)
 
         # Clear gradients to free memory
@@ -251,7 +261,9 @@ def plot_channel_importance(channel_names, channel_indices, scores, save_path):
     fig, ax = plt.subplots(figsize=(10, max(6, len(channel_names) * 0.35)))
 
     y_pos = np.arange(len(channel_names))
-    colors = plt.colormaps['viridis'](scores / scores.max() if scores.max() > 0 else scores)
+    colors = plt.colormaps["viridis"](
+        scores / scores.max() if scores.max() > 0 else scores
+    )
 
     ax.barh(y_pos, scores, color=colors, edgecolor="black", linewidth=0.5)
     ax.set_yticks(y_pos)
@@ -341,6 +353,57 @@ def get_checkpoint_paths(runs_dir, run_name, model_type):
     Returns:
         List of tuples: [(checkpoint_path, checkpoint_name), ...]
     """
+    # Try Lightning structure first (output/run_name/checkpoints/*.ckpt)
+    lightning_dir = runs_dir / run_name / "checkpoints"
+
+    if lightning_dir.exists():
+        if model_type == "all":
+            # All .ckpt files
+            ckpts = sorted(lightning_dir.glob("*.ckpt"))
+            ckpt_pairs = []
+            for ckpt in ckpts:
+                # Extract epoch number from filename like "run_name_epoch=366_val_loss=0.0048.ckpt"
+                if "epoch=" in ckpt.name:
+                    epoch_part = ckpt.name.split("epoch=")[1].split("_")[0]
+                    ckpt_name = f"epoch_{epoch_part}"
+                elif "last.ckpt" in ckpt.name:
+                    ckpt_name = "last"
+                else:
+                    ckpt_name = ckpt.stem
+                ckpt_pairs.append((ckpt, ckpt_name))
+            return ckpt_pairs
+        else:
+            # Single checkpoint - look for best or last
+            if model_type == "best":
+                # Look for checkpoint with epoch in name
+                ckpts = list(lightning_dir.glob("*epoch=*.ckpt"))
+                if ckpts:
+                    # Get the one with highest epoch number
+                    best_ckpt = max(
+                        ckpts,
+                        key=lambda x: int(x.name.split("epoch=")[1].split("_")[0]),
+                    )
+                    epoch_num = best_ckpt.name.split("epoch=")[1].split("_")[0]
+                    return [(best_ckpt, f"epoch_{epoch_num}")]
+                # Fallback to last.ckpt
+                last_ckpt = lightning_dir / "last.ckpt"
+                if last_ckpt.exists():
+                    return [(last_ckpt, "last")]
+            else:
+                # Specific checkpoint name
+                ckpt = lightning_dir / f"{model_type}.ckpt"
+                if ckpt.exists():
+                    return [(ckpt, model_type)]
+                # Try pattern matching
+                matching_ckpts = list(lightning_dir.glob(f"*{model_type}*.ckpt"))
+                if matching_ckpts:
+                    return [(matching_ckpts[0], model_type)]
+
+            raise FileNotFoundError(
+                f"Checkpoint not found: {lightning_dir / model_type}"
+            )
+
+    # Fallback to original structure (runs/run_name/models/model_*.pt)
     models_dir = runs_dir / run_name / "models"
 
     if model_type == "all":
@@ -498,12 +561,10 @@ def run_prediction(
 
             pred_bin = (probs[:, :, 1] >= thr).astype(np.uint8)
 
-            # GT comparison
-            tv = y_full[valid]
-            pv = pred_bin[valid]
-            t_bin = (tv == model_class).astype(np.uint8)
-
-            P, R, iou, tp, fp, fn = get_pr_iou(pv, t_bin)
+            # GT comparison using unified metrics
+            P, R, iou, tp, fp, fn = calculate_binary_metrics(
+                pred_bin, y_full, model_class, invalid
+            )
 
             # accumulate
             if has_ci:
@@ -660,8 +721,28 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
         run_names.append(config.debris.run_name)
     prediction_name = "_".join(run_names)
 
-    # Construct paths using output_path instead of code_path
-    config.runs_dir = f"{server.output_path}/runs"
+    # Construct paths using output_path - check for Lightning structure
+    # Lightning structure: output_path/run_name/checkpoints/
+    # Legacy structure: output_path/runs/run_name/models/
+    legacy_runs_dir = Path(f"{server.output_path}/runs")
+    lightning_runs_dir = Path(f"{server.output_path}")
+
+    # Determine which structure exists
+    if "cleanice" in config:
+        test_run_dir = lightning_runs_dir / config.cleanice.run_name
+        if test_run_dir.exists() and (test_run_dir / "checkpoints").exists():
+            config.runs_dir = str(lightning_runs_dir)
+        else:
+            config.runs_dir = str(legacy_runs_dir)
+    elif "debris" in config:
+        test_run_dir = lightning_runs_dir / config.debris.run_name
+        if test_run_dir.exists() and (test_run_dir / "checkpoints").exists():
+            config.runs_dir = str(lightning_runs_dir)
+        else:
+            config.runs_dir = str(legacy_runs_dir)
+    else:
+        config.runs_dir = str(legacy_runs_dir)
+
     config.output_dir = f"{server.output_path}/predictions/{prediction_name}"
 
     return config, server
@@ -669,7 +750,12 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="conf/unet_predict.yaml", help="Path to prediction config file")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="conf/unet_predict.yaml",
+        help="Path to prediction config file",
+    )
     parser.add_argument(
         "--server", required=True, choices=["desktop", "bilbo", "frodo"]
     )
@@ -801,7 +887,9 @@ if __name__ == "__main__":
             elif has_deb and not has_ci:
                 ckpt_name = deb_ckpt_name or "unknown"
             else:
-                ckpt_name = f"ci_{ci_ckpt_name or 'unknown'}__db_{deb_ckpt_name or 'unknown'}"
+                ckpt_name = (
+                    f"ci_{ci_ckpt_name or 'unknown'}__db_{deb_ckpt_name or 'unknown'}"
+                )
 
             # Check if this checkpoint was already processed
             if ckpt_name in existing_results:
