@@ -26,6 +26,15 @@ except ImportError as e:
     print(f"Warning: MLflow utilities not available: {e}")
     MLFLOW_AVAILABLE = False
 
+# Import error handling
+try:
+    from glacier_mapping.utils.error_handler import setup_error_handler
+
+    ERROR_HANDLER_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Error handler not available: {e}")
+    ERROR_HANDLER_AVAILABLE = False
+
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load YAML configuration file."""
@@ -206,6 +215,15 @@ def main():
             print(f"Warning: Failed to setup MLflow logger: {e}")
             mlflow_logger = None
 
+    # Setup error handler
+    error_handler = None
+    if ERROR_HANDLER_AVAILABLE:
+        error_handler = setup_error_handler(
+            output_dir=output_dir,
+            run_name=run_name,
+            mlflow_logger=mlflow_logger,
+        )
+
     # Setup callbacks
     callbacks = [
         ModelCheckpoint(
@@ -250,11 +268,28 @@ def main():
 
         print("Training completed successfully!")
 
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         print("Training interrupted by user")
+        if error_handler:
+            error_handler.log_error(
+                Exception(f"Training interrupted by user: {e}"),
+                {"message": "Training interrupted by user"},
+            )
     except Exception as e:
         print(f"Training failed with error: {e}")
-        # Lightning's DeviceStatsMonitor and dual loggers handle error logging automatically
+        if error_handler:
+            error_handler.log_error(
+                e,
+                {
+                    "epoch": trainer.current_epoch
+                    if hasattr(trainer, "current_epoch")
+                    else "unknown",
+                    "global_step": trainer.global_step
+                    if hasattr(trainer, "global_step")
+                    else "unknown",
+                    "config_file": str(config_path),
+                },
+            )
         raise
 
 

@@ -1,21 +1,19 @@
-analyze_training_run.py
-
 dissertation/
 original_code/
-netcdf4-glacier-code
-lightning_outputs**/
+netcdf4-glacier-code/
+AGENTS**
+CLAUDE**
 
-**output/
-**pred_runs/
-runs/**
+**output**
+**outputs**
+**run**
+**runs**
 **tmp**
 **temp**
 **debug**
-**newruns**
 .ruff_cache/
 .python-version
 .vscode
-*.md
 
 *.png
 *.tif

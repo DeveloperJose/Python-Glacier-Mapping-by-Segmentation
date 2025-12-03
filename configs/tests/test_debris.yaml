@@ -1,10 +1,10 @@
 training_opts:
   dataset_name: bibek_w512_o64_f1_v2
-  run_name: initial_validation_baseline_debris_v2
+  run_name: test_debris
   epochs: 2
   fine_tune: false
   find_lr: false
-  early_stopping: 250
+  early_stopping: 200
   full_eval_every: 1
   num_viz_samples: 4
 loader_opts:

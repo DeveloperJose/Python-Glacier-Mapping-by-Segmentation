@@ -162,7 +162,7 @@ class BestModelFullEvaluationCallback(Callback):
                 for ci in range(n_classes):
                     label = ci + 1
                     p = (y_pred_valid == label).astype(np.uint8)
-                    t = (y_true_valid_raw + 1 == label).astype(np.uint8)
+                    t = (y_true_valid_raw == label).astype(np.uint8)
 
                     tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
                     tp_sum[ci] += tp_
@@ -177,15 +177,16 @@ class BestModelFullEvaluationCallback(Callback):
 
             rows.append(row)
 
-        # Save CSV with proper column handling
+        # Create CSV metrics subdirectory and save with new naming
+        csv_dir = output_dir / "csv_metrics"
+        csv_dir.mkdir(parents=True, exist_ok=True)
+
         cols = ["tile"]
         for cname in class_names:
             cols += [f"{cname}_precision", f"{cname}_recall", f"{cname}_IoU"]
 
         df = pd.DataFrame(rows, columns=cols)  # type: ignore[arg-type]
-        df.to_csv(
-            output_dir / f"full_eval_epoch{trainer.current_epoch + 1}.csv", index=False
-        )
+        df.to_csv(csv_dir / f"epoch{trainer.current_epoch + 1:04d}.csv", index=False)
 
         # Log metrics to both loggers
         for ci, cname in enumerate(class_names):
@@ -273,14 +274,24 @@ class BestModelFullEvaluationCallback(Callback):
 
         for logger in trainer.loggers:
             try:
-                # MLflow logging - New structure: log each tile directory
+                # MLflow logging - Fixed structure: log each tile directory without double nesting
                 if isinstance(logger, MLFlowLogger):
+                    # Log CSV metrics directory
+                    csv_dir = output_dir / "csv_metrics"
+                    if csv_dir.exists():
+                        logger.experiment.log_artifacts(
+                            logger.run_id,
+                            str(csv_dir),
+                            artifact_path="csv_metrics",
+                        )
+
+                    # Log tile directories without double nesting
                     for tile_dir in output_dir.glob("fulltile_*"):
                         if tile_dir.is_dir():
                             logger.experiment.log_artifact(
                                 logger.run_id,
                                 str(tile_dir),
-                                artifact_path=tile_dir.name,
+                                artifact_path=None,  # Fix: remove double nesting
                             )
 
                 # TensorBoard logging
