@@ -47,7 +47,9 @@ def main():
     parser.add_argument(
         "--max-epochs", type=int, default=3, help="Maximum epochs to train"
     )
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device to use")
+    parser.add_argument(
+        "--gpu", type=int, default=None, help="GPU device to use (default: auto-detect)"
+    )
     parser.add_argument(
         "--resume", type=str, default=None, help="Path to checkpoint to resume from"
     )
@@ -240,17 +242,27 @@ def main():
 
     # Create trainer
     print("Creating trainer...")
+    
+    # Handle GPU device selection
+    if args.gpu is not None:
+        # Explicit GPU specified
+        devices = [args.gpu]
+        print(f"Using explicit GPU: {args.gpu}")
+    else:
+        # Auto-detect (for Ray or single-GPU systems)
+        devices = 1  # Use 1 GPU (Ray sets CUDA_VISIBLE_DEVICES)
+        print("Using auto-detected GPU (Ray controlled)")
+    
     trainer = pl.Trainer(
         accelerator="gpu",
-        devices=[args.gpu],
+        devices=devices,
         max_epochs=args.max_epochs,
         logger=loggers,  # Support multiple loggers
         callbacks=callbacks,
         precision="16-mixed",
         log_every_n_steps=10,
         val_check_interval=1.0,
-        # enable_progress_bar=True,
-        enable_progress_bar=False,
+        enable_progress_bar=True,
         num_sanity_val_steps=2,  # Quick sanity check
     )
 

@@ -28,17 +28,17 @@ TEST_EXPERIMENT = "test_suite"
 # Task configurations
 TASK_CONFIGS = {
     "ci": {
-        "output_classes": [0, 1],  # BG, CleanIce
-        "class_names": ["BG", "CleanIce"],
+        "output_classes": [1],  # Binary: CleanIce only (class 1)
+        "class_names": ["BG", "CleanIce", "Debris"],
         "experiment_suffix": "clean_ice",
     },
     "debris": {
-        "output_classes": [0, 2],  # BG, Debris (use 2 for consistency)
-        "class_names": ["BG", "Debris"],
+        "output_classes": [2],  # Binary: Debris only (class 2)
+        "class_names": ["BG", "CleanIce", "Debris"],
         "experiment_suffix": "debris_ice",
     },
     "multiclass": {
-        "output_classes": [0, 1, 2],  # BG, CleanIce, Debris
+        "output_classes": [0, 1, 2],  # All three classes
         "class_names": ["BG", "CleanIce", "Debris"],
         "experiment_suffix": "multi_class",
     },
@@ -47,31 +47,30 @@ TASK_CONFIGS = {
 # Server-specific configurations
 SERVER_CONFIGS = {
     "desktop": {
-        # Desktop: Quick validation tests
+        # Desktop: Quick validation tests (1 epoch for testing)
         "skip_tier1": True,
         "datasets": ["bibek_w512_o64_f1_v2"],  # Using available dataset only
         "num_samples": 4,  # 2 batch_sizes × 2 samples
-        "max_epochs": 5,
+        "max_epochs": 1,  # Quick validation: 1 epoch only
         "gpu_per_trial": 1.0,  # 1 trial at a time
         "batch_sizes": [4, 8],
     },
-    # ORIGINAL_DESKTOP_CONFIG: {
-    #     "skip_tier1": True,
-    #     "datasets": ["bibek_w512_o64_f1_v2"],
-    #     "num_samples": 10,
-    #     "max_epochs": 3,
-    #     "gpu_per_trial": 1.0,
-    #     "batch_sizes": [4, 8],
-    # },
     "frodo": {
-        # Frodo: Dataset exploration (window/overlap/filter variations)
+        # Frodo: All available datasets (window/overlap/filter variations)
         "skip_tier1": False,
         "tier1_datasets": [
-            "bibek_w256_o32_f1_v2",
-            "bibek_w256_o32_f02_v2",
-            "bibek_w512_o64_f1_v2",
-            "bibek_w512_o64_f02_v2",
+            "bibek_w256_o64_f1_v2",
+            "bibek_w512_o32_f1_v2",
+            "bibek_w512_o64_f00001_v2",
+            "bibek_w512_o64_f0001_v2",
             "bibek_w512_o64_f001_v2",
+            "bibek_w512_o64_f01_v2",
+            "bibek_w512_o64_f02_v2",
+            "bibek_w512_o64_f15_v2",
+            "bibek_w512_o64_f1_v2",
+            "bibek_w512_o64_f20_v2",
+            "bibek_w512_o128_f1_v2",
+            "bibek_w1024_o64_f1_v2",
         ],
         "num_samples": 20,
         "max_epochs_tier1": 100,
@@ -80,14 +79,15 @@ SERVER_CONFIGS = {
         "batch_sizes": [4, 8, 16],
     },
     "bilbo": {
-        # Bilbo: Physics exploration + push batch size boundaries
+        # Bilbo: All available physics datasets (complete physics exploration)
         "skip_tier1": False,
         "tier1_datasets": [
             "bibek_w512_o64_f1_v2",
             "bibek_w512_o64_f1_v2_phys32_s1",
+            "bibek_w512_o64_f1_v2_phys64_s05",
+            "bibek_w512_o64_f1_v2_phys64_s075",
             "bibek_w512_o64_f1_v2_phys64_s1",
             "bibek_w512_o64_f1_v2_phys128_s1",
-            "bibek_w512_o64_f1_v2_phys64_s05",
             "bibek_w512_o64_f1_v2_physfull_s05",
         ],
         "num_samples": 20,
@@ -218,22 +218,29 @@ def validate_dataset_paths(server_config: Dict[str, Any], datasets: List[str]) -
 
 
 def detect_resume(server: str, task: Optional[str] = None) -> Optional[str]:
-    """Auto-detect resume path from existing Ray results."""
+    """Auto-detect resume path from existing Ray results.
+    
+    Prefers tier2 over tier1 for specific tasks.
+    """
     ray_results_dir = Path.home() / "ray_results"
 
     if task:
-        # Specific task resume
-        pattern = f"glacier_search_{task}_{server}_tier*"
+        # Specific task resume - look for most recent tier (prefer tier2)
+        tier2_path = ray_results_dir / f"glacier_search_{task}_{server}_tier2"
+        tier1_path = ray_results_dir / f"glacier_search_{task}_{server}_tier1"
+        
+        # Prefer tier2, fallback to tier1
+        if tier2_path.exists():
+            return str(tier2_path)
+        elif tier1_path.exists():
+            return str(tier1_path)
     else:
-        # Full search resume (all tasks)
+        # Full search resume - find most recent experiment across all tasks
         pattern = f"glacier_search_*_{server}_tier*"
-
-    existing_experiments = list(ray_results_dir.glob(pattern))
-
-    if existing_experiments:
-        # Return most recent
-        latest = max(existing_experiments, key=lambda x: x.stat().st_mtime)
-        return str(latest)
+        existing_experiments = list(ray_results_dir.glob(pattern))
+        if existing_experiments:
+            latest = max(existing_experiments, key=lambda x: x.stat().st_mtime)
+            return str(latest)
 
     return None
 
@@ -326,8 +333,7 @@ def ray_trainable(config: Dict[str, Any]):
             MLFLOW_URI,
             "--output-dir",
             server_config["output_path"],
-            "--gpu",
-            "0",
+            # GPU auto-detected via Ray's CUDA_VISIBLE_DEVICES
         ]
 
         # Import and run training
@@ -357,7 +363,7 @@ def ray_trainable(config: Dict[str, Any]):
 
 
 def run_post_evaluation(
-    task: str, server_config: Dict[str, Any], experiment_name: str, top_k: int = 10
+    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str, top_k: int = 10
 ):
     """Run post-search evaluation of top-K checkpoints."""
 
@@ -367,7 +373,7 @@ def run_post_evaluation(
 
     ray_results_dir = Path.home() / "ray_results"
     tier2_dir = (
-        ray_results_dir / f"glacier_search_{task}_{server_config['hostname']}_tier2"
+        ray_results_dir / f"glacier_search_{task}_{server_name}_tier2"
     )
 
     if not tier2_dir.exists():
@@ -452,7 +458,8 @@ def run_post_evaluation(
 
 
 def run_tier1_search(
-    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str
+    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str,
+    resume_path: Optional[str] = None
 ):
     """Run Tier 1 search: dataset search with fixed model."""
 
@@ -465,19 +472,15 @@ def run_tier1_search(
     # Validate datasets exist
     validate_dataset_paths(server_config, datasets)
 
-    # Build search space
-    search_space = []
-    for dataset in datasets:
-        search_space.append(
-            {
-                "task": task,
-                "dataset": dataset,
-                "server": server_name,
-                "max_epochs": max_epochs,
-                "experiment_name": experiment_name,
-                "hyperparams": TIER1_FIXED_PARAMS.copy(),
-            }
-        )
+    # Build search space - proper Ray Tune format
+    search_space = {
+        "task": task,
+        "dataset": tune.grid_search(datasets),  # Ray varies dataset
+        "server": server_name,
+        "max_epochs": max_epochs,
+        "experiment_name": experiment_name,
+        "hyperparams": TIER1_FIXED_PARAMS.copy(),
+    }
 
     # Configure Ray
     gpu_resources = {"gpu": server_cfg["gpu_per_trial"]}
@@ -489,17 +492,27 @@ def run_tier1_search(
         reduction_factor=3,  # Less aggressive early stopping
     )
 
-    # Run search
-    tuner = tune.Tuner(
-        tune.with_resources(ray_trainable, resources=gpu_resources),
-        param_space=tune.grid_search(search_space),
-        tune_config=tune.TuneConfig(metric="val_loss", mode="min", scheduler=scheduler),
-        run_config=tune.RunConfig(
-            name=f"glacier_search_{task}_{server_name}_tier1",
-            verbose=1,
-            failure_config=FailureConfig(max_failures=100, fail_fast=False),
-        ),
-    )
+    # Check for resume
+    if resume_path and Path(resume_path).exists() and "tier1" in resume_path:
+        print(f"Resuming Tier 1 from: {resume_path}")
+        tuner = tune.Tuner.restore(
+            resume_path,
+            trainable=tune.with_resources(ray_trainable, resources=gpu_resources),
+            resume_unfinished=True,
+            resume_errored=True,  # Retry failed trials
+        )
+    else:
+        # Start new search
+        tuner = tune.Tuner(
+            tune.with_resources(ray_trainable, resources=gpu_resources),
+            param_space=search_space,
+            tune_config=tune.TuneConfig(metric="val_loss", mode="min", scheduler=scheduler),
+            run_config=tune.RunConfig(
+                name=f"glacier_search_{task}_{server_name}_tier1",
+                verbose=1,
+                failure_config=FailureConfig(max_failures=100, fail_fast=False),
+            ),
+        )
 
     print(f"Starting Tier 1 search with {len(datasets)} datasets...")
     results = tuner.fit()
@@ -509,7 +522,8 @@ def run_tier1_search(
 
 
 def run_tier2_search(
-    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str
+    task: str, server_config: Dict[str, Any], server_name: str, experiment_name: str,
+    resume_path: Optional[str] = None
 ):
     """Run Tier 2 search: hyperparameter search on best datasets."""
 
@@ -520,6 +534,8 @@ def run_tier2_search(
     # Get datasets for Tier 2
     if server_cfg["skip_tier1"]:
         datasets = server_cfg["datasets"]  # Use default datasets
+        # Validate datasets exist for desktop
+        validate_dataset_paths(server_config, datasets)
     else:
         datasets = get_best_datasets_from_tier1(task, server_name, top_k=3)
 
@@ -585,19 +601,29 @@ def run_tier2_search(
         reduction_factor=3,  # Less aggressive early stopping
     )
 
-    # Run search
-    tuner = tune.Tuner(
-        tune.with_resources(ray_trainable, resources=gpu_resources),
-        param_space=search_space,
-        tune_config=tune.TuneConfig(
-            metric="val_loss", mode="min", scheduler=scheduler, num_samples=num_samples
-        ),
-        run_config=tune.RunConfig(
-            name=f"glacier_search_{task}_{server_name}_tier2",
-            verbose=1,
-            failure_config=FailureConfig(max_failures=100, fail_fast=False),
-        ),
-    )
+    # Check for resume
+    if resume_path and Path(resume_path).exists() and "tier2" in resume_path:
+        print(f"Resuming Tier 2 from: {resume_path}")
+        tuner = tune.Tuner.restore(
+            resume_path,
+            trainable=tune.with_resources(ray_trainable, resources=gpu_resources),
+            resume_unfinished=True,
+            resume_errored=True,  # Retry failed trials
+        )
+    else:
+        # Start new search
+        tuner = tune.Tuner(
+            tune.with_resources(ray_trainable, resources=gpu_resources),
+            param_space=search_space,
+            tune_config=tune.TuneConfig(
+                metric="val_loss", mode="min", scheduler=scheduler, num_samples=num_samples
+            ),
+            run_config=tune.RunConfig(
+                name=f"glacier_search_{task}_{server_name}_tier2",
+                verbose=1,
+                failure_config=FailureConfig(max_failures=100, fail_fast=False),
+            ),
+        )
 
     print(f"Starting Tier 2 search with {num_samples} trials...")
     results = tuner.fit()
@@ -610,7 +636,8 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
     """Run complete hyperparameter search for a single task."""
 
     server_name = args.server
-    experiment_name = TEST_EXPERIMENT if args.test_suite else f"{task}_search"
+    task_config = TASK_CONFIGS[task]
+    experiment_name = TEST_EXPERIMENT if args.test_suite else task_config["experiment_suffix"]
 
     print(f"\n{'=' * 60}")
     print(f"STARTING TASK: {task.upper()}")
@@ -618,16 +645,33 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
     print(f"Experiment: {experiment_name}")
     print(f"{'=' * 60}")
 
-    # Tier 1: Dataset search (skip for desktop)
+    # Detect resume path for this specific task
+    resume_path = None
+    if args.resume:
+        if args.resume == "auto":
+            resume_path = detect_resume(server_name, task)
+            if resume_path:
+                print(f"Auto-detected resume path for {task}: {resume_path}")
+            else:
+                print(f"No resume path found for {task}, starting fresh")
+        else:
+            resume_path = args.resume
+            if not Path(resume_path).exists():
+                print(f"Warning: Resume path not found: {resume_path}")
+                resume_path = None
+
+    # Tier 1: Dataset search (skip for desktop or if resuming tier2)
     server_cfg = SERVER_CONFIGS[server_name]
-    if not server_cfg["skip_tier1"] and not args.resume:
-        run_tier1_search(task, server_config, server_name, experiment_name)
+    skip_tier1 = server_cfg["skip_tier1"] or (resume_path and "tier2" in str(resume_path))
+    
+    if not skip_tier1:
+        run_tier1_search(task, server_config, server_name, experiment_name, resume_path)
 
     # Tier 2: Model hyperparameter search
-    run_tier2_search(task, server_config, server_name, experiment_name)
+    run_tier2_search(task, server_config, server_name, experiment_name, resume_path)
 
     # Post-search evaluation
-    run_post_evaluation(task, server_config, experiment_name, top_k=10)
+    run_post_evaluation(task, server_config, server_name, experiment_name, top_k=10)
 
     print(f"\n✓ COMPLETED TASK: {task.upper()}")
 
@@ -657,10 +701,15 @@ def main():
     parser.add_argument(
         "--test-suite",
         action="store_true",
-        default=True,
-        help="Use test_suite experiment (default: True)",
+        default=False,
+        help="Use test_suite experiment for validation (default: False for production)",
     )
-    parser.add_argument("--resume", help="Resume from specific experiment path")
+    parser.add_argument(
+        "--resume", 
+        type=str,
+        default=None,
+        help="Resume from experiment path (use 'auto' for latest)"
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="Dry run - print configuration only"
     )
@@ -690,12 +739,6 @@ def main():
     else:
         tasks_to_run = ["ci", "debris", "multiclass"]  # Set it and forget it!
 
-    # Handle resume
-    if args.resume:
-        print(f"Resuming from: {args.resume}")
-        # In full implementation, would parse resume path and continue from there
-        # For now, just note that resume was requested
-
     print("\n🚀 STARTING HYPERPARAMETER SEARCH")
     print(f"Server: {args.server}")
     print(f"Tasks: {', '.join(tasks_to_run)}")
@@ -710,10 +753,17 @@ def main():
             print(f"❌ FAILED TASK: {task.upper()} - {e}")
             continue
 
+    # Cleanup Ray
+    if ray.is_initialized():
+        ray.shutdown()
+        print("\nRay shutdown complete")
+
     print("\n🎉 HYPERPARAMETER SEARCH COMPLETE!")
     print(f"Check MLflow at: {MLFLOW_URI}")
     if args.test_suite:
         print(f"Experiment: {TEST_EXPERIMENT}")
+    else:
+        print(f"Experiments: clean_ice, debris_ice, multi_class")
 
 
 if __name__ == "__main__":
