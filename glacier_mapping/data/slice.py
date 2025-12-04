@@ -172,17 +172,22 @@ def compute_dems(dem_np):
 def get_tiff_np(
     tiff_fname,
     dem_fname=None,
+    velocity_fname=None,
     physics_res=None,
     physics_scale=None,
     add_ndvi=False,
     add_ndwi=False,
     add_ndsi=False,
     add_hsv=False,
+    return_band_names=False,
     verbose=False,
 ):
     tiff = read_tiff(tiff_fname)
     tiff_np = np.transpose(tiff.read(), (1, 2, 0)).astype(np.float32)
     tiff_np = np.nan_to_num(tiff_np)
+
+    # Track band names dynamically for metadata generation
+    band_names = ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"]
 
     use_dem = not (dem_fname is None or not dem_fname.exists())
     dem_np = None
@@ -193,19 +198,46 @@ def get_tiff_np(
         dem_np = np.nan_to_num(dem_np)
         dem_np = compute_dems(dem_np)  # [elevation_raw, slope_deg_raw]
         tiff_np = np.concatenate((tiff_np, dem_np), axis=2)
+        band_names.extend(["elevation", "slope_deg"])
+
+    # Load velocity data (4 bands: v, vx, vy, mask)
+    # If add_velocity is requested, ALWAYS add 4 velocity channels
+    # If file missing or doesn't exist, zero-fill with mask=0 (invalid)
+    add_velocity_to_output = not (velocity_fname is None)
+    velocity_np = None
+
+    if add_velocity_to_output:
+        if velocity_fname.exists():
+            velocity = read_tiff(velocity_fname)
+            velocity_np = np.transpose(velocity.read(), (1, 2, 0)).astype(np.float32)
+            velocity_np = np.nan_to_num(velocity_np)  # NaN → 0
+            if verbose:
+                log.debug(f"Loaded velocity data: shape={velocity_np.shape}")
+        else:
+            # Zero-fill missing velocity data with mask=0 (no valid data)
+            velocity_np = np.zeros((tiff_np.shape[0], tiff_np.shape[1], 4), dtype=np.float32)
+            if verbose:
+                log.warning(f"Velocity file not found: {velocity_fname.name}. Zero-filling with mask=0.")
+        
+        tiff_np = np.concatenate((tiff_np, velocity_np), axis=2)
+        band_names.extend(["velocity", "velocity_x", "velocity_y", "velocity_mask"])
 
     tiff_np = np.nan_to_num(tiff_np.astype(np.float32))
 
     if add_ndvi:
         tiff_np = add_index(tiff_np, index1=3, index2=2)
+        band_names.append("NDVI")
     if add_ndwi:
         tiff_np = add_index(tiff_np, index1=1, index2=3)
+        band_names.append("NDWI")
     if add_ndsi:
         tiff_np = add_index(tiff_np, index1=1, index2=4)
+        band_names.append("NDSI")
     if add_hsv:
         rgb_img = tiff_np[:, :, [4, 3, 1]] / 255
         hsv_img = rgb2hsv(rgb_img[:, :, [2, 1, 0]])
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
+        band_names.extend(["H", "S", "V"])
 
     use_physics = (
         isinstance(physics_res, (float, str, int))
@@ -221,16 +253,27 @@ def get_tiff_np(
             physics_scale,
         )
         tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
+        band_names.extend(["flow_accumulation", "tpi", "roughness", "plan_curvature"])
 
     if verbose:
-        log.debug(f"use_dem={use_dem}, use_physics={use_physics}")
+        log.debug(f"use_dem={use_dem}, use_velocity={add_velocity_to_output}, use_physics={use_physics}")
+        log.debug(f"Final band order: {band_names}")
+        log.debug(f"Final shape: {tiff_np.shape}")
 
+    if return_band_names:
+        return tiff_np, band_names
     return tiff_np
 
 
 def save_slices(filenum, fname, labels, savepath, **conf):
     tiff_fname = pathlib.Path(conf["image_dir"]) / fname
     dem_fname = pathlib.Path(conf["dem_dir"]) / fname
+    
+    # Build velocity filename if velocity is enabled
+    velocity_fname = None
+    if conf.get("add_velocity", False) and "velocity_dir" in conf:
+        velocity_fname = pathlib.Path(conf["velocity_dir"]) / fname
+    
     mask = get_mask(tiff_fname, labels)
 
     _mask = np.zeros((mask.shape[0], mask.shape[1]))
@@ -306,17 +349,38 @@ def save_slices(filenum, fname, labels, savepath, **conf):
 
     os.makedirs(conf["out_dir"], exist_ok=True)
 
-    tiff_np = get_tiff_np(
-        tiff_fname,
-        dem_fname,
-        conf["physics_res"],
-        conf["physics_scale"],
-        conf["add_ndvi"],
-        conf["add_ndwi"],
-        conf["add_ndsi"],
-        conf["add_hsv"],
-        verbose=(filenum == 0),
-    )
+    # On first file, get band names for metadata
+    if filenum == 0:
+        result = get_tiff_np(
+            tiff_fname,
+            dem_fname,
+            velocity_fname,
+            conf["physics_res"],
+            conf["physics_scale"],
+            conf["add_ndvi"],
+            conf["add_ndwi"],
+            conf["add_ndsi"],
+            conf["add_hsv"],
+            return_band_names=True,
+            verbose=True,
+        )
+        tiff_np, band_names = result
+        # Store band names in conf for preprocess.py to access
+        conf["_band_names"] = band_names
+    else:
+        tiff_np = get_tiff_np(
+            tiff_fname,
+            dem_fname,
+            velocity_fname,
+            conf["physics_res"],
+            conf["physics_scale"],
+            conf["add_ndvi"],
+            conf["add_ndwi"],
+            conf["add_ndsi"],
+            conf["add_hsv"],
+            return_band_names=False,
+            verbose=False,
+        )
 
     slicenum = 0
     df_rows = []
@@ -409,6 +473,9 @@ def save_slices(filenum, fname, labels, savepath, **conf):
 
             slicenum += 1
 
+    # Return band names if available (from first file processing)
+    band_names = conf.get("_band_names", None)
+    
     return (
         np.mean(tiff_np, axis=(0, 1)),
         np.std(tiff_np, axis=(0, 1)),
@@ -416,4 +483,5 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         np.max(tiff_np, axis=(0, 1)),
         df_rows,
         skipped_rows,
+        band_names,
     )

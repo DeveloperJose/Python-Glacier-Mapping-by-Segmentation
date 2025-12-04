@@ -1,4 +1,5 @@
 import glob
+import json
 import logging
 import os
 import pathlib
@@ -12,7 +13,8 @@ from torchvision import transforms
 
 import glacier_mapping.utils.logging as fn
 
-BAND_NAMES = np.array(
+# Legacy hardcoded band names (for backward compatibility)
+BAND_NAMES_LEGACY = np.array(
     [
         "B1",  # 0
         "B2",  # 1
@@ -37,6 +39,39 @@ BAND_NAMES = np.array(
     ]
 )
 
+# Global BAND_NAMES loaded dynamically
+BAND_NAMES = BAND_NAMES_LEGACY.copy()
+
+
+def load_band_names(processed_dir):
+    """
+    Load band names from band_metadata.json if available, otherwise fall back to legacy.
+    
+    Args:
+        processed_dir: Path to processed dataset directory
+        
+    Returns:
+        np.ndarray: Array of band names
+    """
+    if isinstance(processed_dir, str):
+        processed_dir = pathlib.Path(processed_dir)
+    
+    metadata_path = processed_dir / "band_metadata.json"
+    
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+            band_names = np.array(metadata["band_names"])
+            fn.log(logging.INFO, f"Loaded {len(band_names)} band names from {metadata_path}")
+            return band_names
+        except Exception as e:
+            fn.log(logging.WARNING, f"Failed to load band_metadata.json: {e}. Using legacy band names.")
+            return BAND_NAMES_LEGACY.copy()
+    else:
+        fn.log(logging.INFO, "No band_metadata.json found. Using legacy band names.")
+        return BAND_NAMES_LEGACY.copy()
+
 
 def fetch_loaders(
     processed_dir,
@@ -60,6 +95,10 @@ def fetch_loaders(
         output_classes: 0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls)
         normalize: "min-max" or "mean-std"
     """
+    # Load band names dynamically
+    global BAND_NAMES
+    BAND_NAMES = load_band_names(processed_dir)
+    
     fn.log(
         logging.INFO,
         f"fetch_loaders() | Output classes: {[class_names[cl] for cl in output_classes]} | raw={output_classes}",

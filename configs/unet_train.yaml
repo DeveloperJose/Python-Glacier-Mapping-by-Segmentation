@@ -1,7 +1,7 @@
 # Training configuration
 training_opts:
-  dataset_name: "bibek_w512_o64_f1_v2"
-  run_name: "frodo_test_ci"
+  dataset_name: "bibek_w512_o64_f1_velocity"
+  run_name: ""
   epochs: 500
   fine_tune: False
   find_lr: False

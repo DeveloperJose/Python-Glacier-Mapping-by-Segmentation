@@ -1,0 +1,57 @@
+# Training configuration - TEST: Debris + Velocity Features
+training_opts:
+  dataset_name: "velocity_test_w512_o64_f1"  # Must match slice_and_preprocess output_name
+  run_name: "velocity_dci_test"
+  epochs: 50  # Short test run
+  fine_tune: False
+  find_lr: False
+  early_stopping: 15 # Stop early for quick testing
+  # Slice visualizations (validation batch samples, every N epochs)
+  num_slice_viz: 8 # Generate fewer for testing
+  slice_viz_every_n_epochs: 5
+  # Full-tile evaluation (on best model only)
+  run_full_eval: true # Run full-tile test set evaluation
+  num_full_viz: 8 # Generate fewer for testing
+
+loader_opts:
+  batch_size: 4  # Smaller batch for testing
+  # Band order: Landsat (0-7) + DEM (8-9) + Velocity (10-13) + Indices (14-16)
+  use_channels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+  # [0-7]   = B1-B7 (Landsat-7 bands)
+  # [8-9]   = elevation, slope_deg (DEM)
+  # [10-13] = velocity, velocity_x, velocity_y, velocity_mask (ITS_LIVE)
+  # [14-16] = NDVI, NDWI, NDSI (spectral indices)
+  output_classes: [2] # 0=BG, 1=CI, 2=Debris (Debris-only binary)
+  normalize: "mean-std"
+  class_names: ["BG", "CleanIce", "Debris"]
+
+metrics_opts:
+  metrics: ["IoU", "precision", "recall"]
+  threshold: [0.5, 0.5]
+
+loss_opts:
+  name: "custom"
+  masked: False
+  gaussian_blur_sigma: None
+  label_smoothing: 0
+  use_unified: False
+
+model_opts:
+  args:
+    net_depth: 4
+    dropout: 0.1
+    spatial: True
+    first_channel_output: 32
+
+optim_opts:
+  name: "AdamW"
+  args:
+    lr: 0.0003
+    weight_decay: 5e-5
+
+scheduler_opts:
+  name: "OneCycleLR"
+  args:
+    max_lr: 0.001
+    pct_start: 0.3
+    anneal_strategy: "cos"

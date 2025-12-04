@@ -4,6 +4,7 @@
 import argparse
 import json
 import multiprocessing
+import multiprocessing.pool
 import os
 import random
 import shutil
@@ -62,7 +63,7 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     slice_config = Dict(yaml.safe_load(open(config_path)))
 
     # Load server paths
-    servers_cfg = Dict(yaml.safe_load(Path("conf/servers.yaml").read_text()))
+    servers_cfg = Dict(yaml.safe_load(Path("configs/servers.yaml").read_text()))
     server = servers_cfg[server_name]  # defaults to desktop
 
     # Use absolute paths directly from servers.yaml
@@ -70,6 +71,10 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     slice_config.dem_dir = server.dem_dir
     slice_config.labels_dir = server.labels_dir
     slice_config.out_dir = f"{server.processed_data_path}/{slice_config.output_name}"
+    
+    # Add velocity_dir if available
+    if hasattr(server, "velocity_dir"):
+        slice_config.velocity_dir = server.velocity_dir
 
     return slice_config
 
@@ -90,7 +95,7 @@ if __name__ == "__main__":
 
     # Load config with server paths
     conf = load_config_with_server_paths(
-        "./conf/slice_and_preprocess.yaml", args.server
+        "./configs/preprocess.yaml", args.server
     )
 
     saved_df = pd.DataFrame(
@@ -150,6 +155,8 @@ if __name__ == "__main__":
     labels = fn.read_shp(Path(conf.labels_dir) / "HKH_CIDC_5basins_all.shp")
     remove_and_create(conf.out_dir)
 
+    band_names_metadata = None  # Capture from first image processing
+    
     with tqdm(total=1, desc="temp") as pbar:
         for split, meta in splits.items():
             means, stds, mins, maxs = [], [], [], []
@@ -166,7 +173,7 @@ if __name__ == "__main__":
             print(f"Using {workers}/{cores} CPU cores")
             with multiprocessing.Pool(workers) as pool:
                 for result in pool.istarmap(fn_process, enumerate(meta)):
-                    mu, s, mi, ma, df_rows, skipped_rows = result
+                    mu, s, mi, ma, df_rows, skipped_rows, band_names = result
                     means.append(mu)
                     stds.append(s)
                     mins.append(mi)
@@ -175,6 +182,11 @@ if __name__ == "__main__":
                         saved_df.loc[len(saved_df.index)] = row
                     for row in skipped_rows:
                         skipped_df.loc[len(skipped_df.index)] = row
+                    
+                    # Capture band names from first image
+                    if band_names_metadata is None and band_names is not None:
+                        band_names_metadata = band_names
+                    
                     pbar.update(1)
 
             means_agg = np.mean(np.asarray(means), axis=0)
@@ -389,9 +401,36 @@ if __name__ == "__main__":
     with open(stats_path, "w") as f:
         json.dump(statistics, f, indent=2)
 
+    # Save band metadata for dynamic loading
+    band_metadata_path = None
+    if band_names_metadata is not None:
+        band_metadata = {
+            "band_names": band_names_metadata,
+            "num_bands": len(band_names_metadata),
+            "config": {
+                "use_dem": bool(hasattr(conf, "dem_dir") and conf.dem_dir),
+                "use_velocity": bool(conf.get("add_velocity", False)),
+                "use_indices": {
+                    "ndvi": bool(conf.get("add_ndvi", False)),
+                    "ndwi": bool(conf.get("add_ndwi", False)),
+                    "ndsi": bool(conf.get("add_ndsi", False)),
+                    "hsv": bool(conf.get("add_hsv", False)),
+                },
+                "use_physics": bool(conf.get("physics_res") not in [None, "None"]),
+            },
+        }
+        band_metadata_path = Path(conf["out_dir"]) / "band_metadata.json"
+        with open(band_metadata_path, "w") as f:
+            json.dump(band_metadata, f, indent=2)
+        print("\nGenerated band metadata:")
+        print(f"  Bands: {band_names_metadata}")
+        print(f"  Total: {len(band_names_metadata)} channels")
+
     print("\n" + "=" * 80)
     print("FILES SAVED:")
     print(f"  Dataset statistics:     {stats_path}")
+    if band_metadata_path is not None:
+        print(f"  Band metadata:          {band_metadata_path}")
     print(f"  Kept slices metadata:   {Path(conf['out_dir']) / 'slice_meta.csv'}")
     print(
         f"  Skipped slices metadata: {Path(conf['out_dir']) / 'skipped_slices_meta.csv'}"

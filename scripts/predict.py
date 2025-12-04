@@ -29,7 +29,7 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib
 
-from glacier_mapping.data.data import BAND_NAMES
+from glacier_mapping.data.data import load_band_names
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.model.metrics import IoU, precision, recall
 from glacier_mapping.model.visualize import (
@@ -175,6 +175,8 @@ def compute_feature_importance(
     if save_spatial and spatial_maps and output_dir is not None:
         spatial_dir = output_dir / "spatial_maps"
         spatial_dir.mkdir(parents=True, exist_ok=True)
+        # Load band names dynamically
+        from glacier_mapping.data.data import BAND_NAMES
         save_spatial_saliency_maps(
             spatial_maps, BAND_NAMES[use_channels], spatial_dir, top_k=6
         )
@@ -1093,8 +1095,11 @@ if __name__ == "__main__":
             output_dir=fi_output_dir,
         )
 
-        # Get channel names
+        # Get channel names (load dynamically from processed dataset)
         use_channels = saliency_frame.use_channels
+        data_dir = pathlib.Path(saliency_frame.processed_dir)
+        from glacier_mapping.data.data import BAND_NAMES
+        BAND_NAMES = load_band_names(data_dir.parent)
         channel_names = BAND_NAMES[use_channels]
 
         # Save results
