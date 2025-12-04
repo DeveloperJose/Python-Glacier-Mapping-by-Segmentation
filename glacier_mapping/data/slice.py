@@ -215,10 +215,14 @@ def get_tiff_np(
                 log.debug(f"Loaded velocity data: shape={velocity_np.shape}")
         else:
             # Zero-fill missing velocity data with mask=0 (no valid data)
-            velocity_np = np.zeros((tiff_np.shape[0], tiff_np.shape[1], 4), dtype=np.float32)
+            velocity_np = np.zeros(
+                (tiff_np.shape[0], tiff_np.shape[1], 4), dtype=np.float32
+            )
             if verbose:
-                log.warning(f"Velocity file not found: {velocity_fname.name}. Zero-filling with mask=0.")
-        
+                log.warning(
+                    f"Velocity file not found: {velocity_fname.name}. Zero-filling with mask=0."
+                )
+
         tiff_np = np.concatenate((tiff_np, velocity_np), axis=2)
         band_names.extend(["velocity", "velocity_x", "velocity_y", "velocity_mask"])
 
@@ -256,7 +260,9 @@ def get_tiff_np(
         band_names.extend(["flow_accumulation", "tpi", "roughness", "plan_curvature"])
 
     if verbose:
-        log.debug(f"use_dem={use_dem}, use_velocity={add_velocity_to_output}, use_physics={use_physics}")
+        log.debug(
+            f"use_dem={use_dem}, use_velocity={add_velocity_to_output}, use_physics={use_physics}"
+        )
         log.debug(f"Final band order: {band_names}")
         log.debug(f"Final shape: {tiff_np.shape}")
 
@@ -268,12 +274,12 @@ def get_tiff_np(
 def save_slices(filenum, fname, labels, savepath, **conf):
     tiff_fname = pathlib.Path(conf["image_dir"]) / fname
     dem_fname = pathlib.Path(conf["dem_dir"]) / fname
-    
+
     # Build velocity filename if velocity is enabled
     velocity_fname = None
     if conf.get("add_velocity", False) and "velocity_dir" in conf:
         velocity_fname = pathlib.Path(conf["velocity_dir"]) / fname
-    
+
     mask = get_mask(tiff_fname, labels)
 
     _mask = np.zeros((mask.shape[0], mask.shape[1]))
@@ -287,13 +293,33 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             or slice.shape[1] != conf["window_size"][1]
         ):
             if len(slice.shape) == 2:
-                temp = np.zeros((conf["window_size"][0], conf["window_size"][1]))
+                # Use np.full with explicit dtype to avoid uninitialized memory in multiprocessing
+                temp = np.full(
+                    (conf["window_size"][0], conf["window_size"][1]),
+                    0.0,
+                    dtype=np.float32,
+                )
                 temp[0 : slice.shape[0], 0 : slice.shape[1]] = slice
             else:
-                temp = np.zeros(
-                    (conf["window_size"][0], conf["window_size"][1], slice.shape[2])
+                # Use np.full with explicit dtype to avoid uninitialized memory in multiprocessing
+                temp = np.full(
+                    (conf["window_size"][0], conf["window_size"][1], slice.shape[2]),
+                    0.0,
+                    dtype=np.float32,
                 )
                 temp[0 : slice.shape[0], 0 : slice.shape[1], :] = slice
+
+                # Validation: Check for extreme values that indicate memory corruption
+                # Velocity channels should be < 10000 m/yr, elevation < 10000m, etc.
+                max_abs = np.max(np.abs(temp))
+                if max_abs > 1e6:
+                    log.error(
+                        f"Detected extreme values in padded slice (max_abs={max_abs:.2e}). "
+                        f"This indicates memory corruption. Re-initializing with zeros."
+                    )
+                    # Force re-initialization
+                    temp.fill(0.0)
+                    temp[0 : slice.shape[0], 0 : slice.shape[1], :] = slice
             slice = temp
         return slice
 
@@ -468,6 +494,16 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             mask_fname = f"mask_{filenum}_slice_{slicenum}"
             tiff_fname_out = f"tiff_{filenum}_slice_{slicenum}"
 
+            # Validation: Check for data corruption before saving
+            # This catches any extreme values that may have been introduced during processing
+            max_abs_val = np.max(np.abs(final_save_slice))
+            if max_abs_val > 1e6:
+                log.warning(
+                    f"CORRUPTION DETECTED in {tiff_fname_out}: max_abs={max_abs_val:.2e}. "
+                    f"This slice will be saved but may contain invalid data. "
+                    f"Consider regenerating the dataset with single-threaded processing."
+                )
+
             save_slice(modified_mask, savepath / mask_fname)
             save_slice(final_save_slice, savepath / tiff_fname_out)
 
@@ -475,7 +511,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
 
     # Return band names if available (from first file processing)
     band_names = conf.get("_band_names", None)
-    
+
     return (
         np.mean(tiff_np, axis=(0, 1)),
         np.std(tiff_np, axis=(0, 1)),

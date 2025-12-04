@@ -16,12 +16,12 @@ class GlacierDataModule(pl.LightningDataModule):
         self,
         processed_dir: str,
         batch_size: int = 8,
-        landsat_channels = True,
-        dem_channels = True,
-        spectral_indices_channels = True,
-        hsv_channels = True,
-        physics_channels = False,
-        velocity_channels = True,
+        landsat_channels=True,
+        dem_channels=True,
+        spectral_indices_channels=True,
+        hsv_channels=True,
+        physics_channels=False,
+        velocity_channels=True,
         output_classes: List[int] = [0, 1, 2],
         class_names: List[str] = ["BG", "CleanIce", "Debris"],
         normalize: str = "mean-std",
@@ -49,7 +49,7 @@ class GlacierDataModule(pl.LightningDataModule):
         super().__init__()
         self.processed_dir = pathlib.Path(processed_dir)
         self.batch_size = batch_size
-        
+
         # Store channel group selections
         self.landsat_channels = landsat_channels
         self.dem_channels = dem_channels
@@ -57,7 +57,7 @@ class GlacierDataModule(pl.LightningDataModule):
         self.hsv_channels = hsv_channels
         self.physics_channels = physics_channels
         self.velocity_channels = velocity_channels
-        
+
         self.output_classes = output_classes
         self.class_names = class_names
         self.normalize = normalize
@@ -74,7 +74,7 @@ class GlacierDataModule(pl.LightningDataModule):
         """Setup datasets for training and validation."""
         # Import here to avoid circular imports
         from glacier_mapping.data.data import resolve_channel_selection
-        
+
         # Resolve channel groups to indices
         self.use_channels = resolve_channel_selection(
             self.processed_dir,
@@ -85,7 +85,7 @@ class GlacierDataModule(pl.LightningDataModule):
             physics_channels=self.physics_channels,
             velocity_channels=self.velocity_channels,
         )
-        
+
         if stage == "fit" or stage is None:
             self.train_dataset = GlacierDataset(
                 self.processed_dir / "train",

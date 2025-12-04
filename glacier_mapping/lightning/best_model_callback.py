@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import cv2
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -90,8 +91,8 @@ class BestModelFullEvaluationCallback(Callback):
             log.warning("No test tiles found for full-tile evaluation")
             return
 
-        # Select informative tiles for visualization
-        test_tiles, tile_rank_map = self._select_informative_tiles(
+        # Select informative tiles for visualization and cache predictions
+        test_tiles, tile_rank_map, prediction_cache = self._select_informative_tiles(
             test_tiles_all, pl_module, self.num_samples
         )
 
@@ -111,10 +112,14 @@ class BestModelFullEvaluationCallback(Callback):
         fp_sum = np.zeros(n_classes)
         fn_sum = np.zeros(n_classes)
 
-        # Evaluate all test tiles
+        # Evaluate all test tiles (reuse cached predictions when available)
         for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Full-tile evaluation")):
-            x = np.load(x_path)
-            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
+            # Use cached prediction if available, otherwise compute
+            if x_path in prediction_cache:
+                y_pred, invalid_mask = prediction_cache[x_path]
+            else:
+                x = np.load(x_path)
+                y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
 
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
@@ -129,45 +134,74 @@ class BestModelFullEvaluationCallback(Callback):
             if len(output_classes) == 1:  # Binary
                 # Use unified binary metrics calculation
                 target_class = output_classes[0]  # 1 for CleanIce, 2 for Debris
-                P, R, iou, tp_, fp_, fn_ = calculate_binary_metrics(
-                    y_pred, y_true_raw, target_class, ignore
+
+                # Calculate target class metrics
+                P_target, R_target, iou_target, tp_target, fp_target, fn_target = (
+                    calculate_binary_metrics(
+                        y_pred, y_true_raw, target_class, mask=ignore
+                    )
                 )
 
-                # Store only target class metrics (skip background)
-                tp_sum[0] += tp_
-                fp_sum[0] += fp_
-                fn_sum[0] += fn_
+                # Calculate background metrics (everything NOT target class)
+                # For binary: BG = all pixels that are neither target_class nor ignore
+                y_pred_bg = (y_pred == 0).astype(np.uint8)
+                y_true_bg = ((y_true_raw != target_class) & (y_true_raw != 255)).astype(
+                    np.uint8
+                )
+                P_bg, R_bg, iou_bg, tp_bg, fp_bg, fn_bg = calculate_binary_metrics(
+                    y_pred_bg, y_true_bg.astype(np.uint8), target_class=1, mask=ignore
+                )
 
-                # For binary, report all 3 classes but only target class has real metrics
-                # Background metrics (zeros for binary classification)
-                row += [0.0, 0.0, 0.0]  # BG_precision, BG_recall, BG_IoU
+                # Store metrics in correct positions: [BG, CleanIce, Debris]
+                if target_class == 1:  # CleanIce task
+                    tp_sum[0] += tp_bg  # BG
+                    fp_sum[0] += fp_bg
+                    fn_sum[0] += fn_bg
+                    tp_sum[1] += tp_target  # CleanIce
+                    fp_sum[1] += fp_target
+                    fn_sum[1] += fn_target
+                    # tp_sum[2] stays 0 (Debris not evaluated)
 
-                # Target class metrics (place in correct position based on target_class)
-                if target_class == 1:  # CleanIce
+                    row += [P_bg, R_bg, iou_bg]  # BG_precision, BG_recall, BG_IoU
                     row += [
-                        P,
-                        R,
-                        iou,
+                        P_target,
+                        R_target,
+                        iou_target,
                     ]  # CleanIce_precision, CleanIce_recall, CleanIce_IoU
                     row += [
                         0.0,
                         0.0,
                         0.0,
+                    ]  # Debris_precision, Debris_recall, Debris_IoU (not evaluated)
+                else:  # Debris task (target_class == 2)
+                    tp_sum[0] += tp_bg  # BG
+                    fp_sum[0] += fp_bg
+                    fn_sum[0] += fn_bg
+                    # tp_sum[1] stays 0 (CleanIce not evaluated)
+                    tp_sum[2] += tp_target  # Debris
+                    fp_sum[2] += fp_target
+                    fn_sum[2] += fn_target
+
+                    row += [P_bg, R_bg, iou_bg]  # BG_precision, BG_recall, BG_IoU
+                    row += [
+                        0.0,
+                        0.0,
+                        0.0,
+                    ]  # CleanIce_precision, CleanIce_recall, CleanIce_IoU (not evaluated)
+                    row += [
+                        P_target,
+                        R_target,
+                        iou_target,
                     ]  # Debris_precision, Debris_recall, Debris_IoU
-                else:  # Debris
-                    row += [
-                        0.0,
-                        0.0,
-                        0.0,
-                    ]  # CleanIce_precision, CleanIce_recall, CleanIce_IoU
-                    row += [P, R, iou]  # Debris_precision, Debris_recall, Debris_IoU
             else:  # Multi-class
                 valid = ~ignore
                 y_pred_valid = y_pred[valid]
                 y_true_valid_raw = y_true_raw[valid]
 
                 for ci in range(n_classes):
-                    label = ci + 1
+                    # Predictions are in 0,1,2 range (0=BG, 1=CI, 2=Debris)
+                    # Ground truth is also in 0,1,2 range (after preprocessing)
+                    label = ci  # Compare directly: 0=BG, 1=CI, 2=Debris
                     p = (y_pred_valid == label).astype(np.uint8)
                     t = (y_true_valid_raw == label).astype(np.uint8)
 
@@ -275,6 +309,7 @@ class BestModelFullEvaluationCallback(Callback):
                 trainer.current_epoch + 1,
                 tile_rank_map,
                 len(test_tiles_all),
+                prediction_cache,
             )
             log.info("Visualizations completed.")
 
@@ -290,8 +325,6 @@ class BestModelFullEvaluationCallback(Callback):
         self, trainer: pl.Trainer, output_dir: Path, epoch: int
     ):
         """Log PNGs to both TensorBoard and MLflow."""
-        import matplotlib.pyplot as plt
-
         for logger in trainer.loggers:
             try:
                 # MLflow logging - Fixed structure: log each tile directory without double nesting
@@ -320,7 +353,10 @@ class BestModelFullEvaluationCallback(Callback):
                         if tile_dir.is_dir():
                             for png_file in tile_dir.glob("*.png"):
                                 # Load PNG and convert to tensor for TensorBoard
-                                img = plt.imread(png_file)  # HWC format
+                                img = cv2.imread(str(png_file))  # BGR format (H, W, 3)
+                                img = cv2.cvtColor(
+                                    img, cv2.COLOR_BGR2RGB
+                                )  # Convert to RGB
                                 img_tensor = (
                                     torch.from_numpy(img).permute(2, 0, 1).float()
                                     / 255.0
@@ -337,7 +373,7 @@ class BestModelFullEvaluationCallback(Callback):
 
     def _select_informative_tiles(
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
-    ) -> Tuple[List[Path], Dict[Path, int]]:
+    ) -> Tuple[List[Path], Dict[Path, int], Dict[Path, Tuple[np.ndarray, np.ndarray]]]:
         """Select tiles based on IoU distribution: top-K, bottom-K, middle-K.
 
         For num_samples >= 12:
@@ -354,7 +390,10 @@ class BestModelFullEvaluationCallback(Callback):
             num_samples: Total number of tiles to select
 
         Returns:
-            Tuple of (selected_tiles, rank_map) where rank_map is {Path: rank} (1-indexed)
+            Tuple of (selected_tiles, rank_map, prediction_cache) where:
+                - selected_tiles: List of selected tile paths
+                - rank_map: {Path: rank} (1-indexed)
+                - prediction_cache: {Path: (y_pred, invalid_mask)} for reuse
         """
         # Use lightweight selection for small num_samples to avoid GPU OOM
         # Full IoU computation only for comprehensive visualization (12+ tiles)
@@ -364,20 +403,28 @@ class BestModelFullEvaluationCallback(Callback):
             )
             log.info("⚠️  Skipping rank computation in lightweight mode")
             selected = self._select_by_class_pixels(tile_paths, pl_module, num_samples)
-            # Return empty rank map for lightweight mode
-            return selected, {}
+            # Return empty rank map and cache for lightweight mode
+            return selected, {}, {}
 
-        # Calculate IoU for each tile
+        # Calculate IoU for each tile and cache predictions
         tile_ious = []
+        prediction_cache: Dict[Path, Tuple[np.ndarray, np.ndarray]] = {}
         output_classes = getattr(pl_module, "output_classes", [1])
         metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
-        threshold = metrics_opts.get("threshold", [0.5, 0.5])
+        threshold = metrics_opts.get("threshold", [0.5, 0.5])  # type: ignore[arg-type]
 
-        log.info(f"Computing IoU for {len(tile_paths)} tiles...")
+        log.info(
+            f"Computing IoU for {len(tile_paths)} tiles (predictions cached for reuse)..."
+        )
 
-        for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation")):
+        for idx, x_path in enumerate(
+            tqdm(tile_paths, desc="IoU computation + caching")
+        ):
             x = np.load(x_path)
-            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
+            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[arg-type]
+
+            # Cache prediction for reuse in full evaluation
+            prediction_cache[x_path] = (y_pred, invalid_mask)
 
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
@@ -389,26 +436,23 @@ class BestModelFullEvaluationCallback(Callback):
 
             # Calculate IoU
             if len(output_classes) == 1:  # Binary
-                from glacier_mapping.utils.prediction import calculate_binary_metrics
-
                 target_class = output_classes[0]
                 _, _, iou, _, _, _ = calculate_binary_metrics(
-                    y_pred, y_true_raw, target_class, ignore
+                    y_pred, y_true_raw, target_class, mask=ignore
                 )
             else:  # Multi-class - use mean IoU across classes
-                from glacier_mapping.model.metrics import tp_fp_fn, IoU as calc_iou
-
                 valid = ~ignore
                 y_pred_valid = y_pred[valid]
                 y_true_valid = y_true_raw[valid]
 
                 ious = []
                 for ci in range(len(output_classes)):
-                    label = ci + 1
+                    # Predictions are in 0,1,2 range, ground truth also in 0,1,2 range
+                    label = ci  # Compare directly: 0=BG, 1=CI, 2=Debris
                     p = (y_pred_valid == label).astype(np.uint8)
                     t = (y_true_valid == label).astype(np.uint8)
                     tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
-                    ious.append(calc_iou(tp_, fp_, fn_))
+                    ious.append(IoU(tp_, fp_, fn_))
                 iou = np.mean(ious)
 
             tile_ious.append((x_path, float(iou)))
@@ -460,7 +504,7 @@ class BestModelFullEvaluationCallback(Callback):
             f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}"
         )
 
-        return selected, rank_map
+        return selected, rank_map, prediction_cache
 
     def _extract_tiff_number(self, filepath: Path) -> int:
         """Extract TIFF number from filename pattern tiff_{NUM}_slice_{SLICE}.npy
@@ -524,10 +568,9 @@ class BestModelFullEvaluationCallback(Callback):
         epoch: int,
         tile_rank_map: Dict[Path, int],
         total_tiles: int,
+        prediction_cache: Dict[Path, Tuple[np.ndarray, np.ndarray]],
     ) -> None:
         """Generate 8-panel visualizations."""
-        import cv2
-
         # Get module attributes with fallbacks
         metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
         threshold = metrics_opts.get("threshold", [0.5, 0.5])
@@ -548,11 +591,18 @@ class BestModelFullEvaluationCallback(Callback):
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
             ).astype(np.uint8)
 
-            # Predict using shared utilities
-            probs = get_probabilities(pl_module, x_full)
-            y_pred_viz = predict_from_probs(
-                probs, pl_module, threshold[0] if threshold else None
-            )
+            # Use cached prediction if available, otherwise compute fresh
+            # Note: We still need probabilities for confidence/entropy visualization
+            if x_path in prediction_cache:
+                y_pred_viz, _ = prediction_cache[x_path]
+                # Still need probs for visualization - do one forward pass
+                probs = get_probabilities(pl_module, x_full)
+            else:
+                # Not in cache (e.g., lightweight mode) - compute both
+                probs = get_probabilities(pl_module, x_full)
+                y_pred_viz = predict_from_probs(
+                    probs, pl_module, threshold[0] if threshold else None
+                )
 
             # Get confidence for visualization
             if len(output_classes) == 1:  # Binary
@@ -580,10 +630,8 @@ class BestModelFullEvaluationCallback(Callback):
 
             y_pred_vis[ignore] = 255
 
-            # Convert predictions from 1,2,3 back to 0,1,2 for consistent visualization (multi-class only)
-            if len(output_classes) > 1:  # Multi-class only
-                valid_pred = (y_pred_vis != 255) & (y_pred_vis > 0)
-                y_pred_vis[valid_pred] = y_pred_vis[valid_pred] - 1  # 1→0, 2→1, 3→2
+            # Predictions are already in 0,1,2 range (0=BG, 1=CI, 2=Debris)
+            # No conversion needed
 
             x_rgb = make_rgb_preview(x_full)
 
@@ -631,10 +679,12 @@ class BestModelFullEvaluationCallback(Callback):
 
                 # Calculate metrics for target class only
                 P, R, iou, tp_, fp_, fn_ = calculate_binary_metrics(
-                    y_pred_viz, y_true_raw, target_class, ignore
+                    y_pred_viz, y_true_raw, target_class, mask=ignore
                 )
 
-                # Only show the target class name and metrics
+                # Map target_class index to class name safely
+                # class_names is always ["BG", "CleanIce", "Debris"]
+                # target_class is 1 (CleanIce) or 2 (Debris)
                 target_class_name = class_names[target_class]
                 metric_string_parts.append(
                     f"{target_class_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}"

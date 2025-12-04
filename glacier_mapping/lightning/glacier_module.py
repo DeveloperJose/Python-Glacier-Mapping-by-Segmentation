@@ -1,33 +1,19 @@
 """Lightning module for glacier segmentation."""
 
-import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
 from torchmetrics import JaccardIndex as TorchMetricsIoU
 from torchmetrics import Precision, Recall
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
 
 from glacier_mapping.model.losses import customloss
-from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.unet import Unet
-from glacier_mapping.model.visualize import (
-    build_cmap_from_mask_names,
-    make_rgb_preview,
-    label_to_color,
-    make_confidence_map,
-    make_entropy_map,
-    make_tp_fp_fn_masks,
-    make_eight_panel,
-)
 
 
 class GlacierSegmentationModule(pl.LightningModule):
@@ -45,12 +31,12 @@ class GlacierSegmentationModule(pl.LightningModule):
         loader_opts: Optional[Dict[str, Any]] = None,
         class_names: List[str] = ["BG", "CleanIce", "Debris"],
         output_classes: List[int] = [0, 1, 2],
-        landsat_channels = True,
-        dem_channels = True,
-        spectral_indices_channels = True,
-        hsv_channels = True,
-        physics_channels = False,
-        velocity_channels = True,
+        landsat_channels=True,
+        dem_channels=True,
+        spectral_indices_channels=True,
+        hsv_channels=True,
+        physics_channels=False,
+        velocity_channels=True,
         **kwargs,
     ):
         """
@@ -92,7 +78,7 @@ class GlacierSegmentationModule(pl.LightningModule):
         self.reg_opts = reg_opts
         self.class_names = class_names
         self.output_classes = output_classes
-        
+
         # Store channel group selections
         self.landsat_channels = landsat_channels
         self.dem_channels = dem_channels
@@ -108,9 +94,10 @@ class GlacierSegmentationModule(pl.LightningModule):
         else:
             self.processed_dir = "/tmp"
             self.normalization = "mean-std"
-        
+
         # Resolve channels from semantic groups
         from glacier_mapping.data.data import resolve_channel_selection
+
         self.use_channels = resolve_channel_selection(
             self.processed_dir,
             landsat_channels=landsat_channels,
@@ -405,8 +392,11 @@ class GlacierSegmentationModule(pl.LightningModule):
 
     def _load_normalization_params(self):
         """Load normalization array from processed data directory."""
-        from glacier_mapping.data.data import load_band_names, get_no_normalize_channel_names
-        
+        from glacier_mapping.data.data import (
+            load_band_names,
+            get_no_normalize_channel_names,
+        )
+
         norm_path = Path(self.processed_dir) / "normalize_train.npy"
         if norm_path.exists():
             self.norm_arr_full = np.load(norm_path)
@@ -424,26 +414,26 @@ class GlacierSegmentationModule(pl.LightningModule):
                 ]
             )  # mean, std, min, max
             self.norm_arr = self.norm_arr_full[:2, self.use_channels]
-        
+
         # Identify channels that should NOT be normalized (e.g., binary masks)
         band_names = load_band_names(self.processed_dir)
         no_norm_names = get_no_normalize_channel_names()
-        
+
         # Build boolean mask: True = skip normalization for this channel
-        self.no_normalize_mask = np.array([
-            band_names[ch] in no_norm_names for ch in self.use_channels
-        ])
+        self.no_normalize_mask = np.array(
+            [band_names[ch] in no_norm_names for ch in self.use_channels]
+        )
 
     def normalize(self, x):
         """Normalize input data (from Framework).
-        
+
         Skips normalization for channels marked as no_normalize (e.g., binary masks).
         """
         # Store original values for no-normalize channels
         x_no_norm = None
-        if hasattr(self, 'no_normalize_mask') and np.any(self.no_normalize_mask):
+        if hasattr(self, "no_normalize_mask") and np.any(self.no_normalize_mask):
             x_no_norm = x[:, :, self.no_normalize_mask].copy()
-        
+
         if self.normalization == "mean-std":
             _mean, _std = self.norm_arr[0], self.norm_arr[1]
             x_normalized = (x - _mean) / _std
@@ -454,11 +444,11 @@ class GlacierSegmentationModule(pl.LightningModule):
             x_normalized = (np.clip(x, _min, _max) - _min) / (_max - _min)
         else:
             raise Exception("Invalid normalization")
-        
+
         # Restore original values for no-normalize channels
         if x_no_norm is not None:
             x_normalized[:, :, self.no_normalize_mask] = x_no_norm
-        
+
         return x_normalized
 
     def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
@@ -485,19 +475,22 @@ class GlacierSegmentationModule(pl.LightningModule):
             else:
                 threshold = [0.5]
 
-            _y = torch.sigmoid(_y)
+            # Use softmax for consistency with training (loss uses softmax)
+            _y = torch.nn.functional.softmax(_y, dim=1)
             _y = _y.cpu().numpy()  # (1, 2, H, W) - move to CPU immediately
             if _y.shape[0] == 1:  # Remove batch dimension
                 _y = _y[0]  # (2, H, W)
             y_pred = (_y[1] >= threshold[0]).astype(
                 np.uint8
-            )  # Use positive class logits
+            )  # Use positive class probability
         else:  # Multi-class
             _y = torch.nn.functional.softmax(_y, dim=1)
             _y = _y.cpu().numpy()  # (1, C, H, W) - move to CPU immediately
             if _y.shape[0] == 1:  # Remove batch dimension
                 _y = _y[0]  # (C, H, W)
-            y_pred = np.argmax(_y, axis=0).astype(np.uint8) + 1  # 1..C
+            y_pred = np.argmax(_y, axis=0).astype(
+                np.uint8
+            )  # 0..C-1 (0=BG, 1=CI, 2=Debris)
 
         # Explicitly delete GPU tensor to free memory
         del _x

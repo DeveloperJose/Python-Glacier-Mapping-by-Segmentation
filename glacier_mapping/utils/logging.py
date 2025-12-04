@@ -8,7 +8,7 @@ warnings, and errors. For CLI scripts (scripts/*), use print() for user-facing o
 
 Usage:
     import glacier_mapping.utils.logging as log
-    
+
     log.info("Processing started")
     log.warning("Missing optional parameter, using default")
     log.error("Failed to load file")
@@ -16,6 +16,7 @@ Usage:
 
 Note: The custom log() function adds timestamps and formatting automatically.
 """
+
 import datetime
 import logging
 
@@ -25,11 +26,11 @@ LOGGER.setLevel(logging.INFO)
 
 def log(level, message):
     """Timestamped logger used throughout the project.
-    
+
     Args:
         level: Logging level (logging.INFO, logging.WARNING, etc.)
         message: Message string to log
-    
+
     Example:
         log(logging.INFO, "Starting data preprocessing")
     """
@@ -63,7 +64,7 @@ def debug(message):
 
 def print_conf(conf):
     """Pretty-print config dictionary to logger.
-    
+
     Args:
         conf: Dictionary of configuration key-value pairs
     """

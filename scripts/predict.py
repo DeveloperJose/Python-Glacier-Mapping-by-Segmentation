@@ -177,6 +177,7 @@ def compute_feature_importance(
         spatial_dir.mkdir(parents=True, exist_ok=True)
         # Load band names dynamically
         from glacier_mapping.data.data import BAND_NAMES
+
         save_spatial_saliency_maps(
             spatial_maps, BAND_NAMES[use_channels], spatial_dir, top_k=6
         )
@@ -1099,6 +1100,7 @@ if __name__ == "__main__":
         use_channels = saliency_frame.use_channels
         data_dir = pathlib.Path(saliency_frame.processed_dir)
         from glacier_mapping.data.data import BAND_NAMES
+
         BAND_NAMES = load_band_names(data_dir.parent)
         channel_names = BAND_NAMES[use_channels]
 

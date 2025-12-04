@@ -44,21 +44,17 @@ except ImportError as e:
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deep merge two dictionaries, override takes precedence.
-    
+
     Args:
         base: Base dictionary
         override: Override dictionary (takes precedence)
-    
+
     Returns:
         Merged dictionary
     """
     result = base.copy()
     for key, value in override.items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = deep_merge(result[key], value)
         else:
             result[key] = value
@@ -72,22 +68,22 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
     2. servers.yaml[server] -> loader_opts/training_opts
     3. tasks/{task}.yaml (inferred from path)
     4. {experiment_path} (specific experiment)
-    
+
     Args:
         config_path: Path to experiment config (e.g., "configs/frodo/clean_ice/base.yaml")
         server: Server name (e.g., "frodo")
-    
+
     Returns:
         Merged configuration dictionary
     """
     config_path_obj = pathlib.Path(config_path)
-    
+
     # Parse task from path structure
     path_parts = config_path_obj.parts
     if len(path_parts) >= 3 and path_parts[0] == "configs":
         server_from_path = path_parts[1]  # e.g., "frodo"
         task = path_parts[2]  # e.g., "clean_ice"
-        
+
         # Validate server consistency
         if server != server_from_path:
             raise ValueError(
@@ -100,21 +96,21 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
         print(f"Loading as standalone config without hierarchy")
         with open(config_path) as f:
             return yaml.safe_load(f)
-    
+
     # 1. Load train.yaml (global base config)
     base_config_path = pathlib.Path("configs/train.yaml")
     if not base_config_path.exists():
         raise FileNotFoundError(f"Base config not found: {base_config_path}")
-    
+
     with open(base_config_path) as f:
         merged = yaml.safe_load(f)
-    
+
     # 2. Load server-specific training settings from servers.yaml
     servers_yaml_path = pathlib.Path("configs/servers.yaml")
     if servers_yaml_path.exists():
         with open(servers_yaml_path) as f:
             servers = yaml.safe_load(f)
-        
+
         if server in servers:
             server_config = servers[server]
             # Extract training-relevant fields (batch_size, epochs)
@@ -126,19 +122,19 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
                 if "training_opts" not in merged:
                     merged["training_opts"] = {}
                 merged["training_opts"]["epochs"] = server_config["epochs"]
-    
+
     # 3. Load task config
     task_config_path = pathlib.Path(f"configs/tasks/{task}.yaml")
     if task_config_path.exists():
         with open(task_config_path) as f:
             task_config = yaml.safe_load(f)
         merged = deep_merge(merged, task_config)
-    
+
     # 4. Load experiment-specific config
     with open(config_path) as f:
         experiment_config = yaml.safe_load(f)
     merged = deep_merge(merged, experiment_config)
-    
+
     return merged
 
 
@@ -235,7 +231,7 @@ def main():
     optim_opts = config.get("optim_opts", {})
     scheduler_opts = config.get("scheduler_opts", {})
     metrics_opts = config.get("metrics_opts", {})
-    
+
     # Extract channel group selections from loader_opts
     landsat_channels = loader_opts.get("landsat_channels", True)
     dem_channels = loader_opts.get("dem_channels", True)

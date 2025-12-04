@@ -71,7 +71,7 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     slice_config.dem_dir = server.dem_dir
     slice_config.labels_dir = server.labels_dir
     slice_config.out_dir = f"{server.processed_data_path}/{slice_config.output_name}"
-    
+
     # Add velocity_dir if available
     if hasattr(server, "velocity_dir"):
         slice_config.velocity_dir = server.velocity_dir
@@ -94,9 +94,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
     # Load config with server paths
-    conf = load_config_with_server_paths(
-        "./configs/preprocess.yaml", args.server
-    )
+    conf = load_config_with_server_paths("./configs/preprocess.yaml", args.server)
 
     saved_df = pd.DataFrame(
         columns=[
@@ -156,7 +154,7 @@ if __name__ == "__main__":
     remove_and_create(conf.out_dir)
 
     band_names_metadata = None  # Capture from first image processing
-    
+
     with tqdm(total=1, desc="temp") as pbar:
         for split, meta in splits.items():
             means, stds, mins, maxs = [], [], [], []
@@ -182,11 +180,11 @@ if __name__ == "__main__":
                         saved_df.loc[len(saved_df.index)] = row
                     for row in skipped_rows:
                         skipped_df.loc[len(skipped_df.index)] = row
-                    
+
                     # Capture band names from first image
                     if band_names_metadata is None and band_names is not None:
                         band_names_metadata = band_names
-                    
+
                     pbar.update(1)
 
             means_agg = np.mean(np.asarray(means), axis=0)
