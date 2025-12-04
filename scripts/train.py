@@ -24,7 +24,7 @@ from glacier_mapping.lightning.best_model_callback import (
 
 # Import MLflow utilities
 try:
-    from glacier_mapping.utils.mlflow_utils import MLflowManager
+    import glacier_mapping.utils.mlflow_utils as mlflow_utils
 
     MLFLOW_AVAILABLE = True
 except ImportError as e:
@@ -122,7 +122,7 @@ def main():
     # Load server configuration (explicit, no defaults)
     servers_yaml_path = pathlib.Path("configs") / "servers.yaml"
     if MLFLOW_AVAILABLE:
-        server_config = MLflowManager.load_server_config(
+        server_config = mlflow_utils.load_server_config(
             str(servers_yaml_path), args.server
         )  # type: ignore[arg-type]
     else:
@@ -205,12 +205,12 @@ def main():
 
     # Generate MLflow experiment name and run name
     if mlflow_enabled and MLFLOW_AVAILABLE:
-        experiment_name = args.experiment_name or MLflowManager.categorize_experiment(
+        experiment_name = args.experiment_name or mlflow_utils.categorize_experiment(
             config
         )  # type: ignore[assignment]
-        run_name = MLflowManager.generate_run_name(base_run_name, args.server)  # type: ignore[assignment]
-        mlflow_params = MLflowManager.extract_mlflow_params(config, server_config)  # type: ignore[assignment]
-        mlflow_tags = MLflowManager.generate_run_tags(
+        run_name = mlflow_utils.generate_run_name(base_run_name, args.server)  # type: ignore[assignment]
+        mlflow_params = mlflow_utils.extract_mlflow_params(config, server_config)  # type: ignore[assignment]
+        mlflow_tags = mlflow_utils.generate_run_tags(
             config, server_config, str(config_path)
         )  # type: ignore[assignment]
     else:

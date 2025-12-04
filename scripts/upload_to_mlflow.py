@@ -6,12 +6,11 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-import yaml
 
 try:
-    from glacier_mapping.utils.mlflow_utils import MLflowManager
+    import glacier_mapping.utils.mlflow_utils as mlflow_utils
 
     MLFLOW_AVAILABLE = True
 except ImportError as e:
@@ -77,11 +76,11 @@ def load_run_config(run_dir: Path) -> Optional[Dict]:
 
 
 def detect_experiment_type(config: Dict) -> str:
-    """Detect experiment type from config using MLflowManager."""
+    """Detect experiment type from config using mlflow_utils."""
     if not MLFLOW_AVAILABLE:
         return "unknown"
 
-    return MLflowManager.categorize_experiment(config)
+    return mlflow_utils.categorize_experiment(config)
 
 
 def upload_single_run(run_dir: Path, tracking_uri: str, force: bool = False) -> bool:
@@ -137,7 +136,7 @@ def upload_single_run(run_dir: Path, tracking_uri: str, force: bool = False) -> 
         with mlflow.start_run(run_name=run_name) as run:
             # Log parameters
             params = (
-                MLflowManager.extract_mlflow_params(config, {})
+                mlflow_utils.extract_mlflow_params(config, {})
                 if MLFLOW_AVAILABLE
                 else {}
             )
