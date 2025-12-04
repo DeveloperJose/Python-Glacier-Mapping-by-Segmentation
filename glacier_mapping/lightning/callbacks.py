@@ -1,14 +1,36 @@
 """Custom callbacks for glacier mapping training."""
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-import torch
+import cv2
+import numpy as np
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, Callback
+import torch
+from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from tqdm import tqdm
 
-from glacier_mapping.model.visualize import make_eight_panel
+from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
+from glacier_mapping.model.visualize import (
+    build_binary_cmap,
+    build_cmap_from_mask_names,
+    calculate_slice_position,
+    label_to_color,
+    load_full_tiff_rgb,
+    make_context_image,
+    make_eight_panel,
+    make_error_overlay,
+    make_overlay,
+    make_rgb_preview,
+    make_tp_fp_fn_masks,
+)
+from glacier_mapping.utils import cleanup_gpu_memory
 import glacier_mapping.utils.logging as log
+from glacier_mapping.utils.prediction import (
+    calculate_binary_metrics,
+    get_probabilities,
+    predict_from_probs,
+)
 
 # Check if MLflow is available
 try:
@@ -20,27 +42,45 @@ except ImportError:
     MLFlowLogger = None  # type: ignore
 
 
-class GlacierVisualizationCallback(Callback):
-    """Callback for generating visualization samples during training."""
+class ValidationVisualizationCallback(Callback):
+    """Periodic validation visualizations using IoU-based selection.
+
+    Uses n-based thirds system: n=4 → 12 visualizations (4 top + 4 middle + 4 bottom).
+    Tracks same slices across epochs for consistent comparison.
+    """
 
     def __init__(
         self,
-        num_samples: int = 4,
+        viz_n: int = 4,
         log_every_n_epochs: int = 10,
+        selection: str = "iou",
         save_dir: Optional[str] = None,
+        image_dir: Optional[str] = None,
     ):
         """
-        Initialize visualization callback.
+        Initialize validation visualization callback.
 
         Args:
-            num_samples: Number of samples to visualize
+            viz_n: Number of samples per third (top, middle, bottom).
+                   Total visualizations = 3 * viz_n.
+                   Set to 0 to disable.
             log_every_n_epochs: How often to generate visualizations
+            selection: Selection method ("iou" or "random")
             save_dir: Directory to save visualizations
+            image_dir: Path to raw Landsat image TIFFs (from servers.yaml)
         """
         super().__init__()
-        self.num_samples = num_samples
+        self.viz_n = viz_n
         self.log_every_n_epochs = log_every_n_epochs
+        self.selection = selection
         self.save_dir = Path(save_dir) if save_dir else None
+        self.image_dir = Path(image_dir) if image_dir else None
+
+        # Track selected slices across epochs for consistency
+        self.selected_slice_paths: Optional[List[Path]] = None
+        self.slice_metadata: Dict[
+            Path, Tuple[int, int]
+        ] = {}  # {path: (tiff_num, slice_num)}
 
     def on_validation_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -49,132 +89,443 @@ class GlacierVisualizationCallback(Callback):
         if (trainer.current_epoch + 1) % self.log_every_n_epochs == 0:
             self._generate_visualizations(trainer, pl_module)
 
+    def _load_dataset_metadata(self, pl_module: pl.LightningModule):
+        """Load dataset metadata for context image generation."""
+        import json
+
+        import pandas as pd
+
+        # Get processed dataset directory from model
+        processed_dir = Path(getattr(pl_module, "processed_dir", "data/processed"))
+
+        if not processed_dir.exists():
+            log.warning(f"Processed directory not found: {processed_dir}")
+            self._image_index_to_filename = {}
+            self._window_size = (512, 512)
+            self._overlap = 64
+            self._tiff_cache = {}
+            self._dataset_metadata_loaded = True
+            return
+
+        # Load slice_meta.csv to map image index → filename
+        slice_meta_path = processed_dir / "slice_meta.csv"
+        if slice_meta_path.exists():
+            try:
+                slice_meta = pd.read_csv(slice_meta_path)
+                self._image_index_to_filename = {}
+                for _, row in slice_meta.iterrows():
+                    img_idx = int(row["Image"])
+                    filename = str(row["Landsat ID"])
+                    if img_idx not in self._image_index_to_filename:
+                        self._image_index_to_filename[img_idx] = filename
+                log.info(
+                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings"
+                )
+            except Exception as e:
+                log.warning(f"Failed to load slice_meta.csv: {e}")
+                self._image_index_to_filename = {}
+        else:
+            log.warning(f"slice_meta.csv not found: {slice_meta_path}")
+            self._image_index_to_filename = {}
+
+        # Load dataset_statistics.json for window_size/overlap
+        stats_path = processed_dir / "dataset_statistics.json"
+        if stats_path.exists():
+            try:
+                with open(stats_path) as f:
+                    stats = json.load(f)
+                    config = stats.get("config", {})
+                    self._window_size = tuple(config.get("window_size", [512, 512]))
+                    self._overlap = config.get("overlap", 64)
+                log.info(
+                    f"Loaded dataset config: window_size={self._window_size}, overlap={self._overlap}"
+                )
+            except Exception as e:
+                log.warning(f"Failed to load dataset_statistics.json: {e}")
+                self._window_size = (512, 512)
+                self._overlap = 64
+        else:
+            self._window_size = (512, 512)
+            self._overlap = 64
+
+        # Initialize TIFF cache
+        self._tiff_cache = {}
+        self._dataset_metadata_loaded = True
+
     def _generate_visualizations(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ):
         """Generate and save visualization samples."""
-        # Get a batch from validation dataloader
-        # Handle both single DataLoader and list of DataLoaders (PL 2.x compatibility)
-        val_dataloaders = trainer.val_dataloaders
-
-        if val_dataloaders is None:
-            log.warning("No validation dataloader available for visualization")
+        if self.viz_n < 1:
             return
 
-        # Extract first dataloader (handle both single and multiple cases)
-        if isinstance(val_dataloaders, list):
-            if len(val_dataloaders) == 0:
-                log.warning("No validation dataloader available for visualization")
-                return
-            val_dataloader = val_dataloaders[0]
-        else:
-            val_dataloader = val_dataloaders
+        # Get validation data directory
+        processed_dir = getattr(pl_module, "processed_dir", "data/processed")
+        val_dir = Path(processed_dir) / "val"  # type: ignore[arg-type]
 
-        batch = next(iter(val_dataloader))
+        if not val_dir.exists():
+            log.warning(f"Validation directory not found: {val_dir}")
+            return
 
-        x, y_onehot, y_int = batch
+        val_slices_all = sorted(val_dir.glob("tiff*"))
 
-        # Convert from NHWC to NCHW format (matching training_step/validation_step)
-        x = x.permute(0, 3, 1, 2)
-        y_onehot = y_onehot.permute(0, 3, 1, 2)
-        y_int = y_int.squeeze(-1)  # Remove last dimension: (N, H, W, 1) -> (N, H, W)
+        if not val_slices_all:
+            log.warning("No validation slices found")
+            return
 
-        # Move to correct device
-        device = pl_module.device
-        x = x.to(device)
-        y_onehot = y_onehot.to(device)
-        y_int = y_int.to(device)
+        # First epoch: select slices using IoU-based thirds
+        if self.selected_slice_paths is None:
+            num_samples = 3 * self.viz_n
+            if self.selection == "iou":
+                self.selected_slice_paths = self._select_by_iou_thirds(
+                    val_slices_all, pl_module, num_samples
+                )
+            else:  # random
+                self.selected_slice_paths = val_slices_all[:num_samples]
 
-        # Get model predictions
-        pl_module.eval()
-        with torch.no_grad():
-            y_hat = pl_module(x)
+            # Extract metadata for each selected slice
+            for path in self.selected_slice_paths:
+                tiff_num, slice_num = self._parse_slice_path(path)
+                self.slice_metadata[path] = (tiff_num, slice_num)
 
-        # Track saved paths for MLflow logging
-        saved_paths = []
+            log.info(
+                f"Selected {len(self.selected_slice_paths)} validation slices for tracking"
+            )
 
-        # Generate visualizations for first N samples
-        for i in range(min(self.num_samples, x.shape[0])):
-            # Extract single sample and convert to numpy (H, W, C) format
-            # x: (N, C, H, W) -> (H, W, C)
-            sample_x_np = x[i].permute(1, 2, 0).cpu().numpy()
+        # Generate visualizations for tracked slices
+        metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
+        threshold = metrics_opts.get("threshold", [0.5, 0.5])
+        class_names = getattr(pl_module, "class_names", ["background", "target"])
+        output_classes = getattr(pl_module, "output_classes", [1])
 
-            # y_int: (N, H, W) -> (H, W)
-            sample_y_np = y_int[i].cpu().numpy()
+        # Build colormap based on task type
+        if len(output_classes) == 1:  # Binary
+            cmap = build_binary_cmap(output_classes)
+        else:  # Multi-class
+            cmap = build_cmap_from_mask_names(class_names)
 
-            # y_hat: (N, C, H, W) -> (H, W) prediction
-            sample_pred_np = torch.argmax(y_hat[i], dim=0).cpu().numpy()
+        for slice_path in self.selected_slice_paths:
+            tiff_num, slice_num = self.slice_metadata[slice_path]
 
-            # Create and save 8-panel visualization
+            # Load data
+            x_full = np.load(slice_path)
+            y_true_raw = np.load(
+                slice_path.with_name(slice_path.name.replace("tiff", "mask"))
+            ).astype(np.uint8)
+
+            # Get predictions
+            probs = get_probabilities(pl_module, x_full)
+            y_pred = predict_from_probs(
+                probs, pl_module, threshold[0] if threshold else None
+            )
+
+            # Commented out: Confidence calculation (not currently used)
+            # if len(output_classes) == 1:  # Binary
+            #     conf = probs[:, :, 1]  # Foreground probability
+            # else:  # Multi-class
+            #     conf = np.max(probs, axis=-1)
+
+            # Prepare visualization masks
+            ignore = y_true_raw == 255
+
+            y_gt_vis = y_true_raw.copy()
+            y_pred_vis = y_pred.copy()
+
+            if len(output_classes) == 1:  # Binary
+                class_idx = output_classes[0]
+                y_gt_vis_binary = np.zeros_like(y_true_raw)
+                y_gt_vis_binary[y_true_raw == class_idx] = 1
+                y_gt_vis_binary[y_true_raw == 255] = 255
+                y_gt_vis = y_gt_vis_binary
+
+            y_pred_vis[ignore] = 255
+
+            # Create RGB visualizations
+            x_rgb = make_rgb_preview(x_full)
+
+            # Generate context image (full Landsat TIFF with slice location box)
+            context_rgb = None
+            tiff_filename = "unknown"  # Initialize for error messages
+            try:
+                # Load dataset metadata on first use
+                if not hasattr(self, "_dataset_metadata_loaded"):
+                    self._load_dataset_metadata(pl_module)
+
+                # Check if image_dir is available
+                if self.image_dir is None:
+                    raise ValueError("image_dir not provided to callback")
+
+                tiff_num, slice_num = self.slice_metadata[slice_path]
+
+                # Get Landsat TIFF filename from index mapping
+                if tiff_num not in self._image_index_to_filename:
+                    raise ValueError(f"Image index {tiff_num} not in slice metadata")
+
+                tiff_filename = self._image_index_to_filename[tiff_num]
+                tiff_path = self.image_dir / tiff_filename
+
+                if not tiff_path.exists():
+                    raise FileNotFoundError(f"Landsat TIFF not found: {tiff_path}")
+
+                # Load and cache TIFF
+                if tiff_num not in self._tiff_cache:
+                    self._tiff_cache[tiff_num] = load_full_tiff_rgb(str(tiff_path))
+
+                tiff_full_rgb = self._tiff_cache[tiff_num]
+
+                # Calculate slice position
+                tiff_shape = tiff_full_rgb.shape[:2]
+                row_start, col_start, row_end, col_end = calculate_slice_position(
+                    slice_num, tiff_shape, self._window_size, self._overlap
+                )
+
+                # Generate context with yellow box
+                context_rgb = make_context_image(
+                    tiff_full_rgb,
+                    row_start,
+                    col_start,
+                    row_end,
+                    col_end,
+                    target_size=(x_rgb.shape[1], x_rgb.shape[0]),
+                    box_color=(255, 255, 0),
+                )
+
+            except FileNotFoundError as e:
+                log.warning(f"Landsat TIFF not found: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Landsat TIFF missing:\n{tiff_filename}"
+                )
+            except ValueError as e:
+                log.warning(f"Context metadata error: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Metadata error:\n{str(e)[:40]}"
+                )
+            except Exception as e:
+                log.warning(f"Context generation failed: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Error:\n{str(e)[:40]}"
+                )
+
+            # Fallback if context is still None
+            if context_rgb is None:
+                context_rgb = make_error_overlay(x_rgb.shape[:2], "Context unavailable")
+
+            # Create overlay visualizations
+            pr_overlay_rgb = make_overlay(x_rgb, y_pred_vis, cmap, alpha=0.5)
+
+            # Commented out: Confidence and entropy maps (kept for future use)
+            # conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
+            # if len(output_classes) == 1 and probs.shape[-1] == 2:
+            #     entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+            # elif len(output_classes) > 1:
+            #     entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+            # else:
+            #     entropy_rgb = make_confidence_map(conf, invalid_mask=ignore)
+
+            # TP/FP/FN masks
+            tp_mask = (
+                (y_pred_vis == y_gt_vis)
+                & (~ignore)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
+            )
+            fp_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore)
+                & (y_pred_vis != 0)
+                & (y_pred_vis != 255)
+            )
+            fn_mask = (
+                (y_pred_vis != y_gt_vis)
+                & (~ignore)
+                & (y_gt_vis != 0)
+                & (y_gt_vis != 255)
+            )
+
+            tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
+
+            # Calculate metrics for title
+            metric_parts = []
+            if len(output_classes) == 1:  # Binary
+                target_class = output_classes[0]
+                P, R, iou, _, _, _ = calculate_binary_metrics(
+                    y_pred, y_true_raw, target_class, mask=ignore
+                )
+                target_class_name = class_names[target_class]
+                metric_parts.append(
+                    f"{target_class_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}"
+                )
+            else:  # Multi-class
+                for ci, cname in enumerate(class_names):
+                    if ci == 0:  # Skip background
+                        continue
+                    pred_c = (y_pred_vis == ci).astype(np.uint8)
+                    true_c = (y_gt_vis == ci).astype(np.uint8)
+                    tp_, fp_, fn_ = tp_fp_fn(
+                        torch.from_numpy(pred_c), torch.from_numpy(true_c)
+                    )
+                    P_val = precision(tp_, fp_, fn_)
+                    R_val = recall(tp_, fp_, fn_)
+                    I_val = IoU(tp_, fp_, fn_)
+                    metric_parts.append(
+                        f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
+                    )
+
+            title_text = f"VAL TIFF {tiff_num:04d}, Slice {slice_num:02d}"
+            metrics_text = title_text + " | " + " | ".join(metric_parts)
+
+            # Create composite visualization
+            composite = make_eight_panel(
+                x_rgb=x_rgb,
+                gt_rgb=label_to_color(y_gt_vis, cmap),
+                pr_rgb=label_to_color(y_pred_vis, cmap),
+                gt_overlay_rgb=context_rgb,  # Context image replaces GT overlay
+                pr_overlay_rgb=pr_overlay_rgb,
+                tp_rgb=tp_rgb,
+                fp_rgb=fp_rgb,
+                fn_rgb=fn_rgb,
+                metrics_text=metrics_text,
+            )
+
+            # Save to: val_visualizations/tiff_XXXX/slice_YY_epochZZZZ.png
             if self.save_dir:
-                # Structure: slice_XXXX/epochYYYY.png
-                slice_dir = self.save_dir / f"slice_{i:04d}"
-                slice_dir.mkdir(parents=True, exist_ok=True)
-                save_path = slice_dir / f"epoch{trainer.current_epoch + 1:04d}.png"
-
-                from matplotlib import pyplot as plt
-                from glacier_mapping.model.visualize import (
-                    make_rgb_preview,
-                    label_to_color,
-                    build_cmap,
+                tiff_dir = self.save_dir / f"tiff_{tiff_num:04d}"
+                tiff_dir.mkdir(parents=True, exist_ok=True)
+                out_path = (
+                    tiff_dir
+                    / f"slice_{slice_num:02d}_epoch{trainer.current_epoch + 1:04d}.png"
                 )
 
-                # Convert input to RGB preview
-                x_rgb = make_rgb_preview(sample_x_np)
-
-                # Build colormap for ground truth and prediction
-                cmap = build_cmap(
-                    num_classes=len(pl_module.output_classes),
-                    is_binary=(len(pl_module.output_classes) == 1),
-                    classname=pl_module.class_names[pl_module.output_classes[0]]
-                    if len(pl_module.output_classes) == 1
-                    else None,
-                )
-
-                # Convert labels to RGB
-                gt_rgb = label_to_color(sample_y_np, cmap)
-                pr_rgb = label_to_color(sample_pred_np, cmap)
-
-                # Create placeholder images for None values (black images with same size as x_rgb)
-                import numpy as np
-
-                placeholder = np.zeros_like(x_rgb, dtype=np.uint8)
-
-                viz = make_eight_panel(
-                    x_rgb=x_rgb,
-                    gt_rgb=gt_rgb,
-                    pr_rgb=pr_rgb,
-                    conf_rgb=placeholder,  # Placeholder for confidence map
-                    tp_rgb=placeholder,  # Placeholder for TP
-                    fp_rgb=placeholder,  # Placeholder for FP
-                    fn_rgb=placeholder,  # Placeholder for FN
-                    entropy_rgb=placeholder,  # Placeholder for entropy
-                    metrics_text=None,
-                )
-
-                plt.imshow(viz)
-                plt.savefig(save_path, dpi=150, bbox_inches="tight")
-                plt.close()
-
-                saved_paths.append((slice_dir, save_path))
-
-        # Log to MLflow
-        self._log_to_mlflow(trainer, saved_paths)
-
-    def _log_to_mlflow(self, trainer: pl.Trainer, saved_paths: list):
-        """Log saved visualizations to MLflow."""
-        for logger in trainer.loggers:
-            if isinstance(logger, MLFlowLogger):
                 try:
-                    for slice_dir, save_path in saved_paths:
-                        # Log individual PNG file
-                        logger.experiment.log_artifact(
-                            logger.run_id,
-                            str(save_path),
-                            artifact_path=f"slice_visualizations/{slice_dir.name}",
-                        )
+                    cv2.imwrite(
+                        str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
+                    )
                 except Exception as e:
-                    log.warning(f"Failed to log slice visualization to MLflow: {e}")
+                    log.error(f"Error saving validation visualization: {e}")
+
+        # GPU cleanup after visualization generation
+        cleanup_gpu_memory()
+
+        # Log to MLflow (if available)
+        if self.save_dir:
+            self._log_to_mlflow(trainer)
+
+    def _select_by_iou_thirds(
+        self, slice_paths: List[Path], pl_module, num_samples: int
+    ) -> List[Path]:
+        """Select slices using IoU-based thirds distribution."""
+        if num_samples < 3:
+            return slice_paths[:num_samples]
+
+        # Calculate IoU for each slice
+        slice_ious = []
+        output_classes = getattr(pl_module, "output_classes", [1])
+        metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
+        threshold = metrics_opts.get("threshold", [0.5, 0.5])  # type: ignore[arg-type]
+
+        log.info(f"Computing IoU for {len(slice_paths)} validation slices...")
+
+        for idx, x_path in enumerate(tqdm(slice_paths, desc="Val IoU computation")):
+            x = np.load(x_path)
+            y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[arg-type]
+
+            y_true_raw = np.load(
+                x_path.with_name(x_path.name.replace("tiff", "mask"))
+            ).astype(np.uint8)
+
+            ignore = y_true_raw == 255
+            if invalid_mask is not None:
+                ignore |= invalid_mask
+
+            # Calculate IoU
+            if len(output_classes) == 1:  # Binary
+                target_class = output_classes[0]
+                _, _, iou, _, _, _ = calculate_binary_metrics(
+                    y_pred, y_true_raw, target_class, mask=ignore
+                )
+            else:  # Multi-class
+                valid = ~ignore
+                y_pred_valid = y_pred[valid]
+                y_true_valid = y_true_raw[valid]
+
+                ious = []
+                for ci in range(len(output_classes)):
+                    label = ci
+                    p = (y_pred_valid == label).astype(np.uint8)
+                    t = (y_true_valid == label).astype(np.uint8)
+                    tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
+                    ious.append(IoU(tp_, fp_, fn_))
+                iou = np.mean(ious)
+
+            slice_ious.append((x_path, float(iou)))
+
+            if (idx + 1) % 20 == 0:
+                cleanup_gpu_memory(synchronize=False)
+
+        cleanup_gpu_memory()
+
+        # Sort by IoU (descending)
+        slice_ious.sort(key=lambda x: x[1], reverse=True)
+
+        # Split into thirds
+        k = num_samples // 3
+        remainder = num_samples % 3
+
+        top_k = k + (1 if remainder > 0 else 0)
+        bottom_k = k + (1 if remainder > 1 else 0)
+        middle_k = k
+
+        # Select slices
+        top_slices = [path for path, iou in slice_ious[:top_k]]
+        bottom_slices = [path for path, iou in slice_ious[-bottom_k:]]
+
+        middle_start = len(slice_ious) // 2 - middle_k // 2
+        middle_end = middle_start + middle_k
+        middle_slices = [path for path, iou in slice_ious[middle_start:middle_end]]
+
+        selected = top_slices + middle_slices + bottom_slices
+
+        log.info(f"Selected {len(selected)} validation slices by IoU:")
+        log.info(
+            f"  Top {top_k}:    {[f'{slice_ious[i][1]:.3f}' for i in range(min(top_k, len(slice_ious)))]}"
+        )
+        log.info(
+            f"  Middle {middle_k}: {[f'{slice_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(slice_ious) - middle_start))]}"
+        )
+        log.info(
+            f"  Bottom {bottom_k}: {[f'{slice_ious[len(slice_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(slice_ious)))]}"
+        )
+
+        return selected
+
+    def _parse_slice_path(self, filepath: Path) -> Tuple[int, int]:
+        """Extract (tiff_num, slice_num) from path."""
+        filename = filepath.name
+        parts = filename.replace(".npy", "").split("_")
+        tiff_num = int(parts[1])  # tiff_{NUM}_slice_{SLICE}
+        slice_num = int(parts[3])
+        return tiff_num, slice_num
+
+    def _log_to_mlflow(self, trainer: pl.Trainer):
+        """Log saved visualizations to MLflow."""
+        if not MLFLOW_AVAILABLE:
+            return
+
+        for logger in trainer.loggers:
+            if MLFLOW_AVAILABLE and isinstance(logger, MLFlowLogger):  # type: ignore[misc]
+                try:
+                    for tiff_dir in self.save_dir.glob("tiff_*"):  # type: ignore[union-attr]
+                        if tiff_dir.is_dir():
+                            for png_file in tiff_dir.glob("*.png"):
+                                logger.experiment.log_artifact(  # type: ignore[attr-defined]
+                                    logger.run_id,  # type: ignore[attr-defined]
+                                    str(png_file),
+                                    artifact_path=f"val_visualizations/{tiff_dir.name}",
+                                )
+                except Exception as e:
+                    log.warning(
+                        f"Failed to log validation visualization to MLflow: {e}"
+                    )
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):
@@ -262,7 +613,13 @@ class GlacierTrainingMonitor(Callback):
                 hasattr(pl_module, "best_val_loss")
                 and pl_module.best_val_loss is not None
             ):
-                improvement = pl_module.best_val_loss - val_loss
-                pl_module.log(
-                    "val_loss_improvement", improvement, on_step=False, on_epoch=True
-                )
+                # Type narrowing for best_val_loss
+                best_loss = pl_module.best_val_loss
+                if isinstance(best_loss, (int, float)):
+                    improvement = best_loss - float(val_loss)  # type: ignore[arg-type]
+                    pl_module.log(
+                        "val_loss_improvement",
+                        improvement,
+                        on_step=False,
+                        on_epoch=True,
+                    )

@@ -1,0 +1,8 @@
+# Gen3 Clean Ice baseline - Bilbo (no physics)
+# For comparison with physics-enabled model
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: ci_base_gen3
+
+loader_opts:
+  physics_channels: false

@@ -14,7 +14,7 @@ desktop:
   processed_data_path: /home/devj/local-debian/datasets/HKH
   # Training defaults
   batch_size: 8
-  epochs: 500
+  epochs: 150
 
 bilbo:
   hostname: bilbo
@@ -30,7 +30,7 @@ bilbo:
   processed_data_path: /home/jperez/datasets/HKH
   # Training defaults
   batch_size: 32
-  epochs: 500
+  epochs: 150
 
 frodo:
   hostname: frodo
@@ -46,4 +46,4 @@ frodo:
   processed_data_path: /home/jperez/datasets/HKH
   # Training defaults
   batch_size: 16
-  epochs: 500
+  epochs: 150

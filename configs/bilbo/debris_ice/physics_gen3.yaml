@@ -1,0 +1,8 @@
+# Gen3 Debris Ice with physics channels - Bilbo
+# Best physics config from Gen1: phys64_s1 (64m resolution, 1.0 scale)
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2_phys64_s1
+  run_name: dci_physics_gen3
+
+loader_opts:
+  physics_channels: true

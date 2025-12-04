@@ -14,3 +14,4 @@ add_ndsi: True
 add_hsv: True
 physics_res: None  # 64 or int or "full" or None
 physics_scale: 1  # float between (0, 1]
+save_skipped_visualizations: false  # Save PNG images of filtered slices (takes lots of disk space)

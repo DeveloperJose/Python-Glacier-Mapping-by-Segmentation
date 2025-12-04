@@ -5,16 +5,17 @@
 training_opts:
   dataset_name: "nameless_run"  # Default run name (override in experiment configs)
   run_name: ""  # Optional run identifier (appended to dataset_name)
-  epochs: 500
+  epochs: 150  # Reduced from 500 based on Gen1/Gen2 analysis (best models converge at 130-140)
   fine_tune: false
   find_lr: false
-  early_stopping: 100  # Epochs to wait for improvement before stopping
-  # Slice visualizations (validation batch samples, every N epochs)
-  num_slice_viz: 12  # 1+ to generate, 0 or less to skip
-  slice_viz_every_n_epochs: 10
-  # Full-tile evaluation (on best model only)
-  run_full_eval: true  # Run full-tile test set evaluation
-  num_full_viz: 12  # 1+ to generate PNGs, 0 or less for metrics only
+  early_stopping: 75  # Reduced from 100 to prevent overfitting
+  # Validation visualizations (periodic, every N epochs)
+  val_viz_n: 4  # Number per third (top, middle, bottom). n=4 → 12 total (4+4+4). 0=disable
+  val_viz_every_n_epochs: 10
+  val_viz_selection: "iou"  # Selection method: "iou" or "random"
+  # Test evaluation (on best model only)
+  run_test_eval: true  # Run test set evaluation on best model
+  test_eval_n: 4  # Number per third for visualization. n=4 → 12 total (4+4+4). 0=metrics only
 
 loader_opts:
   batch_size: 16  # Default batch size (can be overridden by server config or experiment)

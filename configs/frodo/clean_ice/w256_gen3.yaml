@@ -1,0 +1,5 @@
+# Gen3 Clean Ice w256 variant - Frodo
+# Tests smaller window size (faster training, slightly lower performance expected)
+training_opts:
+  dataset_name: bibek_w256_o64_f1_v2
+  run_name: ci_w256_gen3

@@ -1,0 +1,5 @@
+# Gen3 Clean Ice baseline - Frodo
+# Uses optimal settings from Gen1/Gen2 analysis: w512, o64, f1
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: ci_base_gen3

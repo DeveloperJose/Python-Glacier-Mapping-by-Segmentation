@@ -17,10 +17,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
-from glacier_mapping.lightning.callbacks import GlacierVisualizationCallback
-from glacier_mapping.lightning.best_model_callback import (
-    BestModelFullEvaluationCallback,
-)
+from glacier_mapping.lightning.callbacks import ValidationVisualizationCallback
+from glacier_mapping.lightning.best_model_callback import TestEvaluationCallback
 
 # Import MLflow utilities
 try:
@@ -193,10 +191,10 @@ def main():
         help="Disable all output (checkpoints, logs, config). Used for Ray hyperparameter search.",
     )
     parser.add_argument(
-        "--skip-full-eval",
+        "--skip-test-eval",
         action="store_true",
         default=False,
-        help="Skip full-tile test evaluation (overrides config)",
+        help="Skip test set evaluation (overrides config)",
     )
 
     args = parser.parse_args()
@@ -456,24 +454,28 @@ def main():
                 f"✓ Early stopping enabled (patience={early_stopping_patience} epochs)"
             )
 
-        # Slice visualization callback (only if output enabled and num >= 1)
-        num_slice_viz = training_opts.get("num_slice_viz", 4)
-        if num_slice_viz >= 1:
+        # Validation visualization callback (only if output enabled and viz_n >= 1)
+        val_viz_n = training_opts.get("val_viz_n", 4)
+        if val_viz_n >= 1:
             callbacks.append(
-                GlacierVisualizationCallback(
-                    num_samples=num_slice_viz,
-                    log_every_n_epochs=training_opts.get(
-                        "slice_viz_every_n_epochs", 10
-                    ),
-                    save_dir=f"{output_dir}/{run_name}/slice_visualizations",
+                ValidationVisualizationCallback(
+                    viz_n=val_viz_n,
+                    log_every_n_epochs=training_opts.get("val_viz_every_n_epochs", 10),
+                    selection=training_opts.get("val_viz_selection", "iou"),
+                    save_dir=f"{output_dir}/{run_name}/val_visualizations",
+                    image_dir=server_config.get("image_dir"),
                 )
             )
 
-    # Full-tile evaluation (runs even with --no-output for metrics, but no PNGs)
-    run_full_eval = training_opts.get("run_full_eval", True) and not args.skip_full_eval
-    if run_full_eval:
-        num_full_viz = training_opts.get("num_full_viz", 4) if not args.no_output else 0
-        callbacks.append(BestModelFullEvaluationCallback(num_samples=num_full_viz))
+    # Test evaluation (runs even with --no-output for metrics, but no PNGs)
+    run_test_eval = training_opts.get("run_test_eval", True) and not args.skip_test_eval
+    if run_test_eval:
+        test_eval_n = training_opts.get("test_eval_n", 4) if not args.no_output else 0
+        callbacks.append(
+            TestEvaluationCallback(
+                viz_n=test_eval_n, image_dir=server_config.get("image_dir")
+            )
+        )
 
     if not callbacks:
         print("No callbacks enabled")

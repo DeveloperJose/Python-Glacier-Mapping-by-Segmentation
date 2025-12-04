@@ -271,7 +271,7 @@ def get_tiff_np(
     return tiff_np
 
 
-def save_slices(filenum, fname, labels, savepath, **conf):
+def save_slices(filenum, fname, labels, savepath, save_skipped_visualizations=False, **conf):
     tiff_fname = pathlib.Path(conf["image_dir"]) / fname
     dem_fname = pathlib.Path(conf["dem_dir"]) / fname
 
@@ -323,7 +323,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
             slice = temp
         return slice
 
-    def filter_percentage(slice, percentage, type="mask", name="noname", image=None):
+    def filter_percentage(slice, percentage, type="mask", name="noname", image=None, save_visualization=False):
         if type == "image":
             return True
 
@@ -340,18 +340,20 @@ def save_slices(filenum, fname, labels, savepath, **conf):
         frac = num_labels / num_valid
 
         if frac < percentage:
-            ci = np.sum(slice == 1)
-            dci = np.sum(slice == 2)
-            title = f"CI={ci}, DCI={dci}, labelled={num_labels}, valid={num_valid}, frac={frac:.6f}"
+            # Only save visualization PNG if flag is enabled
+            if save_visualization:
+                ci = np.sum(slice == 1)
+                dci = np.sum(slice == 2)
+                title = f"CI={ci}, DCI={dci}, labelled={num_labels}, valid={num_valid}, frac={frac:.6f}"
 
-            out_path = pathlib.Path(
-                conf["out_dir"],
-                "skipped_slices",
-                f"{name}_{os.path.basename(savepath)}.png",
-            )
-            if not out_path.parent.exists():
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-            plot_image_and_mask(image, slice, title, out_path)
+                out_path = pathlib.Path(
+                    conf["out_dir"],
+                    "skipped_slices",
+                    f"{name}_{os.path.basename(savepath)}.png",
+                )
+                if not out_path.parent.exists():
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                plot_image_and_mask(image, slice, title, out_path)
 
             return False
 
@@ -452,6 +454,7 @@ def save_slices(filenum, fname, labels, savepath, **conf):
                 type="mask",
                 name=f"discarded_{filenum}_slice_{slicenum}",
                 image=rgb_preview,
+                save_visualization=save_skipped_visualizations,
             )
 
             if not keep:

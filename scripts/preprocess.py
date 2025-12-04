@@ -87,6 +87,11 @@ if __name__ == "__main__":
         choices=["desktop", "bilbo", "frodo"],
         help="Server name (must be specified explicitly)",
     )
+    parser.add_argument(
+        "--save-skipped-visualizations",
+        action="store_true",
+        help="Save PNG visualizations of skipped slices (overrides config file)",
+    )
     args = parser.parse_args()
 
     random.seed(42)
@@ -95,6 +100,13 @@ if __name__ == "__main__":
 
     # Load config with server paths
     conf = load_config_with_server_paths("./configs/preprocess.yaml", args.server)
+
+    # Override config with CLI argument if provided
+    if args.save_skipped_visualizations:
+        conf.save_skipped_visualizations = True
+    else:
+        # Use config value, default to False if not specified
+        conf.save_skipped_visualizations = conf.get("save_skipped_visualizations", False)
 
     saved_df = pd.DataFrame(
         columns=[
@@ -160,7 +172,11 @@ if __name__ == "__main__":
             means, stds, mins, maxs = [], [], [], []
             savepath = Path(conf["out_dir"]) / split
             fn_process = partial(
-                fn.save_slices, labels=labels, savepath=savepath, **conf
+                fn.save_slices, 
+                labels=labels, 
+                savepath=savepath,
+                save_skipped_visualizations=conf.save_skipped_visualizations,
+                **conf
             )
             remove_and_create(savepath)
 

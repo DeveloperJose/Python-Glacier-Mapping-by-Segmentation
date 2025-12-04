@@ -1,4 +1,4 @@
-"""Best-model full evaluation callback for glacier mapping."""
+"""Test set evaluation callback for glacier mapping (triggered on best model)."""
 
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -14,11 +14,15 @@ from tqdm import tqdm
 
 from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.visualize import (
+    build_binary_cmap,
     build_cmap_from_mask_names,
+    calculate_slice_position,
     label_to_color,
-    make_confidence_map,
+    load_full_tiff_rgb,
+    make_context_image,
     make_eight_panel,
-    make_entropy_map,
+    make_error_overlay,
+    make_overlay,
     make_rgb_preview,
     make_tp_fp_fn_masks,
 )
@@ -39,14 +43,27 @@ except ImportError:
     MLFLOW_AVAILABLE = False
 
 
-class BestModelFullEvaluationCallback(Callback):
-    """Full-tile evaluation triggered only on best model improvement."""
+class TestEvaluationCallback(Callback):
+    """Test set evaluation triggered on best model improvement.
 
-    def __init__(self, num_samples: int = 4):
+    Uses n-based thirds system: n=4 → 12 visualizations (4 top + 4 middle + 4 bottom).
+    """
+
+    def __init__(self, viz_n: int = 4, image_dir: str | None = None):
+        """
+        Initialize test evaluation callback.
+
+        Args:
+            viz_n: Number of samples per third (top, middle, bottom).
+                   Total visualizations = 3 * viz_n.
+                   Set to 0 to compute metrics only (no visualizations).
+            image_dir: Path to raw Landsat image TIFFs (from servers.yaml)
+        """
         super().__init__()
-        self.num_samples = num_samples
+        self.viz_n = viz_n
+        self.image_dir = Path(image_dir) if image_dir else None
         self.best_val_loss = float("inf")
-        self.best_full_metrics = {}  # Track best full-tile metrics
+        self.best_test_metrics = {}  # Track best test metrics
 
     def on_validation_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
@@ -62,11 +79,72 @@ class BestModelFullEvaluationCallback(Callback):
         if current_val_loss < self.best_val_loss:
             self.best_val_loss = current_val_loss
             log.info(f"🎯 New best model detected (val_loss: {current_val_loss:.4f})")
-            log.info("Running full-tile evaluation...")
+            log.info("Running test set evaluation...")
             self._run_full_evaluation(trainer, pl_module)
 
+    def _load_dataset_metadata(self, pl_module: pl.LightningModule):
+        """Load dataset metadata for context image generation."""
+        import json
+
+        # Get processed dataset directory from model
+        processed_dir = Path(getattr(pl_module, "processed_dir", "data/processed"))
+
+        if not processed_dir.exists():
+            log.warning(f"Processed directory not found: {processed_dir}")
+            self._image_index_to_filename = {}
+            self._window_size = (512, 512)
+            self._overlap = 64
+            self._tiff_cache = {}
+            self._dataset_metadata_loaded = True
+            return
+
+        # Load slice_meta.csv to map image index → filename
+        slice_meta_path = processed_dir / "slice_meta.csv"
+        if slice_meta_path.exists():
+            try:
+                slice_meta = pd.read_csv(slice_meta_path)
+                self._image_index_to_filename = {}
+                for _, row in slice_meta.iterrows():
+                    img_idx = int(row["Image"])
+                    filename = str(row["Landsat ID"])
+                    if img_idx not in self._image_index_to_filename:
+                        self._image_index_to_filename[img_idx] = filename
+                log.info(
+                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings"
+                )
+            except Exception as e:
+                log.warning(f"Failed to load slice_meta.csv: {e}")
+                self._image_index_to_filename = {}
+        else:
+            log.warning(f"slice_meta.csv not found: {slice_meta_path}")
+            self._image_index_to_filename = {}
+
+        # Load dataset_statistics.json for window_size/overlap
+        stats_path = processed_dir / "dataset_statistics.json"
+        if stats_path.exists():
+            try:
+                with open(stats_path) as f:
+                    stats = json.load(f)
+                    config = stats.get("config", {})
+                    self._window_size = tuple(config.get("window_size", [512, 512]))
+                    self._overlap = config.get("overlap", 64)
+                log.info(
+                    f"Loaded dataset config: window_size={self._window_size}, overlap={self._overlap}"
+                )
+            except Exception as e:
+                log.warning(f"Failed to load dataset_statistics.json: {e}")
+                self._window_size = (512, 512)
+                self._overlap = 64
+        else:
+            self._window_size = (512, 512)
+            self._overlap = 64
+
+        # Initialize TIFF cache
+        self._tiff_cache = {}
+        self._dataset_metadata_loaded = True
+
     def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
-        """Full-tile evaluation using Lightning module directly."""
+        """Test set evaluation using Lightning module directly."""
         # Create output directory - use checkpoint directory as base
         checkpoint_callback = trainer.checkpoint_callback
         if checkpoint_callback is not None and hasattr(checkpoint_callback, "dirpath"):
@@ -79,7 +157,7 @@ class BestModelFullEvaluationCallback(Callback):
                 else Path(".")
             )
 
-        output_dir = base_dir / "full_evaluations"
+        output_dir = base_dir / "test_evaluations"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Get test tiles
@@ -88,12 +166,14 @@ class BestModelFullEvaluationCallback(Callback):
         test_tiles_all = sorted(data_dir.glob("tiff*"))
 
         if not test_tiles_all:
-            log.warning("No test tiles found for full-tile evaluation")
+            log.warning("No test tiles found for test evaluation")
             return
 
         # Select informative tiles for visualization and cache predictions
+        # Calculate total samples: 3 * viz_n (top + middle + bottom)
+        num_samples = 3 * self.viz_n if self.viz_n > 0 else 0
         test_tiles, tile_rank_map, prediction_cache = self._select_informative_tiles(
-            test_tiles_all, pl_module, self.num_samples
+            test_tiles_all, pl_module, num_samples
         )
 
         # Setup metrics with proper type handling
@@ -113,7 +193,7 @@ class BestModelFullEvaluationCallback(Callback):
         fn_sum = np.zeros(n_classes)
 
         # Evaluate all test tiles (reuse cached predictions when available)
-        for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Full-tile evaluation")):
+        for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Test evaluation")):
             # Use cached prediction if available, otherwise compute
             if x_path in prediction_cache:
                 y_pred, invalid_mask = prediction_cache[x_path]
@@ -222,7 +302,7 @@ class BestModelFullEvaluationCallback(Callback):
             if (idx + 1) % 20 == 0:
                 cleanup_gpu_memory(synchronize=False)
 
-        # GPU cleanup after full-tile evaluation to prevent OOM
+        # GPU cleanup after test evaluation to prevent OOM
         cleanup_gpu_memory()
 
         # Create CSV metrics subdirectory and save with new naming
@@ -243,68 +323,64 @@ class BestModelFullEvaluationCallback(Callback):
             rec = recall(tp_, fp_, fn_)
             iou = IoU(tp_, fp_, fn_)
 
-            pl_module.log(
-                f"full_test_{cname}_precision", prec, on_step=False, on_epoch=True
-            )
-            pl_module.log(
-                f"full_test_{cname}_recall", rec, on_step=False, on_epoch=True
-            )
-            pl_module.log(f"full_test_{cname}_iou", iou, on_step=False, on_epoch=True)
+            pl_module.log(f"test_{cname}_precision", prec, on_step=False, on_epoch=True)
+            pl_module.log(f"test_{cname}_recall", rec, on_step=False, on_epoch=True)
+            pl_module.log(f"test_{cname}_iou", iou, on_step=False, on_epoch=True)
 
-            # Track best full-tile metrics (IoU as main comparison metric)
-            if cname in self.best_full_metrics:
-                best_iou = self.best_full_metrics[cname].get("iou", float("-inf"))
+            # Track best test metrics (IoU as main comparison metric)
+            if cname in self.best_test_metrics:
+                best_iou = self.best_test_metrics[cname].get("iou", float("-inf"))
                 if iou > best_iou:
-                    self.best_full_metrics[cname] = {
+                    self.best_test_metrics[cname] = {
                         "iou": iou,
                         "precision": prec,
                         "recall": rec,
                     }
                     # Log new best metrics
                     pl_module.log(
-                        f"best_full_test_{cname}_iou", iou, on_step=False, on_epoch=True
+                        f"best_test_{cname}_iou", iou, on_step=False, on_epoch=True
                     )
                     pl_module.log(
-                        f"best_full_test_{cname}_precision",
+                        f"best_test_{cname}_precision",
                         prec,
                         on_step=False,
                         on_epoch=True,
                     )
                     pl_module.log(
-                        f"best_full_test_{cname}_recall",
+                        f"best_test_{cname}_recall",
                         rec,
                         on_step=False,
                         on_epoch=True,
                     )
             else:
                 # Initialize tracking for this class
-                self.best_full_metrics[cname] = {
+                self.best_test_metrics[cname] = {
                     "iou": iou,
                     "precision": prec,
                     "recall": rec,
                 }
                 # Log initial best metrics
                 pl_module.log(
-                    f"best_full_test_{cname}_iou", iou, on_step=False, on_epoch=True
+                    f"best_test_{cname}_iou", iou, on_step=False, on_epoch=True
                 )
                 pl_module.log(
-                    f"best_full_test_{cname}_precision",
+                    f"best_test_{cname}_precision",
                     prec,
                     on_step=False,
                     on_epoch=True,
                 )
                 pl_module.log(
-                    f"best_full_test_{cname}_recall", rec, on_step=False, on_epoch=True
+                    f"best_test_{cname}_recall", rec, on_step=False, on_epoch=True
                 )
 
-        # Generate visualizations for selected tiles (only if num_samples >= 1)
-        if self.num_samples >= 1:
+        # Generate visualizations for selected tiles (only if viz_n >= 1)
+        if self.viz_n >= 1 and num_samples >= 1:
             log.info(
-                f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles..."
+                f"Generating visualizations for {min(num_samples, len(test_tiles))} tiles (n={self.viz_n})..."
             )
             self._generate_visualizations(
                 pl_module,
-                test_tiles[: self.num_samples],
+                test_tiles[:num_samples],
                 output_dir,
                 trainer.current_epoch + 1,
                 tile_rank_map,
@@ -338,8 +414,8 @@ class BestModelFullEvaluationCallback(Callback):
                             artifact_path="csv_metrics",
                         )
 
-                    # Log tile directories without double nesting
-                    for tile_dir in output_dir.glob("fulltile_*"):
+                    # Log TIFF directories without double nesting
+                    for tile_dir in output_dir.glob("tiff_*"):
                         if tile_dir.is_dir():
                             logger.experiment.log_artifact(
                                 logger.run_id,
@@ -349,7 +425,7 @@ class BestModelFullEvaluationCallback(Callback):
 
                 # TensorBoard logging
                 elif isinstance(logger, TensorBoardLogger):
-                    for tile_dir in output_dir.glob("fulltile_*"):
+                    for tile_dir in output_dir.glob("tiff_*"):
                         if tile_dir.is_dir():
                             for png_file in tile_dir.glob("*.png"):
                                 # Load PNG and convert to tensor for TensorBoard
@@ -362,7 +438,7 @@ class BestModelFullEvaluationCallback(Callback):
                                     / 255.0
                                 )
                                 logger.experiment.add_image(
-                                    f"evaluation/{tile_dir.name}/{png_file.stem}",
+                                    f"test_eval/{tile_dir.name}/{png_file.stem}",
                                     img_tensor,
                                     global_step=epoch,
                                     dataformats="CHW",
@@ -396,8 +472,8 @@ class BestModelFullEvaluationCallback(Callback):
                 - prediction_cache: {Path: (y_pred, invalid_mask)} for reuse
         """
         # Use lightweight selection for small num_samples to avoid GPU OOM
-        # Full IoU computation only for comprehensive visualization (12+ tiles)
-        if num_samples < 12:
+        # Full IoU computation only for comprehensive visualization (num_samples >= 12)
+        if num_samples > 0 and num_samples < 12:
             log.info(
                 f"Using class-pixel selection for {num_samples} tiles (lightweight mode)"
             )
@@ -534,6 +610,34 @@ class BestModelFullEvaluationCallback(Callback):
         except (ValueError, IndexError) as e:
             raise ValueError(f"Could not extract TIFF number from {filename}: {e}")
 
+    def _extract_slice_number(self, filepath: Path) -> int:
+        """Extract slice number from filename pattern tiff_{NUM}_slice_{SLICE}.npy
+
+        Args:
+            filepath: Path to tiff file
+
+        Returns:
+            Slice number as integer
+
+        Raises:
+            ValueError: If slice number cannot be extracted
+        """
+        # Pattern: tiff_{NUMBER}_slice_{SLICE}.npy
+        # Example: tiff_21_slice_17.npy -> 17
+        filename = filepath.name
+        if not filename.startswith("tiff_"):
+            raise ValueError(f"Filename does not start with 'tiff_': {filename}")
+
+        parts = filename.replace(".npy", "").split("_")
+        if len(parts) < 4:
+            raise ValueError(f"Unexpected filename format: {filename}")
+
+        try:
+            slice_num = int(parts[3])  # Index 3 = slice number
+            return slice_num
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Could not extract slice number from {filename}: {e}")
+
     def _select_by_class_pixels(
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
     ) -> List[Path]:
@@ -577,7 +681,11 @@ class BestModelFullEvaluationCallback(Callback):
         class_names = getattr(pl_module, "class_names", ["background", "target"])
         output_classes = getattr(pl_module, "output_classes", [1])
 
-        cmap = build_cmap_from_mask_names(class_names)
+        # Build colormap based on task type
+        if len(output_classes) == 1:  # Binary
+            cmap = build_binary_cmap(output_classes)
+        else:  # Multi-class
+            cmap = build_cmap_from_mask_names(class_names)
 
         for idx, x_path in enumerate(test_tiles):
             # Extract TIFF number from filename for consistent naming
@@ -604,11 +712,11 @@ class BestModelFullEvaluationCallback(Callback):
                     probs, pl_module, threshold[0] if threshold else None
                 )
 
-            # Get confidence for visualization
-            if len(output_classes) == 1:  # Binary
-                conf = probs[:, :, 1]  # Foreground probability
-            else:  # Multi-class
-                conf = np.max(probs, axis=-1)
+            # Commented out: Confidence calculation (not currently used)
+            # if len(output_classes) == 1:  # Binary
+            #     conf = probs[:, :, 1]  # Foreground probability
+            # else:  # Multi-class
+            #     conf = np.max(probs, axis=-1)
 
             # Generate 8-panel visualization
             ignore = y_true_raw == 255
@@ -635,19 +743,91 @@ class BestModelFullEvaluationCallback(Callback):
 
             x_rgb = make_rgb_preview(x_full)
 
-            # Confidence / entropy
-            conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
-            if len(output_classes) == 1:  # Binary
-                # For binary, reshape probs to (H, W, 2) for entropy calculation
-                if probs.shape[-1] == 2:
-                    entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
-                else:
-                    # Handle case where probs might be in different format
-                    entropy_rgb = make_confidence_map(
-                        conf, invalid_mask=ignore
-                    )  # Fallback
-            else:  # Multi-class
-                entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+            # Generate context image (full Landsat TIFF with slice location box)
+            context_rgb = None
+            tiff_filename = "unknown"  # Initialize for error messages
+            try:
+                # Load dataset metadata on first use
+                if not hasattr(self, "_dataset_metadata_loaded"):
+                    self._load_dataset_metadata(pl_module)
+
+                # Check if image_dir is available
+                if self.image_dir is None:
+                    raise ValueError("image_dir not provided to callback")
+
+                # Extract tiff and slice numbers from path
+                tiff_num = self._extract_tiff_number(x_path)
+                slice_num = self._extract_slice_number(x_path)
+
+                # Get Landsat TIFF filename from index mapping
+                if tiff_num not in self._image_index_to_filename:
+                    raise ValueError(f"Image index {tiff_num} not in slice metadata")
+
+                tiff_filename = self._image_index_to_filename[tiff_num]
+                tiff_path = self.image_dir / tiff_filename
+
+                if not tiff_path.exists():
+                    raise FileNotFoundError(f"Landsat TIFF not found: {tiff_path}")
+
+                # Load and cache TIFF
+                if tiff_num not in self._tiff_cache:
+                    self._tiff_cache[tiff_num] = load_full_tiff_rgb(str(tiff_path))
+
+                tiff_full_rgb = self._tiff_cache[tiff_num]
+
+                # Calculate slice position
+                tiff_shape = tiff_full_rgb.shape[:2]
+                row_start, col_start, row_end, col_end = calculate_slice_position(
+                    slice_num, tiff_shape, self._window_size, self._overlap
+                )
+
+                # Generate context with yellow box
+                context_rgb = make_context_image(
+                    tiff_full_rgb,
+                    row_start,
+                    col_start,
+                    row_end,
+                    col_end,
+                    target_size=(x_rgb.shape[1], x_rgb.shape[0]),
+                    box_color=(255, 255, 0),
+                )
+
+            except FileNotFoundError as e:
+                log.warning(f"Landsat TIFF not found: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Landsat TIFF missing:\n{tiff_filename}"
+                )
+            except ValueError as e:
+                log.warning(f"Context metadata error: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Metadata error:\n{str(e)[:40]}"
+                )
+            except Exception as e:
+                log.warning(f"Context generation failed: {e}")
+                context_rgb = make_error_overlay(
+                    x_rgb.shape[:2], f"Error:\n{str(e)[:40]}"
+                )
+
+            # Fallback if context is still None
+            if context_rgb is None:
+                context_rgb = make_error_overlay(x_rgb.shape[:2], "Context unavailable")
+
+            # Create overlay visualizations
+            pr_overlay_rgb = make_overlay(x_rgb, y_pred_vis, cmap, alpha=0.5)
+
+            # Commented out: Confidence and entropy maps (kept for future use)
+            # conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
+            # if len(output_classes) == 1:  # Binary
+            #     # For binary, reshape probs to (H, W, 2) for entropy calculation
+            #     if probs.shape[-1] == 2:
+            #         entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
+            #     else:
+            #         # Handle case where probs might be in different format
+            #         entropy_rgb = make_confidence_map(
+            #             conf, invalid_mask=ignore
+            #         )  # Fallback
+            # else:  # Multi-class
+            #     entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
 
             # TP / FP / FN masks
             tp_mask = (
@@ -708,32 +888,39 @@ class BestModelFullEvaluationCallback(Callback):
                         f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
                     )
 
-            # Add rank information if available
-            rank_text = ""
+            # Extract slice number for title
+            slice_num = self._extract_slice_number(x_path)
+
+            # Build title with TIFF, slice, and rank information
+            title_parts = [f"TIFF {tiff_num:04d}, Slice {slice_num:02d}"]
             if x_path in tile_rank_map:
                 rank = tile_rank_map[x_path]
-                rank_text = f"Rank: {rank}/{total_tiles} | "
+                title_parts.append(f"Rank {rank}/{total_tiles}")
 
-            metrics_text = rank_text + " | ".join(metric_string_parts)
+            title_text = " | ".join(title_parts)
+            metrics_text = title_text + " | " + " | ".join(metric_string_parts)
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
                 gt_rgb=label_to_color(y_gt_vis, cmap),
                 pr_rgb=label_to_color(y_pred_vis, cmap),
-                conf_rgb=conf_rgb,
+                gt_overlay_rgb=context_rgb,  # Context image replaces GT overlay
+                pr_overlay_rgb=pr_overlay_rgb,
                 tp_rgb=tp_rgb,
                 fp_rgb=fp_rgb,
                 fn_rgb=fn_rgb,
-                entropy_rgb=entropy_rgb,
                 metrics_text=metrics_text,
             )
 
-            # New structure: fulltile_XXXX/epochYYYY.png (XXXX = actual TIFF number)
-            tile_dir = output_dir / f"fulltile_{tiff_num:04d}"
+            # Extract slice number from filename (tiff_XX_slice_YY.npy)
+            slice_num = self._extract_slice_number(x_path)
+
+            # New structure: tiff_XXXX/slice_YY_epochZZZZ.png
+            tile_dir = output_dir / f"tiff_{tiff_num:04d}"
             tile_dir.mkdir(parents=True, exist_ok=True)
-            out_path = tile_dir / f"epoch{epoch:04d}.png"
+            out_path = tile_dir / f"slice_{slice_num:02d}_epoch{epoch:04d}.png"
             log.debug(
-                f"Saving visualization for TIFF {tiff_num:04d} ({x_path.name}) to: {out_path}"
+                f"Saving visualization for TIFF {tiff_num:04d}, Slice {slice_num} ({x_path.name}) to: {out_path}"
             )
             try:
                 success = cv2.imwrite(
