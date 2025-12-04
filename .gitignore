@@ -4,13 +4,13 @@ netcdf4-glacier-code/
 AGENTS**
 CLAUDE**
 
-**output**
-**outputs**
-**run**
-**runs**
-**tmp**
-**temp**
-**debug**
+**output/**
+**outputs/**
+**run/**
+**runs/**
+**tmp/**
+**temp/**
+**debug/**
 .ruff_cache/
 .python-version
 .vscode

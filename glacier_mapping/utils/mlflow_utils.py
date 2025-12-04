@@ -51,34 +51,34 @@ class MLflowManager:
         loss_opts = config.get("loss_opts", {})
 
         # Physics experiments: use channels beyond index 15 (physics channels start at 16)
-        if any(ch >= 16 for ch in use_channels):
-            if output_classes == [1]:
-                return "physics_ci"
-            elif output_classes == [2]:
-                return "physics_debris"
+        # if any(ch >= 16 for ch in use_channels):
+        #     if output_classes == [1]:
+        #         return "physics_ci"
+        #     elif output_classes == [2]:
+        #         return "physics_debris"
 
         # Baseline experiments
         if output_classes == [1]:
-            return "baseline_ci"
+            return "clean_ice"
         elif output_classes == [2]:
-            return "baseline_debris"
+            return "debris_ice"
         elif output_classes == [0, 1, 2]:
-            return "baseline_multiclass"
+            return "multi_class"
 
         # Architecture variations (check model parameters)
         net_depth = model_args.get("net_depth", 4)
         first_channel_output = model_args.get("first_channel_output", 32)
         label_smoothing = loss_opts.get("label_smoothing", 0)
 
-        if net_depth != 4 or first_channel_output != 32 or label_smoothing != 0:
-            return "architecture_study"
-
-        # Data configuration variations (check dataset name patterns)
-        if any(
-            pattern in dataset_name
-            for pattern in ["w256", "w1024", "o32", "o128", "f20", "f15"]
-        ):
-            return "dataset_study"
+        # if net_depth != 4 or first_channel_output != 32 or label_smoothing != 0:
+        #     return "architecture_study"
+        #
+        # # Data configuration variations (check dataset name patterns)
+        # if any(
+        #     pattern in dataset_name
+        #     for pattern in ["w256", "w1024", "o32", "o128", "f20", "f15"]
+        # ):
+        #     return "dataset_study"
 
         return "glacier_mapping_general"  # fallback
 

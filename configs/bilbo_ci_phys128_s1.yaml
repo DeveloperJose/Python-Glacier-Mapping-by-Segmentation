@@ -1,7 +1,7 @@
 # Training configuration
 training_opts:
-  dataset_name: "bibek_w512_o64_f1_v2_physfull_s05"
-  run_name: "ci_physfull_s05"
+  dataset_name: "bibek_w512_o64_f1_v2_phys128_s1"
+  run_name: "ci_phys128_s1"
   epochs: 500
   fine_tune: False
   find_lr: False
