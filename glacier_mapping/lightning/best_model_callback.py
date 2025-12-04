@@ -54,7 +54,7 @@ class BestModelFullEvaluationCallback(Callback):
         if trainer.sanity_checking:
             print("Skipping full-tile evaluation during sanity check")
             return
-        
+
         current_val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
 
         if current_val_loss < self.best_val_loss:
@@ -338,65 +338,69 @@ class BestModelFullEvaluationCallback(Callback):
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
     ) -> Tuple[List[Path], Dict[Path, int]]:
         """Select tiles based on IoU distribution: top-K, bottom-K, middle-K.
-        
+
         For num_samples >= 12:
         - Computes IoU for ALL tiles
         - Selects top-4, middle-4, bottom-4 based on IoU distribution
-        
+
         For num_samples < 12:
         - Uses lightweight class-pixel based selection (no GPU overhead)
         - Avoids OOM during test-suite runs
-        
+
         Args:
             tile_paths: All available test tile paths
             pl_module: Lightning module for predictions
             num_samples: Total number of tiles to select
-        
+
         Returns:
             Tuple of (selected_tiles, rank_map) where rank_map is {Path: rank} (1-indexed)
         """
         # Use lightweight selection for small num_samples to avoid GPU OOM
         # Full IoU computation only for comprehensive visualization (12+ tiles)
         if num_samples < 12:
-            print(f"\nUsing class-pixel selection for {num_samples} tiles (lightweight mode)")
+            print(
+                f"\nUsing class-pixel selection for {num_samples} tiles (lightweight mode)"
+            )
             print("⚠️  Skipping rank computation in lightweight mode")
             selected = self._select_by_class_pixels(tile_paths, pl_module, num_samples)
             # Return empty rank map for lightweight mode
             return selected, {}
-        
+
         # Calculate IoU for each tile
         tile_ious = []
         output_classes = getattr(pl_module, "output_classes", [1])
         metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
         threshold = metrics_opts.get("threshold", [0.5, 0.5])
-        
+
         print(f"\nComputing IoU for {len(tile_paths)} tiles...")
-        
+
         for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation")):
             x = np.load(x_path)
             y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
-            
+
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
             ).astype(np.uint8)
-            
+
             ignore = y_true_raw == 255
             if invalid_mask is not None:
                 ignore |= invalid_mask
-            
+
             # Calculate IoU
             if len(output_classes) == 1:  # Binary
                 from glacier_mapping.utils.prediction import calculate_binary_metrics
+
                 target_class = output_classes[0]
                 _, _, iou, _, _, _ = calculate_binary_metrics(
                     y_pred, y_true_raw, target_class, ignore
                 )
             else:  # Multi-class - use mean IoU across classes
                 from glacier_mapping.model.metrics import tp_fp_fn, IoU as calc_iou
+
                 valid = ~ignore
                 y_pred_valid = y_pred[valid]
                 y_true_valid = y_true_raw[valid]
-                
+
                 ious = []
                 for ci in range(len(output_classes)):
                     label = ci + 1
@@ -405,7 +409,7 @@ class BestModelFullEvaluationCallback(Callback):
                     tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
                     ious.append(calc_iou(tp_, fp_, fn_))
                 iou = np.mean(ious)
-            
+
             tile_ious.append((x_path, float(iou)))
 
             # Periodic GPU cleanup every 20 tiles to prevent accumulation
@@ -414,52 +418,58 @@ class BestModelFullEvaluationCallback(Callback):
 
         # GPU cleanup after IoU computation to prevent OOM
         cleanup_gpu_memory()
-        
+
         # Sort by IoU (descending)
         tile_ious.sort(key=lambda x: x[1], reverse=True)
-        
+
         # Split into top-K, middle-K, bottom-K
         k = num_samples // 3
         remainder = num_samples % 3
-        
+
         # Distribute remainder: top gets first extra, bottom gets second
         top_k = k + (1 if remainder > 0 else 0)
         bottom_k = k + (1 if remainder > 1 else 0)
         middle_k = k
-        
+
         # Select tiles
         top_tiles = [path for path, iou in tile_ious[:top_k]]
         bottom_tiles = [path for path, iou in tile_ious[-bottom_k:]]
-        
+
         # Middle tiles from median region
         middle_start = len(tile_ious) // 2 - middle_k // 2
         middle_end = middle_start + middle_k
         middle_tiles = [path for path, iou in tile_ious[middle_start:middle_end]]
-        
+
         selected = top_tiles + middle_tiles + bottom_tiles
-        
+
         # Build rank map: {Path: absolute_rank} (1-indexed)
         rank_map = {}
         for rank, (path, iou) in enumerate(tile_ious, start=1):
             rank_map[path] = rank
-        
+
         # Print IoU distribution
         print(f"\nSelected {len(selected)} tiles by IoU:")
-        print(f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}")
-        print(f"  Middle {middle_k}: {[f'{tile_ious[middle_start+i][1]:.3f}' for i in range(min(middle_k, len(tile_ious)-middle_start))]}")
-        print(f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious)-bottom_k+i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}")
-        
+        print(
+            f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}"
+        )
+        print(
+            f"  Middle {middle_k}: {[f'{tile_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(tile_ious) - middle_start))]}"
+        )
+        print(
+            f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}"
+        )
+
         return selected, rank_map
 
     def _extract_tiff_number(self, filepath: Path) -> int:
         """Extract TIFF number from filename pattern tiff_{NUM}_slice_{SLICE}.npy
-        
+
         Args:
             filepath: Path to tiff file
-            
+
         Returns:
             TIFF number as integer
-            
+
         Raises:
             ValueError: If TIFF number cannot be extracted
         """
@@ -468,11 +478,11 @@ class BestModelFullEvaluationCallback(Callback):
         filename = filepath.name
         if not filename.startswith("tiff_"):
             raise ValueError(f"Filename does not start with 'tiff_': {filename}")
-        
+
         parts = filename.split("_")
         if len(parts) < 2:
             raise ValueError(f"Unexpected filename format: {filename}")
-        
+
         try:
             tiff_num = int(parts[1])
             return tiff_num
@@ -485,24 +495,24 @@ class BestModelFullEvaluationCallback(Callback):
         """Select tiles with most target class pixels (fallback for small num_samples)."""
         tile_class_counts = []
         output_classes = getattr(pl_module, "output_classes", [1])
-        
+
         for x_path in tile_paths:
             mask_path = x_path.with_name(x_path.name.replace("tiff", "mask"))
             mask = np.load(mask_path)
-            
+
             if len(output_classes) == 1:  # Binary
                 class_pixels = (mask == output_classes[0]).sum()
             else:  # Multi-class
                 class_pixels = ((mask > 0) & (mask != 255)).sum()
-            
+
             tile_class_counts.append((x_path, int(class_pixels)))
-        
+
         tile_class_counts.sort(key=lambda x: x[1], reverse=True)
         selected = [path for path, count in tile_class_counts if count > 0]
-        
+
         if len(selected) < num_samples:
             selected = [path for path, count in tile_class_counts]
-        
+
         return selected[:num_samples]
 
     def _generate_visualizations(
@@ -633,7 +643,7 @@ class BestModelFullEvaluationCallback(Callback):
                 for ci, cname in enumerate(class_names):
                     if ci == 0:  # Skip background
                         continue
-                    
+
                     pred_c = (y_pred_vis == ci).astype(np.uint8)
                     true_c = (y_gt_vis == ci).astype(np.uint8)
 
@@ -652,7 +662,7 @@ class BestModelFullEvaluationCallback(Callback):
             if x_path in tile_rank_map:
                 rank = tile_rank_map[x_path]
                 rank_text = f"Rank: {rank}/{total_tiles} | "
-            
+
             metrics_text = rank_text + " | ".join(metric_string_parts)
 
             composite = make_eight_panel(
@@ -671,7 +681,9 @@ class BestModelFullEvaluationCallback(Callback):
             tile_dir = output_dir / f"fulltile_{tiff_num:04d}"
             tile_dir.mkdir(parents=True, exist_ok=True)
             out_path = tile_dir / f"epoch{epoch:04d}.png"
-            print(f"Saving visualization for TIFF {tiff_num:04d} ({x_path.name}) to: {out_path}")
+            print(
+                f"Saving visualization for TIFF {tiff_num:04d} ({x_path.name}) to: {out_path}"
+            )
             try:
                 success = cv2.imwrite(
                     str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)

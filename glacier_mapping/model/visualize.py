@@ -127,7 +127,7 @@ def make_confidence_map(prob, invalid_mask=None):
 def make_entropy_map(prob_cube, invalid_mask=None):
     """Compute pixelwise entropy H = -sum(p * log(p)) and convert to RGB VIRIDIS heatmap."""
     p = np.clip(prob_cube, 1e-8, 1.0)
-    
+
     # Handle both 2D (single class) and 3D (multi-class) probability cubes
     if len(p.shape) == 2:
         entropy = -(p * np.log(p))

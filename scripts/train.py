@@ -8,7 +8,11 @@ from typing import Dict, Any
 import torch
 import yaml
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+from pytorch_lightning.callbacks import (
+    ModelCheckpoint,
+    LearningRateMonitor,
+    EarlyStopping,
+)
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
@@ -274,7 +278,9 @@ def main():
                     verbose=True,
                 )
             )
-            print(f"✓ Early stopping enabled (patience={early_stopping_patience} epochs)")
+            print(
+                f"✓ Early stopping enabled (patience={early_stopping_patience} epochs)"
+            )
 
         # Slice visualization callback (only if output enabled and num >= 1)
         num_slice_viz = training_opts.get("num_slice_viz", 4)
@@ -311,7 +317,13 @@ def main():
         devices = 1  # Use 1 GPU (Ray sets CUDA_VISIBLE_DEVICES)
         print("Using auto-detected GPU (Ray controlled)")
 
+    # Set default_root_dir to ensure all Lightning outputs go to output/
+    default_root = f"{output_dir}/{run_name}" if not args.no_output else None
+    if default_root:
+        print(f"Lightning default_root_dir: {default_root}")
+
     trainer = pl.Trainer(
+        default_root_dir=default_root,
         accelerator="gpu",
         devices=devices,
         max_epochs=args.max_epochs,

@@ -62,7 +62,7 @@ class GlacierDataModule(pl.LightningDataModule):
                 self.normalize,
                 transforms=self.train_transform,
             )
-            
+
             self.val_dataset = GlacierDataset(
                 self.processed_dir / "val",
                 self.use_channels,
@@ -92,4 +92,3 @@ class GlacierDataModule(pl.LightningDataModule):
             pin_memory=self.pin_memory,
             drop_last=False,
         )
-
