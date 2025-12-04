@@ -1,6 +1,8 @@
 import numpy as np
 import numba
 
+import glacier_mapping.utils.logging as log
+
 # ------------------------------------------------------------
 # Static neighbor offsets (Numba-optimized)
 # ------------------------------------------------------------
@@ -380,4 +382,4 @@ if __name__ == "__main__":
     elevation = dem_np[:, :, 0][:, :, None]
 
     phys_output = compute_phys_v4(elevation, res=64, scale=0.3)
-    print("Physics output shape:", phys_output.shape, "dtype:", phys_output.dtype)
+    log.debug(f"Physics output shape: {phys_output.shape}, dtype: {phys_output.dtype}")

@@ -10,6 +10,7 @@ from shapely.ops import unary_union
 from skimage.color import rgb2hsv
 
 from glacier_mapping.data import physics
+import glacier_mapping.utils.logging as log
 
 IGNORE_LABEL = 255
 
@@ -67,7 +68,7 @@ def read_tiff(filename):
 def check_crs(crs_a, crs_b, verbose=False):
     """Verify that two CRS objects match. Raises ValueError if they don't agree."""
     if verbose:
-        print("CRS 1: " + crs_a.to_string() + ", CRS 2: " + crs_b.to_string())
+        log.debug("CRS 1: " + crs_a.to_string() + ", CRS 2: " + crs_b.to_string())
     if rasterio.crs.CRS.from_string(crs_a.to_string()) != rasterio.crs.CRS.from_string(
         crs_b.to_string()
     ):
@@ -136,7 +137,7 @@ def get_mask(tiff, shp, column="Glaciers"):
             channel_mask = rasterize(shapes=poly_shp, out_shape=im_size)
             mask[:, :, key] = channel_mask
         except Exception as e:
-            print(f"Rasterization failed for class={key}: {e}")
+            log.warning(f"Rasterization failed for class={key}: {e}")
             continue
 
     return mask
@@ -222,7 +223,7 @@ def get_tiff_np(
         tiff_np = np.concatenate((tiff_np, phys_np), axis=2)
 
     if verbose:
-        print(f"use_dem={use_dem}, use_physics={use_physics}")
+        log.debug(f"use_dem={use_dem}, use_physics={use_physics}")
 
     return tiff_np
 

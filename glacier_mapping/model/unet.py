@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import glacier_mapping.utils.logging as log
+
 
 class ConvBlock(nn.Module):
     """
@@ -83,7 +85,7 @@ class Unet(nn.Module):
         self.upblocks = nn.ModuleList()
         self.pool = nn.MaxPool2d(2, 2)
 
-        print("UNET dropout=", dropout)
+        log.debug(f"UNET dropout={dropout}")
 
         in_channels = inchannels
         out_channels = first_channel_output

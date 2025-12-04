@@ -22,6 +22,7 @@ from glacier_mapping.model.visualize import (
     make_tp_fp_fn_masks,
 )
 from glacier_mapping.utils import cleanup_gpu_memory
+import glacier_mapping.utils.logging as log
 from glacier_mapping.utils.prediction import (
     calculate_binary_metrics,
     get_probabilities,
@@ -52,15 +53,15 @@ class BestModelFullEvaluationCallback(Callback):
         """Trigger full-tile evaluation only on new best model."""
         # Skip evaluation during sanity check to prevent OOM
         if trainer.sanity_checking:
-            print("Skipping full-tile evaluation during sanity check")
+            log.info("Skipping full-tile evaluation during sanity check")
             return
 
         current_val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
 
         if current_val_loss < self.best_val_loss:
             self.best_val_loss = current_val_loss
-            print(f"\n🎯 New best model detected (val_loss: {current_val_loss:.4f})")
-            print("Running full-tile evaluation...")
+            log.info(f"🎯 New best model detected (val_loss: {current_val_loss:.4f})")
+            log.info("Running full-tile evaluation...")
             self._run_full_evaluation(trainer, pl_module)
 
     def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
@@ -86,7 +87,7 @@ class BestModelFullEvaluationCallback(Callback):
         test_tiles_all = sorted(data_dir.glob("tiff*"))
 
         if not test_tiles_all:
-            print("Warning: No test tiles found for full-tile evaluation")
+            log.warning("No test tiles found for full-tile evaluation")
             return
 
         # Select informative tiles for visualization
@@ -264,7 +265,7 @@ class BestModelFullEvaluationCallback(Callback):
 
         # Generate visualizations for selected tiles (only if num_samples >= 1)
         if self.num_samples >= 1:
-            print(
+            log.info(
                 f"Generating visualizations for {min(self.num_samples, len(test_tiles))} tiles..."
             )
             self._generate_visualizations(
@@ -275,7 +276,7 @@ class BestModelFullEvaluationCallback(Callback):
                 tile_rank_map,
                 len(test_tiles_all),
             )
-            print("Visualizations completed.")
+            log.info("Visualizations completed.")
 
             # GPU cleanup after visualization generation to prevent OOM
             cleanup_gpu_memory()
@@ -332,7 +333,7 @@ class BestModelFullEvaluationCallback(Callback):
                                 )
 
             except Exception as e:
-                print(f"Warning: Failed to log to {type(logger).__name__}: {e}")
+                log.warning(f"Failed to log to {type(logger).__name__}: {e}")
 
     def _select_informative_tiles(
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
@@ -358,10 +359,10 @@ class BestModelFullEvaluationCallback(Callback):
         # Use lightweight selection for small num_samples to avoid GPU OOM
         # Full IoU computation only for comprehensive visualization (12+ tiles)
         if num_samples < 12:
-            print(
-                f"\nUsing class-pixel selection for {num_samples} tiles (lightweight mode)"
+            log.info(
+                f"Using class-pixel selection for {num_samples} tiles (lightweight mode)"
             )
-            print("⚠️  Skipping rank computation in lightweight mode")
+            log.info("⚠️  Skipping rank computation in lightweight mode")
             selected = self._select_by_class_pixels(tile_paths, pl_module, num_samples)
             # Return empty rank map for lightweight mode
             return selected, {}
@@ -372,7 +373,7 @@ class BestModelFullEvaluationCallback(Callback):
         metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
         threshold = metrics_opts.get("threshold", [0.5, 0.5])
 
-        print(f"\nComputing IoU for {len(tile_paths)} tiles...")
+        log.info(f"Computing IoU for {len(tile_paths)} tiles...")
 
         for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation")):
             x = np.load(x_path)
@@ -447,15 +448,15 @@ class BestModelFullEvaluationCallback(Callback):
         for rank, (path, iou) in enumerate(tile_ious, start=1):
             rank_map[path] = rank
 
-        # Print IoU distribution
-        print(f"\nSelected {len(selected)} tiles by IoU:")
-        print(
+        # Log IoU distribution
+        log.info(f"Selected {len(selected)} tiles by IoU:")
+        log.info(
             f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}"
         )
-        print(
+        log.info(
             f"  Middle {middle_k}: {[f'{tile_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(tile_ious) - middle_start))]}"
         )
-        print(
+        log.info(
             f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}"
         )
 
@@ -540,7 +541,7 @@ class BestModelFullEvaluationCallback(Callback):
             try:
                 tiff_num = self._extract_tiff_number(x_path)
             except ValueError as e:
-                print(f"Warning: {e}. Using sequential index {idx} instead.")
+                log.warning(f"{e}. Using sequential index {idx} instead.")
                 tiff_num = idx
             x_full = np.load(x_path)
             y_true_raw = np.load(
@@ -681,13 +682,13 @@ class BestModelFullEvaluationCallback(Callback):
             tile_dir = output_dir / f"fulltile_{tiff_num:04d}"
             tile_dir.mkdir(parents=True, exist_ok=True)
             out_path = tile_dir / f"epoch{epoch:04d}.png"
-            print(
+            log.debug(
                 f"Saving visualization for TIFF {tiff_num:04d} ({x_path.name}) to: {out_path}"
             )
             try:
                 success = cv2.imwrite(
                     str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)
                 )
-                print(f"Save successful: {success}")
+                log.debug(f"Save successful: {success}")
             except Exception as e:
-                print(f"Error saving visualization: {e}")
+                log.error(f"Error saving visualization: {e}")

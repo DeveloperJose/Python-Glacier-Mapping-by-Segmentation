@@ -9,6 +9,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, Callback
 from pytorch_lightning.loggers import MLFlowLogger
 
 from glacier_mapping.model.visualize import make_eight_panel
+import glacier_mapping.utils.logging as log
 
 # Check if MLflow is available
 try:
@@ -58,13 +59,13 @@ class GlacierVisualizationCallback(Callback):
         val_dataloaders = trainer.val_dataloaders
 
         if val_dataloaders is None:
-            print("Warning: No validation dataloader available for visualization")
+            log.warning("No validation dataloader available for visualization")
             return
 
         # Extract first dataloader (handle both single and multiple cases)
         if isinstance(val_dataloaders, list):
             if len(val_dataloaders) == 0:
-                print("Warning: No validation dataloader available for visualization")
+                log.warning("No validation dataloader available for visualization")
                 return
             val_dataloader = val_dataloaders[0]
         else:
@@ -174,7 +175,7 @@ class GlacierVisualizationCallback(Callback):
                             artifact_path=f"slice_visualizations/{slice_dir.name}",
                         )
                 except Exception as e:
-                    print(f"Warning: Failed to log slice visualization to MLflow: {e}")
+                    log.warning(f"Failed to log slice visualization to MLflow: {e}")
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):

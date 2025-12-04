@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 import torch
+import glacier_mapping.utils.logging as log
 
 try:
     import psutil
@@ -129,7 +130,7 @@ class ErrorHandler:
                     )
 
             except Exception as mlflow_error:
-                print(f"Warning: Failed to log error to MLflow: {mlflow_error}")
+                log.warning(f"Failed to log error to MLflow: {mlflow_error}")
 
         # Print summary
         print(f"\n❌ ERROR LOGGED:")
@@ -178,7 +179,7 @@ class ErrorHandler:
                     artifact_path="warnings",
                 )
             except Exception as mlflow_error:
-                print(f"Warning: Failed to log warning to MLflow: {mlflow_error}")
+                log.warning(f"Failed to log warning to MLflow: {mlflow_error}")
 
         # Print summary
         print(f"\n⚠️  WARNING LOGGED:")
