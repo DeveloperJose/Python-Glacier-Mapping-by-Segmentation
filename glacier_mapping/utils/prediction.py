@@ -156,6 +156,24 @@ def predict_with_probs(module, x_full, threshold=None):
     return probs, prediction
 
 
+def get_pr_iou(pred, true):
+    """Calculate precision, recall, IoU, and confusion matrix components.
+
+    Args:
+        pred: Predicted labels (numpy array)
+        true: Ground truth labels (numpy array)
+
+    Returns:
+        Tuple of (precision, recall, IoU, tp, fp, fn)
+    """
+    from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
+
+    pred_t = torch.from_numpy(pred.astype(np.uint8))
+    true_t = torch.from_numpy(true.astype(np.uint8))
+    tp, fp, fn = tp_fp_fn(pred_t, true_t)
+    return (precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn), tp, fp, fn)
+
+
 def calculate_binary_metrics(y_pred, y_true, target_class, mask=None):
     """
     Calculate binary classification metrics using consistent logic.

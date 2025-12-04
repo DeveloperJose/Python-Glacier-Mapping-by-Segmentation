@@ -31,7 +31,7 @@ import matplotlib
 
 from glacier_mapping.data.data import BAND_NAMES
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
-from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
+from glacier_mapping.model.metrics import IoU, precision, recall
 from glacier_mapping.model.visualize import (
     build_cmap,
     label_to_color,
@@ -45,6 +45,7 @@ from glacier_mapping.utils import cleanup_gpu_memory
 from glacier_mapping.utils.prediction import (
     calculate_binary_metrics,
     create_invalid_mask,
+    get_pr_iou,
     get_probabilities,
     merge_ci_debris,
 )
@@ -64,13 +65,6 @@ matplotlib.use("Agg")
 
 # Helpers
 # Removed duplicate functions - now using shared utilities from glacier_mapping.utils.prediction
-
-
-def get_pr_iou(pred, true):
-    pred_t = torch.from_numpy(pred.astype(np.uint8))
-    true_t = torch.from_numpy(true.astype(np.uint8))
-    tp, fp, fn = tp_fp_fn(pred_t, true_t)
-    return (precision(tp, fp, fn), recall(tp, fp, fn), IoU(tp, fp, fn), tp, fp, fn)
 
 
 # ========================================================================

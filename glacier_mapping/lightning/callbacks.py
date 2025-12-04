@@ -1,7 +1,7 @@
 """Custom callbacks for glacier mapping training."""
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 import pytorch_lightning as pl
@@ -10,13 +10,14 @@ from pytorch_lightning.loggers import MLFlowLogger
 
 from glacier_mapping.model.visualize import make_eight_panel
 
-# Import MLflow utilities with error handling
+# Check if MLflow is available
 try:
-    from glacier_mapping.utils.mlflow_utils import MLflowManager
+    from pytorch_lightning.loggers import MLFlowLogger
 
     MLFLOW_AVAILABLE = True
 except ImportError:
     MLFLOW_AVAILABLE = False
+    MLFlowLogger = None  # type: ignore
 
 
 class GlacierVisualizationCallback(Callback):
@@ -265,128 +266,3 @@ class GlacierTrainingMonitor(Callback):
                 pl_module.log(
                     "val_loss_improvement", improvement, on_step=False, on_epoch=True
                 )
-
-    def _reconstruct_config_from_module(
-        self, pl_module: pl.LightningModule
-    ) -> Dict[str, Any]:
-        """Reconstruct configuration dict from Lightning module hyperparameters."""
-        config = {}
-
-        # Training options
-        if hasattr(pl_module, "training_opts"):
-            config["training_opts"] = pl_module.training_opts
-        else:
-            config["training_opts"] = {
-                "full_eval_every": self.full_eval_every,
-                "num_viz_samples": self.num_samples,
-            }
-
-        # Model options
-        config["model_opts"] = pl_module.model_opts
-
-        # Loss options
-        config["loss_opts"] = pl_module.loss_opts
-
-        # Metrics options
-        config["metrics_opts"] = pl_module.metrics_opts
-
-        # Loader options
-        if hasattr(pl_module, "use_channels") and hasattr(pl_module, "output_classes"):
-            config["loader_opts"] = {
-                "use_channels": pl_module.use_channels,
-                "output_classes": pl_module.output_classes,
-                "class_names": pl_module.class_names,
-                "processed_dir": getattr(pl_module, "processed_dir", "/tmp"),
-            }
-
-        return config
-
-    def _log_evaluation_results(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule, output_dir: Path
-    ):
-        """Log evaluation results to MLflow and TensorBoard."""
-        epoch = trainer.current_epoch + 1
-
-        # Find and log CSV results
-        csv_files = list(output_dir.glob("*.csv"))
-        for csv_file in csv_files:
-            # Log to MLflow as artifact
-            for logger in trainer.loggers:
-                if isinstance(logger, MLFlowLogger):
-                    try:
-                        logger.experiment.log_artifact(
-                            logger.run_id,
-                            str(csv_file),
-                            artifact_path=f"test_evaluations/epoch_{epoch}",
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to log CSV to MLflow: {e}")
-
-            # Parse CSV and log metrics
-            try:
-                import pandas as pd
-
-                df = pd.read_csv(csv_file)
-
-                # Log summary metrics to both loggers
-                for class_name in ["CleanIce", "Debris"]:
-                    if f"{class_name}_iou" in df.columns:
-                        iou_mean = df[f"{class_name}_iou"].mean()
-                        pl_module.log(
-                            f"test_{class_name}_iou",
-                            iou_mean,
-                            on_step=False,
-                            on_epoch=True,
-                        )
-
-                    if f"{class_name}_precision" in df.columns:
-                        precision_mean = df[f"{class_name}_precision"].mean()
-                        pl_module.log(
-                            f"test_{class_name}_precision",
-                            precision_mean,
-                            on_step=False,
-                            on_epoch=True,
-                        )
-
-                    if f"{class_name}_recall" in df.columns:
-                        recall_mean = df[f"{class_name}_recall"].mean()
-                        pl_module.log(
-                            f"test_{class_name}_recall",
-                            recall_mean,
-                            on_step=False,
-                            on_epoch=True,
-                        )
-
-            except Exception as e:
-                print(f"Warning: Failed to parse CSV metrics: {e}")
-
-        # Log visualization images
-        viz_files = list(output_dir.glob("*.png"))
-        for viz_file in viz_files:
-            # Log to MLflow as artifact
-            for logger in trainer.loggers:
-                if isinstance(logger, MLFlowLogger):
-                    try:
-                        logger.experiment.log_artifact(
-                            logger.run_id,
-                            str(viz_file),
-                            artifact_path=f"test_evaluations/epoch_{epoch}/visualizations",
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to log visualization to MLflow: {e}")
-
-            # Log to TensorBoard
-            if hasattr(trainer, "logger") and trainer.logger:
-                try:
-                    from matplotlib import pyplot as plt
-
-                    img = plt.imread(viz_file)
-                    trainer.logger.experiment.add_image(
-                        f"test_evaluation/{viz_file.stem}",
-                        img,
-                        dataformats="HWC",
-                        global_step=epoch,
-                    )
-                    plt.close()
-                except Exception as e:
-                    print(f"Warning: Failed to log visualization to TensorBoard: {e}")

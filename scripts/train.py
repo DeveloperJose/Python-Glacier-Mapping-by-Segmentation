@@ -185,39 +185,6 @@ def main():
             f"Normalization file not found: {norm_file}\n"
             f"Please run preprocessing to generate normalization statistics."
         )
-    if "processed_dir" not in loader_opts or not loader_opts["processed_dir"]:
-        dataset_name = training_opts.get("dataset_name")
-        if not dataset_name:
-            raise ValueError(
-                "Either 'training_opts.dataset_name' or 'loader_opts.processed_dir' "
-                "must be specified in the config"
-            )
-        if "processed_data_path" not in server_config:
-            raise ValueError(
-                f"Server '{args.server}' config must include 'processed_data_path'"
-            )
-        loader_opts["processed_dir"] = (
-            f"{server_config['processed_data_path']}/{dataset_name}/"
-        )
-        print(
-            f"✓ Auto-constructed data path from server config: {loader_opts['processed_dir']}"
-        )
-
-    # Validate that the constructed/specified path exists
-    data_path = pathlib.Path(loader_opts["processed_dir"])
-    if not data_path.exists():
-        raise FileNotFoundError(
-            f"Processed data directory does not exist: {data_path}\n"
-            f"Please run preprocessing first or check your server config."
-        )
-
-    # Check for required normalization file
-    norm_file = data_path / "normalize_train.npy"
-    if not norm_file.exists():
-        raise FileNotFoundError(
-            f"Normalization file not found: {norm_file}\n"
-            f"Please run preprocessing to generate normalization statistics."
-        )
 
     # Get run name and output directory
     base_run_name = training_opts.get("run_name", "experiment")

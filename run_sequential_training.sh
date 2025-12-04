@@ -1,9 +1,9 @@
 #!/bin/bash
 ################################################################################
 # Sequential Training Script for Glacier Mapping
-# 
+#
 # Usage: ./run_sequential_training.sh [desktop|bilbo|frodo] [OPTIONS]
-# 
+#
 # This script runs all config files for a specified server sequentially,
 # continuing on failure and logging results to both console and summary file.
 ################################################################################
@@ -21,19 +21,19 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Default values
-GPU=1
+GPU=0
 MLFLOW_URI="https://mlflow.developerjose.duckdns.org/"
 DRY_RUN=false
-PAUSE_SECONDS=0
+PAUSE_SECONDS=60
 
 # New priority and filtering options
-TASK_FILTER=""              # Empty = all tasks
-PRIORITY_ORDER="dci,ci,multi"   # Default priority: DCI → CI → Multi
+TASK_FILTER=""                # Empty = all tasks
+PRIORITY_ORDER="dci,ci,multi" # Default priority: DCI → CI → Multi
 EXCLUDE_BASE=false
 ONLY_BASE=false
 
 # Script directory
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 ################################################################################
@@ -69,7 +69,7 @@ format_duration() {
     local hours=$((duration / 3600))
     local minutes=$(((duration % 3600) / 60))
     local seconds=$((duration % 60))
-    
+
     if [ $hours -gt 0 ]; then
         printf "%dh %02dm %02ds" $hours $minutes $seconds
     elif [ $minutes -gt 0 ]; then
@@ -80,7 +80,7 @@ format_duration() {
 }
 
 show_usage() {
-    cat << EOF
+    cat <<EOF
 ${BOLD}Sequential Training Script for Glacier Mapping${NC}
 
 ${BOLD}USAGE:${NC}
@@ -90,9 +90,9 @@ ${BOLD}ARGUMENTS:${NC}
     SERVER              Server name: desktop, bilbo, or frodo
 
 ${BOLD}BASIC OPTIONS:${NC}
-    --gpu N             GPU device number (default: 1)
+    --gpu N             GPU device number (default: 0)
     --dry-run           Show what would run without executing
-    --pause N           Pause N seconds between runs (default: 0)
+    --pause N           Pause N seconds between runs (default: 60)
     --mlflow-uri URI    MLflow tracking URI (default: https://mlflow.developerjose.duckdns.org/)
 
 ${BOLD}FILTERING & PRIORITY OPTIONS:${NC}
@@ -148,7 +148,7 @@ EOF
 sort_configs_by_priority() {
     # Sort configs using Python for complex multi-key sorting
     # Pass configs as arguments
-    
+
     python3 -c '
 import sys
 import os
@@ -221,25 +221,25 @@ for item in sorted_configs:
 filter_configs_by_tasks() {
     # Filter configs by task type
     # Arguments: task_filter (comma-separated), config files (space-separated)
-    
+
     local task_filter="$1"
     shift
     local configs=("$@")
-    
+
     if [ -z "$task_filter" ]; then
         # No filter, return all
         printf '%s\n' "${configs[@]}"
         return
     fi
-    
+
     # Convert comma-separated tasks to array
-    IFS=',' read -ra tasks <<< "$task_filter"
-    
+    IFS=',' read -ra tasks <<<"$task_filter"
+
     # Filter configs
     for config in "${configs[@]}"; do
         local basename=$(basename "$config" .yaml)
         for task in "${tasks[@]}"; do
-            task=$(echo "$task" | xargs)  # Trim whitespace
+            task=$(echo "$task" | xargs) # Trim whitespace
             if [[ "$basename" =~ _${task}_ ]] || [[ "$basename" =~ _${task}$ ]]; then
                 echo "$config"
                 break
@@ -251,19 +251,19 @@ filter_configs_by_tasks() {
 filter_base_configs() {
     # Filter configs based on base/non-base
     # Arguments: mode (exclude|only), config files (space-separated)
-    
+
     local mode="$1"
     shift
     local configs=("$@")
-    
+
     for config in "${configs[@]}"; do
         local basename=$(basename "$config" .yaml)
         local is_base=false
-        
+
         if [[ "$basename" =~ _base$ ]]; then
             is_base=true
         fi
-        
+
         if [ "$mode" = "exclude" ] && [ "$is_base" = false ]; then
             echo "$config"
         elif [ "$mode" = "only" ] && [ "$is_base" = true ]; then
@@ -292,47 +292,47 @@ shift
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --gpu)
-            GPU="$2"
-            shift 2
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --pause)
-            PAUSE_SECONDS="$2"
-            shift 2
-            ;;
-        --mlflow-uri)
-            MLFLOW_URI="$2"
-            shift 2
-            ;;
-        --tasks)
-            TASK_FILTER="$2"
-            shift 2
-            ;;
-        --priority)
-            PRIORITY_ORDER="$2"
-            shift 2
-            ;;
-        --exclude-base)
-            EXCLUDE_BASE=true
-            shift
-            ;;
-        --only-base)
-            ONLY_BASE=true
-            shift
-            ;;
-        --help)
-            show_usage
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Error: Unknown option: $1${NC}"
-            show_usage
-            exit 1
-            ;;
+    --gpu)
+        GPU="$2"
+        shift 2
+        ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --pause)
+        PAUSE_SECONDS="$2"
+        shift 2
+        ;;
+    --mlflow-uri)
+        MLFLOW_URI="$2"
+        shift 2
+        ;;
+    --tasks)
+        TASK_FILTER="$2"
+        shift 2
+        ;;
+    --priority)
+        PRIORITY_ORDER="$2"
+        shift 2
+        ;;
+    --exclude-base)
+        EXCLUDE_BASE=true
+        shift
+        ;;
+    --only-base)
+        ONLY_BASE=true
+        shift
+        ;;
+    --help)
+        show_usage
+        exit 0
+        ;;
+    *)
+        echo -e "${RED}Error: Unknown option: $1${NC}"
+        show_usage
+        exit 1
+        ;;
     esac
 done
 
@@ -361,7 +361,7 @@ fi
 
 # Validate task filter
 if [ -n "$TASK_FILTER" ]; then
-    IFS=',' read -ra tasks <<< "$TASK_FILTER"
+    IFS=',' read -ra tasks <<<"$TASK_FILTER"
     for task in "${tasks[@]}"; do
         task=$(echo "$task" | xargs)
         if [[ ! "$task" =~ ^(ci|dci|multi)$ ]]; then
@@ -373,7 +373,7 @@ if [ -n "$TASK_FILTER" ]; then
 fi
 
 # Validate priority order
-IFS=',' read -ra priority_tasks <<< "$PRIORITY_ORDER"
+IFS=',' read -ra priority_tasks <<<"$PRIORITY_ORDER"
 for task in "${priority_tasks[@]}"; do
     task=$(echo "$task" | xargs)
     if [[ ! "$task" =~ ^(ci|dci|multi)$ ]]; then
@@ -440,7 +440,7 @@ log() {
 }
 
 log_only() {
-    echo -e "$@" >> "$LOG_FILE"
+    echo -e "$@" >>"$LOG_FILE"
 }
 
 ################################################################################
@@ -468,7 +468,7 @@ log ""
 for i in "${!CONFIG_FILES[@]}"; do
     config="${CONFIG_FILES[$i]}"
     basename=$(basename "$config" .yaml)
-    
+
     # Color code by task
     if [[ "$basename" =~ _dci_ ]] || [[ "$basename" =~ _dci$ ]]; then
         task_label="${MAGENTA}[DCI]${NC}"
@@ -479,8 +479,8 @@ for i in "${!CONFIG_FILES[@]}"; do
     else
         task_label="[???]"
     fi
-    
-    log "  $((i+1)). $task_label $config"
+
+    log "  $((i + 1)). $task_label $config"
 done
 log ""
 
@@ -534,23 +534,23 @@ for i in "${!CONFIG_FILES[@]}"; do
     if [ "$INTERRUPTED" = true ]; then
         break
     fi
-    
+
     CONFIG=${CONFIG_FILES[$i]}
-    CONFIG_NUM=$((i+1))
-    
+    CONFIG_NUM=$((i + 1))
+
     echo ""
     print_header "[$CONFIG_NUM/$TOTAL_CONFIGS] Running: $(basename $CONFIG)"
     log_only ""
     log_only "============================================================"
     log_only "[$CONFIG_NUM/$TOTAL_CONFIGS] Running: $(basename $CONFIG)"
     log_only "============================================================"
-    
+
     RUN_START=$(date +%s)
     RUN_START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-    
+
     log "Started: $RUN_START_TIME"
     log ""
-    
+
     # Build command
     CMD="uv run python scripts/train.py \
 --config $CONFIG \
@@ -558,26 +558,26 @@ for i in "${!CONFIG_FILES[@]}"; do
 --gpu $GPU \
 --mlflow-enabled true \
 --tracking-uri $MLFLOW_URI"
-    
+
     log_only "Command: $CMD"
     log_only ""
-    
+
     print_subheader "Training Output"
-    
+
     # Run training and capture exit code
     if $CMD 2>&1 | tee -a "$LOG_FILE"; then
         EXIT_CODE=${PIPESTATUS[0]}
     else
         EXIT_CODE=$?
     fi
-    
+
     RUN_END=$(date +%s)
     RUN_DURATION=$((RUN_END - RUN_START))
     RUN_DURATION_FMT=$(format_duration $RUN_DURATION)
     RUN_DURATIONS+=("$RUN_DURATION_FMT")
-    
+
     echo ""
-    
+
     if [ $EXIT_CODE -eq 0 ]; then
         print_success "SUCCESS (Duration: $RUN_DURATION_FMT)"
         log_only "✓ SUCCESS (Duration: $RUN_DURATION_FMT)"
@@ -588,9 +588,9 @@ for i in "${!CONFIG_FILES[@]}"; do
         FAILED_CONFIGS+=("$CONFIG (exit code: $EXIT_CODE)")
         ((FAILED_RUNS++))
     fi
-    
+
     print_header ""
-    
+
     # Pause between runs if specified
     if [ $CONFIG_NUM -lt $TOTAL_CONFIGS ] && [ $PAUSE_SECONDS -gt 0 ]; then
         print_info "Pausing for ${PAUSE_SECONDS}s before next run..."
@@ -635,7 +635,7 @@ for i in "${!CONFIG_FILES[@]}"; do
     if [ $i -lt ${#RUN_DURATIONS[@]} ]; then
         CONFIG_NAME=$(basename "${CONFIG_FILES[$i]}")
         DURATION="${RUN_DURATIONS[$i]}"
-        log "  $((i+1)). $CONFIG_NAME - $DURATION"
+        log "  $((i + 1)). $CONFIG_NAME - $DURATION"
     fi
 done
 log ""
@@ -648,7 +648,7 @@ print_header ""
 ################################################################################
 
 if [ "$INTERRUPTED" = true ]; then
-    exit 130  # Standard exit code for SIGINT
+    exit 130 # Standard exit code for SIGINT
 elif [ $FAILED_RUNS -gt 0 ]; then
     exit 1
 else
