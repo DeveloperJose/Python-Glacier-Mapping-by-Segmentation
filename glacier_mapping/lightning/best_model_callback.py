@@ -1,30 +1,31 @@
 """Best-model full evaluation callback for glacier mapping."""
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-import torch
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from tqdm import tqdm
 
-from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
+from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.visualize import (
     build_cmap_from_mask_names,
-    make_rgb_preview,
     label_to_color,
     make_confidence_map,
-    make_entropy_map,
-    make_tp_fp_fn_masks,
     make_eight_panel,
+    make_entropy_map,
+    make_rgb_preview,
+    make_tp_fp_fn_masks,
 )
+from glacier_mapping.utils import cleanup_gpu_memory
 from glacier_mapping.utils.prediction import (
+    calculate_binary_metrics,
     get_probabilities,
     predict_from_probs,
-    calculate_binary_metrics,
 )
 
 # Import MLflow utilities with error handling
@@ -89,7 +90,7 @@ class BestModelFullEvaluationCallback(Callback):
             return
 
         # Select informative tiles for visualization
-        test_tiles = self._select_informative_tiles(
+        test_tiles, tile_rank_map = self._select_informative_tiles(
             test_tiles_all, pl_module, self.num_samples
         )
 
@@ -110,7 +111,6 @@ class BestModelFullEvaluationCallback(Callback):
         fn_sum = np.zeros(n_classes)
 
         # Evaluate all test tiles
-        import gc
         for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Full-tile evaluation")):
             x = np.load(x_path)
             y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
@@ -182,18 +182,13 @@ class BestModelFullEvaluationCallback(Callback):
                     ]
 
             rows.append(row)
-            
+
             # Periodic GPU cleanup every 20 tiles to prevent accumulation
             if (idx + 1) % 20 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
+                cleanup_gpu_memory(synchronize=False)
 
         # GPU cleanup after full-tile evaluation to prevent OOM
-        import gc
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        cleanup_gpu_memory()
 
         # Create CSV metrics subdirectory and save with new naming
         csv_dir = output_dir / "csv_metrics"
@@ -277,14 +272,13 @@ class BestModelFullEvaluationCallback(Callback):
                 test_tiles[: self.num_samples],
                 output_dir,
                 trainer.current_epoch + 1,
+                tile_rank_map,
+                len(test_tiles_all),
             )
             print("Visualizations completed.")
-            
+
             # GPU cleanup after visualization generation to prevent OOM
-            import gc
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+            cleanup_gpu_memory()
 
             # Log PNG files to both TensorBoard and MLflow
             self._log_visualizations_to_all_loggers(
@@ -342,7 +336,7 @@ class BestModelFullEvaluationCallback(Callback):
 
     def _select_informative_tiles(
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
-    ) -> List[Path]:
+    ) -> Tuple[List[Path], Dict[Path, int]]:
         """Select tiles based on IoU distribution: top-K, bottom-K, middle-K.
         
         For num_samples >= 12:
@@ -359,13 +353,16 @@ class BestModelFullEvaluationCallback(Callback):
             num_samples: Total number of tiles to select
         
         Returns:
-            List of selected tile paths
+            Tuple of (selected_tiles, rank_map) where rank_map is {Path: rank} (1-indexed)
         """
         # Use lightweight selection for small num_samples to avoid GPU OOM
         # Full IoU computation only for comprehensive visualization (12+ tiles)
         if num_samples < 12:
             print(f"\nUsing class-pixel selection for {num_samples} tiles (lightweight mode)")
-            return self._select_by_class_pixels(tile_paths, pl_module, num_samples)
+            print("⚠️  Skipping rank computation in lightweight mode")
+            selected = self._select_by_class_pixels(tile_paths, pl_module, num_samples)
+            # Return empty rank map for lightweight mode
+            return selected, {}
         
         # Calculate IoU for each tile
         tile_ious = []
@@ -375,7 +372,6 @@ class BestModelFullEvaluationCallback(Callback):
         
         print(f"\nComputing IoU for {len(tile_paths)} tiles...")
         
-        import gc
         for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation")):
             x = np.load(x_path)
             y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
@@ -411,18 +407,13 @@ class BestModelFullEvaluationCallback(Callback):
                 iou = np.mean(ious)
             
             tile_ious.append((x_path, float(iou)))
-            
+
             # Periodic GPU cleanup every 20 tiles to prevent accumulation
             if (idx + 1) % 20 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
-        
+                cleanup_gpu_memory(synchronize=False)
+
         # GPU cleanup after IoU computation to prevent OOM
-        import gc
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        cleanup_gpu_memory()
         
         # Sort by IoU (descending)
         tile_ious.sort(key=lambda x: x[1], reverse=True)
@@ -447,13 +438,46 @@ class BestModelFullEvaluationCallback(Callback):
         
         selected = top_tiles + middle_tiles + bottom_tiles
         
+        # Build rank map: {Path: absolute_rank} (1-indexed)
+        rank_map = {}
+        for rank, (path, iou) in enumerate(tile_ious, start=1):
+            rank_map[path] = rank
+        
         # Print IoU distribution
         print(f"\nSelected {len(selected)} tiles by IoU:")
         print(f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}")
         print(f"  Middle {middle_k}: {[f'{tile_ious[middle_start+i][1]:.3f}' for i in range(min(middle_k, len(tile_ious)-middle_start))]}")
         print(f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious)-bottom_k+i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}")
         
-        return selected
+        return selected, rank_map
+
+    def _extract_tiff_number(self, filepath: Path) -> int:
+        """Extract TIFF number from filename pattern tiff_{NUM}_slice_{SLICE}.npy
+        
+        Args:
+            filepath: Path to tiff file
+            
+        Returns:
+            TIFF number as integer
+            
+        Raises:
+            ValueError: If TIFF number cannot be extracted
+        """
+        # Pattern: tiff_{NUMBER}_slice_{SLICE}.npy
+        # Example: tiff_21_slice_17.npy -> 21
+        filename = filepath.name
+        if not filename.startswith("tiff_"):
+            raise ValueError(f"Filename does not start with 'tiff_': {filename}")
+        
+        parts = filename.split("_")
+        if len(parts) < 2:
+            raise ValueError(f"Unexpected filename format: {filename}")
+        
+        try:
+            tiff_num = int(parts[1])
+            return tiff_num
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Could not extract TIFF number from {filename}: {e}")
 
     def _select_by_class_pixels(
         self, tile_paths: List[Path], pl_module: pl.LightningModule, num_samples: int
@@ -487,6 +511,8 @@ class BestModelFullEvaluationCallback(Callback):
         test_tiles: List[Path],
         output_dir: Path,
         epoch: int,
+        tile_rank_map: Dict[Path, int],
+        total_tiles: int,
     ) -> None:
         """Generate 8-panel visualizations."""
         import cv2
@@ -500,6 +526,12 @@ class BestModelFullEvaluationCallback(Callback):
         cmap = build_cmap_from_mask_names(class_names)
 
         for idx, x_path in enumerate(test_tiles):
+            # Extract TIFF number from filename for consistent naming
+            try:
+                tiff_num = self._extract_tiff_number(x_path)
+            except ValueError as e:
+                print(f"Warning: {e}. Using sequential index {idx} instead.")
+                tiff_num = idx
             x_full = np.load(x_path)
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
@@ -580,10 +612,10 @@ class BestModelFullEvaluationCallback(Callback):
 
             tp_rgb, fp_rgb, fn_rgb = make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask)
 
-            # Per-class metrics string
+            # Per-class metrics string (only show relevant classes)
             metric_string_parts = []
             if len(output_classes) == 1:  # Binary
-                # For binary, only show target class metrics with proper class name
+                # For binary, only show target class metrics
                 target_class = output_classes[0]  # 1 for CleanIce, 2 for Debris
 
                 # Calculate metrics for target class only
@@ -591,24 +623,17 @@ class BestModelFullEvaluationCallback(Callback):
                     y_pred_viz, y_true_raw, target_class, ignore
                 )
 
-                # Build metrics string with all class names but only target class has real values
-                for ci, cname in enumerate(class_names):
-                    if ci == 0:  # Background
-                        metric_string_parts.append(
-                            f"{cname}: P=0.000 R=0.000 IoU=0.000"
-                        )
-                    elif (
-                        ci == target_class
-                    ):  # Target class (ci=1 for class 1, ci=2 for class 2)
-                        metric_string_parts.append(
-                            f"{cname}: P={P:.3f} R={R:.3f} IoU={iou:.3f}"
-                        )
-                    else:  # Other class (not target)
-                        metric_string_parts.append(
-                            f"{cname}: P=0.000 R=0.000 IoU=0.000"
-                        )
+                # Only show the target class name and metrics
+                target_class_name = class_names[target_class]
+                metric_string_parts.append(
+                    f"{target_class_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}"
+                )
             else:  # Multi-class
+                # Show all non-background classes
                 for ci, cname in enumerate(class_names):
+                    if ci == 0:  # Skip background
+                        continue
+                    
                     pred_c = (y_pred_vis == ci).astype(np.uint8)
                     true_c = (y_gt_vis == ci).astype(np.uint8)
 
@@ -622,7 +647,13 @@ class BestModelFullEvaluationCallback(Callback):
                         f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}"
                     )
 
-            metrics_text = " | ".join(metric_string_parts)
+            # Add rank information if available
+            rank_text = ""
+            if x_path in tile_rank_map:
+                rank = tile_rank_map[x_path]
+                rank_text = f"Rank: {rank}/{total_tiles} | "
+            
+            metrics_text = rank_text + " | ".join(metric_string_parts)
 
             composite = make_eight_panel(
                 x_rgb=x_rgb,
@@ -636,11 +667,11 @@ class BestModelFullEvaluationCallback(Callback):
                 metrics_text=metrics_text,
             )
 
-            # New structure: fulltile_XXXX/epochYYYY.png
-            tile_dir = output_dir / f"fulltile_{idx:04d}"
+            # New structure: fulltile_XXXX/epochYYYY.png (XXXX = actual TIFF number)
+            tile_dir = output_dir / f"fulltile_{tiff_num:04d}"
             tile_dir.mkdir(parents=True, exist_ok=True)
             out_path = tile_dir / f"epoch{epoch:04d}.png"
-            print(f"Saving visualization to: {out_path}")
+            print(f"Saving visualization for TIFF {tiff_num:04d} ({x_path.name}) to: {out_path}")
             try:
                 success = cv2.imwrite(
                     str(out_path), cv2.cvtColor(composite, cv2.COLOR_RGB2BGR)

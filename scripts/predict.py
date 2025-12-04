@@ -29,23 +29,24 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib
 
+from glacier_mapping.data.data import BAND_NAMES
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
-from glacier_mapping.model.metrics import tp_fp_fn, precision, recall, IoU
+from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.visualize import (
     build_cmap,
-    make_rgb_preview,
     label_to_color,
     make_confidence_map,
-    make_entropy_map,
-    make_tp_fp_fn_masks,
     make_eight_panel,
+    make_entropy_map,
+    make_rgb_preview,
+    make_tp_fp_fn_masks,
 )
-from glacier_mapping.data.data import BAND_NAMES
+from glacier_mapping.utils import cleanup_gpu_memory
 from glacier_mapping.utils.prediction import (
+    calculate_binary_metrics,
+    create_invalid_mask,
     get_probabilities,
     merge_ci_debris,
-    create_invalid_mask,
-    calculate_binary_metrics,
 )
 
 
@@ -1031,7 +1032,7 @@ if __name__ == "__main__":
 
             # Free GPU memory
             del frame_ci, frame_deb
-            torch.cuda.empty_cache()
+            cleanup_gpu_memory(synchronize=False)
 
     # ------------------------------------------------------------------
     # FEATURE IMPORTANCE ANALYSIS (if enabled)
@@ -1110,7 +1111,7 @@ if __name__ == "__main__":
 
         # Free GPU memory
         del saliency_frame
-        torch.cuda.empty_cache()
+        cleanup_gpu_memory(synchronize=False)
 
     # ------------------------------------------------------------------
     # FINAL SUMMARY ACROSS ALL CHECKPOINTS

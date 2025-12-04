@@ -9,15 +9,16 @@ import tempfile
 import yaml
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import ray
 from ray import tune
-from ray.tune.schedulers import ASHAScheduler
 from ray.tune import ExperimentAnalysis, FailureConfig
+from ray.tune.schedulers import ASHAScheduler
 
 # Import project modules
+from glacier_mapping.utils import cleanup_gpu_memory
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -49,11 +50,11 @@ TASK_CONFIGS = {
 # Server-specific configurations
 SERVER_CONFIGS = {
     "desktop": {
-        # Desktop: Quick validation tests (1 epoch for testing)
+        # Desktop: Quick validation tests
         "skip_tier1": True,
         "datasets": ["bibek_w512_o64_f1_v2"],  # Using available dataset only
         "num_samples": 4,  # 2 batch_sizes × 2 samples
-        "max_epochs": 500,  # Quick validation: 1 epoch only
+        "max_epochs": 500,  # Maximum epochs for desktop validation runs
         "gpu_per_trial": 1.0,  # 1 trial at a time
         "batch_sizes": [4, 8],
     },
@@ -146,7 +147,6 @@ def build_base_config(
     hyperparams: Dict[str, Any],
     server_config: Dict[str, Any],
     max_epochs: int,
-    experiment_name: str,
     enable_viz: bool = False,
     test_suite_mode: bool = False,
 ) -> Dict[str, Any]:
@@ -158,7 +158,6 @@ def build_base_config(
         hyperparams: Hyperparameter dict
         server_config: Server configuration
         max_epochs: Maximum epochs to train
-        experiment_name: MLflow experiment name
         enable_viz: Enable visualizations (True for test-suite/post-eval, False for HP search)
         test_suite_mode: If True, use slice_viz_every_n_epochs=1 for frequent visualization during test
     """
@@ -182,9 +181,7 @@ def build_base_config(
             if test_suite_mode
             else (10 if enable_viz else 10),
             "run_full_eval": enable_viz,
-            "num_full_viz": 12
-            if test_suite_mode
-            else (12 if enable_viz else 0),
+            "num_full_viz": 12 if test_suite_mode else (12 if enable_viz else 0),
         },
         "loader_opts": {
             "batch_size": hyperparams.get("batch_size", 8),
@@ -339,7 +336,6 @@ def ray_trainable(config: Dict[str, Any]):
         hyperparams,
         server_config,
         max_epochs,
-        experiment_name,
         enable_viz=enable_viz,
         test_suite_mode=test_suite_mode,
     )
@@ -355,7 +351,6 @@ def ray_trainable(config: Dict[str, Any]):
 
     try:
         # Change to project root
-        project_root = Path(__file__).parent.parent
         os.chdir(project_root)
 
         # Set up arguments for train.py
@@ -400,18 +395,13 @@ def ray_trainable(config: Dict[str, Any]):
         tune.report({"val_loss": 999.0})  # High loss for failed trials
     finally:
         # GPU cleanup - critical for preventing OOM in subsequent trials
-        import torch
-        import gc
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        gc.collect()
+        cleanup_gpu_memory()
 
         # Cleanup
         sys.argv = original_argv
         os.chdir(original_cwd)
-        os.unlink(temp_config_path)
+        if Path(temp_config_path).exists():
+            os.unlink(temp_config_path)
 
 
 # =============================================================================
@@ -445,14 +435,8 @@ def run_post_evaluation(
     """
 
     # Aggressive GPU cleanup before starting post-evaluation
-    import torch
-    import gc
-
     print("\n🧹 Aggressive GPU cleanup before post-evaluation...")
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+    cleanup_gpu_memory()
 
     print(f"\n{'=' * 60}")
     print(f"POST-EVALUATION: {task.upper()}")
@@ -566,7 +550,6 @@ def run_post_evaluation(
                 hyperparams=hyperparams,
                 server_config=server_config,
                 max_epochs=max_epochs_final,
-                experiment_name=experiment_name,
                 enable_viz=True,  # Enable all visualizations
                 test_suite_mode=False,  # Use production settings (slice viz every 10 epochs)
             )
@@ -662,14 +645,8 @@ def run_post_evaluation(
                     os.unlink(temp_config_path)
 
                 # GPU cleanup between trainings
-                import torch
-                import gc
-
                 print("\n🧹 Cleaning GPU memory before next training...")
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                gc.collect()
+                cleanup_gpu_memory()
 
         # Save comparison results
         if not trained_results:
@@ -863,7 +840,7 @@ def run_tier2_search(
 
     # Get datasets for Tier 2
     if server_cfg["skip_tier1"]:
-        datasets = server_cfg["datasets"]  # Use default datasets
+        datasets = server_cfg.get("datasets", server_cfg.get("tier1_datasets", []))
         # Validate datasets exist for desktop
         validate_dataset_paths(server_config, datasets)
     else:
@@ -1029,14 +1006,8 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
     )
 
     # GPU cleanup after search completes, before post-evaluation
-    import torch
-    import gc
-
     print("\n🧹 Cleaning up GPU memory before post-evaluation...")
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+    cleanup_gpu_memory()
 
     # Post-search evaluation
     run_post_evaluation(
@@ -1052,11 +1023,16 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
 
 
 def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
-    """Run single 2-epoch test with visualizations (no hyperparameter search).
+    """Run test suite: quick validation followed by full training with visualizations.
 
-    This mode is for:
-    1. Testing the full Ray -> train.py pipeline
-    2. Running a final trained model after hyperparameter search with all viz enabled
+    This mode runs two phases:
+    1. Quick validation (2 epochs) to test the Ray -> train.py pipeline
+    2. Full training with all visualizations enabled (top-1 post-evaluation)
+
+    Ideal for:
+    - Testing the full training pipeline end-to-end
+    - Getting a complete trained model with comprehensive visualizations
+    - CI/validation workflows
 
     Args:
         task: Task type (ci, debris, multiclass)
@@ -1064,17 +1040,24 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
         server_name: Server name string
     """
 
+    server_cfg = SERVER_CONFIGS[server_name]
+
     print(f"\n{'=' * 60}")
     print(f"TEST SUITE: {task.upper()}")
     print(f"Server: {server_name}")
-    print("Epochs: 2")
-    print("Visualizations: ENABLED (12 full-tile, 4 slice)")
-    print("Slice viz frequency: Every 1 epoch")
-    print("Early stopping: 200 epochs (won't trigger in 2-epoch test)")
-    print("MLflow: ENABLED")
+    print("\nPHASE 1: Quick validation")
+    print("  Epochs: 2")
+    print("  Visualizations: ENABLED (12 full-tile)")
+    print("  Slice viz frequency: Every 1 epoch")
+    print("\nPHASE 2: Full training (runs after validation)")
+    print(
+        f"  Epochs: {server_cfg.get('max_epochs_tier2', server_cfg.get('max_epochs', 500))}"
+    )
+    print("  Early stopping: 200 epochs")
+    print("  Slice viz frequency: Every 10 epochs")
+    print("  Full evaluations: On best model improvement (12 tiles)")
+    print("\nMLflow: ENABLED")
     print(f"{'=' * 60}")
-
-    server_cfg = SERVER_CONFIGS[server_name]
     ray_results_dir = get_ray_results_dir(server_config)
 
     # Get dataset - use first available
@@ -1122,13 +1105,37 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
 
     print(f"Ray results will be saved to: {ray_results_dir}")
     print(f"Dataset: {dataset}")
-    print("Starting test suite run...")
+    print("Starting PHASE 1: Quick validation (2 epochs)...")
     results = tuner.fit()
 
-    print(f"\n✓ Test suite completed for {task}")
-    print("\nℹ️  Test suite mode does not run post-evaluation.")
-    print("   Use full hyperparameter search for post-evaluation training:")
-    print(f"   uv run python scripts/ray_train.py --server {server_name} --task {task}")
+    print("\n✓ Phase 1 completed: Quick validation successful")
+
+    # Capture search space for metadata
+    experiment_name = TEST_EXPERIMENT
+    search_space_info = {
+        "datasets": [dataset],
+        "hyperparams": "fixed (test suite mode)",
+        "mode": "test_suite",
+    }
+
+    # GPU cleanup before post-evaluation
+    print("\n🧹 Cleaning up GPU memory before post-evaluation...")
+    cleanup_gpu_memory()
+
+    # Run post-evaluation with top-1 (only 1 trial exists)
+    print("\n" + "=" * 60)
+    print("STARTING PHASE 2: Full training with visualizations")
+    print("=" * 60)
+
+    run_post_evaluation(
+        task=task,
+        server_config=server_config,
+        server_name=server_name,
+        experiment_name=experiment_name,
+        top_k=1,  # Test suite only has 1 trial
+        search_space_info=search_space_info,
+    )
+
     return results
 
 
@@ -1213,8 +1220,11 @@ def main():
             print("\nRay shutdown complete")
 
         print("\n🎉 TEST SUITE COMPLETE!")
-        print(f"Check MLflow at: {MLFLOW_URI}")
+        print("✓ Phase 1 - Quick validation (2 epochs): PASSED")
+        print("✓ Phase 2 - Full training with visualizations: COMPLETED")
+        print(f"\nCheck MLflow at: {MLFLOW_URI}")
         print(f"Experiment: {TEST_EXPERIMENT}")
+        print(f"Look for runs starting with: posteval_rank1_{args.task}_")
         return
 
     # Normal hyperparameter search mode
