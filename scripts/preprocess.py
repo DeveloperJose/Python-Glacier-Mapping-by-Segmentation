@@ -106,7 +106,9 @@ if __name__ == "__main__":
         conf.save_skipped_visualizations = True
     else:
         # Use config value, default to False if not specified
-        conf.save_skipped_visualizations = conf.get("save_skipped_visualizations", False)
+        conf.save_skipped_visualizations = conf.get(
+            "save_skipped_visualizations", False
+        )
 
     saved_df = pd.DataFrame(
         columns=[
@@ -172,11 +174,7 @@ if __name__ == "__main__":
             means, stds, mins, maxs = [], [], [], []
             savepath = Path(conf["out_dir"]) / split
             fn_process = partial(
-                fn.save_slices, 
-                labels=labels, 
-                savepath=savepath,
-                save_skipped_visualizations=conf.save_skipped_visualizations,
-                **conf
+                fn.save_slices, labels=labels, savepath=savepath, **conf
             )
             remove_and_create(savepath)
 

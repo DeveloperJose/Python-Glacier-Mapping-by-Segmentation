@@ -21,6 +21,7 @@ from glacier_mapping.model.visualize import (
     load_full_tiff_rgb,
     make_context_image,
     make_eight_panel,
+    make_redesigned_panel,
     make_error_overlay,
     make_overlay,
     make_rgb_preview,
@@ -900,15 +901,21 @@ class TestEvaluationCallback(Callback):
             title_text = " | ".join(title_parts)
             metrics_text = title_text + " | " + " | ".join(metric_string_parts)
 
-            composite = make_eight_panel(
+            # Create GT overlay for new layout
+            gt_overlay_rgb = make_overlay(x_rgb, y_gt_vis, cmap, alpha=0.5)
+
+            composite = make_redesigned_panel(
+                context_rgb=context_rgb,
                 x_rgb=x_rgb,
                 gt_rgb=label_to_color(y_gt_vis, cmap),
                 pr_rgb=label_to_color(y_pred_vis, cmap),
-                gt_overlay_rgb=context_rgb,  # Context image replaces GT overlay
+                gt_overlay_rgb=gt_overlay_rgb,
                 pr_overlay_rgb=pr_overlay_rgb,
-                tp_rgb=tp_rgb,
-                fp_rgb=fp_rgb,
-                fn_rgb=fn_rgb,
+                tp_mask=tp_mask,
+                fp_mask=fp_mask,
+                fn_mask=fn_mask,
+                cmap=cmap,
+                class_names=class_names,
                 metrics_text=metrics_text,
             )
 
