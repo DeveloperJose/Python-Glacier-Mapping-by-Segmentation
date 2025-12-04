@@ -16,7 +16,12 @@ class GlacierDataModule(pl.LightningDataModule):
         self,
         processed_dir: str,
         batch_size: int = 8,
-        use_channels: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        landsat_channels = True,
+        dem_channels = True,
+        spectral_indices_channels = True,
+        hsv_channels = True,
+        physics_channels = False,
+        velocity_channels = True,
         output_classes: List[int] = [0, 1, 2],
         class_names: List[str] = ["BG", "CleanIce", "Debris"],
         normalize: str = "mean-std",
@@ -29,7 +34,12 @@ class GlacierDataModule(pl.LightningDataModule):
         Args:
             processed_dir: Root of prepared dataset (contains train/val subfolders)
             batch_size: Batch size for DataLoaders
-            use_channels: Indices into BAND_NAMES
+            landsat_channels: Landsat band selection (true/false/list)
+            dem_channels: DEM feature selection (true/false/list)
+            spectral_indices_channels: Spectral indices selection (true/false/list)
+            hsv_channels: HSV channel selection (true/false/list)
+            physics_channels: Physics feature selection (true/false/list)
+            velocity_channels: Velocity data selection (true/false/list)
             output_classes: 0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls)
             class_names: Names for each class
             normalize: "min-max" or "mean-std"
@@ -39,7 +49,15 @@ class GlacierDataModule(pl.LightningDataModule):
         super().__init__()
         self.processed_dir = pathlib.Path(processed_dir)
         self.batch_size = batch_size
-        self.use_channels = use_channels
+        
+        # Store channel group selections
+        self.landsat_channels = landsat_channels
+        self.dem_channels = dem_channels
+        self.spectral_indices_channels = spectral_indices_channels
+        self.hsv_channels = hsv_channels
+        self.physics_channels = physics_channels
+        self.velocity_channels = velocity_channels
+        
         self.output_classes = output_classes
         self.class_names = class_names
         self.normalize = normalize
@@ -54,6 +72,20 @@ class GlacierDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for training and validation."""
+        # Import here to avoid circular imports
+        from glacier_mapping.data.data import resolve_channel_selection
+        
+        # Resolve channel groups to indices
+        self.use_channels = resolve_channel_selection(
+            self.processed_dir,
+            landsat_channels=self.landsat_channels,
+            dem_channels=self.dem_channels,
+            spectral_indices_channels=self.spectral_indices_channels,
+            hsv_channels=self.hsv_channels,
+            physics_channels=self.physics_channels,
+            velocity_channels=self.velocity_channels,
+        )
+        
         if stage == "fit" or stage is None:
             self.train_dataset = GlacierDataset(
                 self.processed_dir / "train",

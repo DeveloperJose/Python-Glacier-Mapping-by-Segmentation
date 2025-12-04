@@ -42,6 +42,41 @@ BAND_NAMES_LEGACY = np.array(
 # Global BAND_NAMES loaded dynamically
 BAND_NAMES = BAND_NAMES_LEGACY.copy()
 
+# Channel group definitions for semantic selection
+CHANNEL_GROUP_DEFINITIONS = {
+    "landsat": {
+        "indices": [0, 1, 2, 3, 4, 5, 6, 7],
+        "names": ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"],
+        "description": "Landsat-7 spectral bands",
+    },
+    "dem": {
+        "indices": [8, 9],
+        "names": ["elevation", "slope_deg"],
+        "description": "Digital Elevation Model features",
+    },
+    "spectral_indices": {
+        "indices": [10, 11, 12],
+        "names": ["NDVI", "NDWI", "NDSI"],
+        "description": "Spectral indices",
+    },
+    "hsv": {
+        "indices": [13, 14, 15],
+        "names": ["H", "S", "V"],
+        "description": "HSV color space channels",
+    },
+    "velocity": {
+        "indices": [16, 17, 18, 19],
+        "names": ["velocity", "velocity_x", "velocity_y", "velocity_mask"],
+        "description": "ITS_LIVE glacier velocity data (magnitude, vx, vy, mask)",
+        "mandatory_indices": [19],  # velocity_mask must always be included
+    },
+    "physics": {
+        "indices": [20, 21, 22, 23],
+        "names": ["flow_accumulation", "tpi", "roughness", "plan_curvature"],
+        "description": "Physics-based terrain features",
+    },
+}
+
 
 def load_band_names(processed_dir):
     """
@@ -73,10 +108,172 @@ def load_band_names(processed_dir):
         return BAND_NAMES_LEGACY.copy()
 
 
+def resolve_channel_selection(
+    processed_dir,
+    landsat_channels=None,
+    dem_channels=None,
+    spectral_indices_channels=None,
+    hsv_channels=None,
+    physics_channels=None,
+    velocity_channels=None,
+):
+    """
+    Resolve semantic channel group specifications to numerical indices.
+    
+    Args:
+        processed_dir: Path to processed dataset directory
+        landsat_channels: true (all), false/None/[] (skip), or list of indices/names
+        dem_channels: true (all), false/None/[] (skip), or list of indices/names
+        spectral_indices_channels: true (all), false/None/[] (skip), or list of indices/names
+        hsv_channels: true (all), false/None/[] (skip), or list of indices/names
+        physics_channels: true (all), false/None/[] (skip), or list of indices/names
+        velocity_channels: true (all), false/None/[] (skip), or list of indices/names
+        
+    Returns:
+        List[int]: Sorted list of channel indices to use
+        
+    Raises:
+        ValueError: If no channels are selected
+        
+    Warnings:
+        - Logs warning if requested channel not in dataset (graceful skip)
+    """
+    # Load band names to validate availability
+    band_names = load_band_names(processed_dir)
+    max_available_channels = len(band_names)
+    
+    fn.log(logging.INFO, f"Available channels in dataset: {max_available_channels}")
+    fn.log(logging.INFO, f"Band names: {band_names.tolist()}")
+    
+    selected_channels = []
+    velocity_selected = False  # Track if any velocity channel was selected
+    
+    # Process each channel group
+    channel_groups = [
+        ("landsat", landsat_channels),
+        ("dem", dem_channels),
+        ("spectral_indices", spectral_indices_channels),
+        ("hsv", hsv_channels),
+        ("velocity", velocity_channels),
+        ("physics", physics_channels),
+    ]
+    
+    for group_name, group_value in channel_groups:
+        if group_value is None or group_value is False:
+            fn.log(logging.DEBUG, f"Skipping channel group: {group_name}")
+            continue
+            
+        if group_value == []:
+            fn.log(logging.DEBUG, f"Skipping channel group (empty list): {group_name}")
+            continue
+        
+        group_def = CHANNEL_GROUP_DEFINITIONS[group_name]
+        
+        if group_value is True:
+            # Use all channels in this group (if available)
+            fn.log(logging.INFO, f"Enabling all {group_name} channels")
+            for idx in group_def["indices"]:
+                if idx < max_available_channels:
+                    selected_channels.append(idx)
+                    if group_name == "velocity":
+                        velocity_selected = True
+                else:
+                    channel_name = group_def["names"][group_def["indices"].index(idx)]
+                    fn.log(
+                        logging.WARNING,
+                        f"Channel {idx} ({channel_name}) from {group_name} not available in dataset "
+                        f"(only {max_available_channels} channels). Skipping."
+                    )
+                    
+        elif isinstance(group_value, list):
+            # Parse list of indices and/or names
+            fn.log(logging.INFO, f"Enabling selected {group_name} channels: {group_value}")
+            for item in group_value:
+                if isinstance(item, int):
+                    # Treat as index WITHIN the group (0-based)
+                    if 0 <= item < len(group_def["indices"]):
+                        channel_idx = group_def["indices"][item]
+                        if channel_idx < max_available_channels:
+                            selected_channels.append(channel_idx)
+                            if group_name == "velocity":
+                                velocity_selected = True
+                        else:
+                            fn.log(
+                                logging.WARNING,
+                                f"Channel index {channel_idx} from {group_name} not available in dataset. Skipping."
+                            )
+                    else:
+                        fn.log(
+                            logging.WARNING,
+                            f"Index {item} out of range for {group_name} (valid: 0-{len(group_def['indices'])-1})"
+                        )
+                        
+                elif isinstance(item, str):
+                    # Channel name - resolve to index
+                    if item in group_def["names"]:
+                        idx_in_group = group_def["names"].index(item)
+                        channel_idx = group_def["indices"][idx_in_group]
+                        if channel_idx < max_available_channels:
+                            selected_channels.append(channel_idx)
+                            if group_name == "velocity":
+                                velocity_selected = True
+                        else:
+                            fn.log(
+                                logging.WARNING,
+                                f"Channel '{item}' (index {channel_idx}) from {group_name} "
+                                f"not available in dataset. Skipping."
+                            )
+                    else:
+                        fn.log(
+                            logging.WARNING,
+                            f"Channel name '{item}' not found in {group_name} group. "
+                            f"Valid names: {group_def['names']}"
+                        )
+                else:
+                    fn.log(
+                        logging.WARNING,
+                        f"Invalid channel specification in {group_name}: {item}. "
+                        f"Must be int (index) or str (name)."
+                    )
+    
+    # CRITICAL: Add mandatory velocity mask if any velocity channel selected
+    if velocity_selected:
+        mask_idx = 19  # velocity_mask is always at index 19
+        if mask_idx not in selected_channels:
+            if mask_idx < max_available_channels:
+                selected_channels.append(mask_idx)
+                fn.log(logging.INFO, 
+                       "✓ Auto-included mandatory velocity_mask channel (index 19)")
+            else:
+                fn.log(logging.WARNING,
+                       "⚠ velocity_mask (index 19) not available in dataset!")
+    
+    # Remove duplicates and sort
+    selected_channels = sorted(list(set(selected_channels)))
+    
+    if not selected_channels:
+        raise ValueError(
+            "No channels selected! At least one channel group must be enabled. "
+            "Set landsat_channels, dem_channels, spectral_indices_channels, "
+            "hsv_channels, physics_channels, or velocity_channels to true or provide a list."
+        )
+    
+    fn.log(logging.INFO, f"✓ Resolved channel selection: {selected_channels}")
+    fn.log(logging.INFO, f"✓ Selected band names: {band_names[selected_channels].tolist()}")
+    fn.log(logging.INFO, f"✓ Total channels: {len(selected_channels)}")
+    
+    return selected_channels
+
+
 def fetch_loaders(
     processed_dir,
     batch_size=32,
-    use_channels=[3, 2, 1],
+    landsat_channels=True,
+    dem_channels=True,
+    spectral_indices_channels=True,
+    hsv_channels=True,
+    physics_channels=False,
+    velocity_channels=True,
     output_classes=[1],
     class_names=["BG", "CleanIce", "Debris"],
     normalize="mean-std",
@@ -91,10 +288,26 @@ def fetch_loaders(
     Args:
         processed_dir: Root of prepared dataset (contains train/val/test subfolders)
         batch_size: Batch size for DataLoader
-        use_channels: Indices into BAND_NAMES
+        landsat_channels: Channel selection for Landsat bands (true/false/list)
+        dem_channels: Channel selection for DEM features (true/false/list)
+        spectral_indices_channels: Channel selection for spectral indices (true/false/list)
+        hsv_channels: Channel selection for HSV channels (true/false/list)
+        physics_channels: Channel selection for physics features (true/false/list)
+        velocity_channels: Channel selection for velocity data (true/false/list)
         output_classes: 0=BG, 1=CleanIce, 2=Debris. If len==1 → binary (NOT~cls vs cls)
         normalize: "min-max" or "mean-std"
     """
+    # Resolve semantic channel groups to numerical indices
+    use_channels = resolve_channel_selection(
+        processed_dir,
+        landsat_channels=landsat_channels,
+        dem_channels=dem_channels,
+        spectral_indices_channels=spectral_indices_channels,
+        hsv_channels=hsv_channels,
+        physics_channels=physics_channels,
+        velocity_channels=velocity_channels,
+    )
+    
     # Load band names dynamically
     global BAND_NAMES
     BAND_NAMES = load_band_names(processed_dir)

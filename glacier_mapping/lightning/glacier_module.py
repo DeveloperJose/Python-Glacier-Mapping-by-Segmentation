@@ -45,7 +45,12 @@ class GlacierSegmentationModule(pl.LightningModule):
         loader_opts: Optional[Dict[str, Any]] = None,
         class_names: List[str] = ["BG", "CleanIce", "Debris"],
         output_classes: List[int] = [0, 1, 2],
-        use_channels: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        landsat_channels = True,
+        dem_channels = True,
+        spectral_indices_channels = True,
+        hsv_channels = True,
+        physics_channels = False,
+        velocity_channels = True,
         **kwargs,
     ):
         """
@@ -59,9 +64,15 @@ class GlacierSegmentationModule(pl.LightningModule):
             metrics_opts: Metrics configuration options
             training_opts: Training configuration options
             reg_opts: Regularization options
+            loader_opts: Loader configuration (includes processed_dir)
             class_names: Names for each class
             output_classes: Output class indices (0=BG, 1=CleanIce, 2=Debris)
-            use_channels: Input channel indices to use
+            landsat_channels: Landsat band selection (true/false/list)
+            dem_channels: DEM feature selection (true/false/list)
+            spectral_indices_channels: Spectral indices selection (true/false/list)
+            hsv_channels: HSV channel selection (true/false/list)
+            physics_channels: Physics feature selection (true/false/list)
+            velocity_channels: Velocity data selection (true/false/list)
         """
         super().__init__()
 
@@ -81,7 +92,14 @@ class GlacierSegmentationModule(pl.LightningModule):
         self.reg_opts = reg_opts
         self.class_names = class_names
         self.output_classes = output_classes
-        self.use_channels = use_channels
+        
+        # Store channel group selections
+        self.landsat_channels = landsat_channels
+        self.dem_channels = dem_channels
+        self.spectral_indices_channels = spectral_indices_channels
+        self.hsv_channels = hsv_channels
+        self.physics_channels = physics_channels
+        self.velocity_channels = velocity_channels
 
         # Add processed_dir for normalization and prediction
         if loader_opts:
@@ -90,6 +108,18 @@ class GlacierSegmentationModule(pl.LightningModule):
         else:
             self.processed_dir = "/tmp"
             self.normalization = "mean-std"
+        
+        # Resolve channels from semantic groups
+        from glacier_mapping.data.data import resolve_channel_selection
+        self.use_channels = resolve_channel_selection(
+            self.processed_dir,
+            landsat_channels=landsat_channels,
+            dem_channels=dem_channels,
+            spectral_indices_channels=spectral_indices_channels,
+            hsv_channels=hsv_channels,
+            physics_channels=physics_channels,
+            velocity_channels=velocity_channels,
+        )
 
         # Load normalization parameters
         self._load_normalization_params()
@@ -99,7 +129,7 @@ class GlacierSegmentationModule(pl.LightningModule):
         # For binary classification, output_classes has 1 element but we need 2 output channels (BG, class)
         out_channels = 2 if len(output_classes) == 1 else len(output_classes)
         self.model = Unet(
-            inchannels=len(use_channels), outchannels=out_channels, **model_args
+            inchannels=len(self.use_channels), outchannels=out_channels, **model_args
         )
 
         # Initialize loss function - filter only supported args

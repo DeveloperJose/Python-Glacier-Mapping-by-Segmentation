@@ -141,6 +141,14 @@ def main():
     optim_opts = config.get("optim_opts", {})
     scheduler_opts = config.get("scheduler_opts", {})
     metrics_opts = config.get("metrics_opts", {})
+    
+    # Extract channel group selections from loader_opts
+    landsat_channels = loader_opts.get("landsat_channels", True)
+    dem_channels = loader_opts.get("dem_channels", True)
+    spectral_indices_channels = loader_opts.get("spectral_indices_channels", True)
+    hsv_channels = loader_opts.get("hsv_channels", True)
+    physics_channels = loader_opts.get("physics_channels", False)
+    velocity_channels = loader_opts.get("velocity_channels", True)
 
     # Determine max_epochs: CLI argument overrides config, otherwise use config value
     if args.max_epochs is not None:
@@ -228,7 +236,13 @@ def main():
     print(f"Base run name: {base_run_name}")
     print(f"Output directory: {output_dir} (source: {output_dir_source})")
     print(f"Data path: {loader_opts.get('processed_dir', 'NOT_SET')}")
-    print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
+    print(f"\nChannel Selection:")
+    print(f"  Landsat: {landsat_channels}")
+    print(f"  DEM: {dem_channels}")
+    print(f"  Spectral Indices: {spectral_indices_channels}")
+    print(f"  HSV: {hsv_channels}")
+    print(f"  Physics: {physics_channels}")
+    print(f"  Velocity: {velocity_channels}")
     print(f"Output classes: {loader_opts.get('output_classes', 'NOT_SET')}")
 
     # Save config as JSON for upload script (skip if --no-output)
@@ -249,7 +263,12 @@ def main():
     datamodule = GlacierDataModule(
         processed_dir=loader_opts.get("processed_dir", "/tmp"),
         batch_size=loader_opts.get("batch_size", 8),
-        use_channels=loader_opts.get("use_channels", [0, 1, 2]),
+        landsat_channels=landsat_channels,
+        dem_channels=dem_channels,
+        spectral_indices_channels=spectral_indices_channels,
+        hsv_channels=hsv_channels,
+        physics_channels=physics_channels,
+        velocity_channels=velocity_channels,
         output_classes=loader_opts.get("output_classes", [1]),
         class_names=loader_opts.get("class_names", ["BG", "CleanIce", "Debris"]),
         normalize=loader_opts.get("normalize", "mean-std"),
@@ -265,7 +284,12 @@ def main():
         metrics_opts=metrics_opts,
         training_opts=training_opts,
         loader_opts=loader_opts,
-        use_channels=loader_opts.get("use_channels", [0, 1, 2]),
+        landsat_channels=landsat_channels,
+        dem_channels=dem_channels,
+        spectral_indices_channels=spectral_indices_channels,
+        hsv_channels=hsv_channels,
+        physics_channels=physics_channels,
+        velocity_channels=velocity_channels,
         output_classes=loader_opts.get("output_classes", [1]),
         class_names=loader_opts.get("class_names", ["BG", "CleanIce", "Debris"]),
     )
