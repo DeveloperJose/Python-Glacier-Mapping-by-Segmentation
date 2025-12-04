@@ -53,7 +53,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train glacier mapping with Lightning")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument(
-        "--max-epochs", type=int, default=3, help="Maximum epochs to train"
+        "--max-epochs",
+        type=int,
+        default=None,
+        help="Maximum epochs to train (overrides config value if specified)",
     )
     parser.add_argument(
         "--gpu", type=int, default=None, help="GPU device to use (default: auto-detect)"
@@ -138,6 +141,14 @@ def main():
     optim_opts = config.get("optim_opts", {})
     scheduler_opts = config.get("scheduler_opts", {})
     metrics_opts = config.get("metrics_opts", {})
+
+    # Determine max_epochs: CLI argument overrides config, otherwise use config value
+    if args.max_epochs is not None:
+        max_epochs = args.max_epochs
+        print(f"Using max_epochs from CLI argument: {max_epochs}")
+    else:
+        max_epochs = training_opts.get("epochs", 100)  # Default to 100 if not in config
+        print(f"Using max_epochs from config: {max_epochs}")
 
     # Auto-construct processed_dir from server config + dataset_name
     # This matches the pattern used in ray_train.py and preprocess.py
@@ -408,7 +419,7 @@ def main():
         default_root_dir=default_root,
         accelerator="gpu",
         devices=devices,
-        max_epochs=args.max_epochs,
+        max_epochs=max_epochs,
         logger=loggers,  # Support multiple loggers
         callbacks=callbacks,
         precision="16-mixed",
@@ -418,7 +429,7 @@ def main():
         num_sanity_val_steps=2,  # Quick sanity check
     )
 
-    print(f"Starting training for {args.max_epochs} epochs...")
+    print(f"Starting training for {max_epochs} epochs...")
     print(f"GPU available: {torch.cuda.is_available()}")
     if args.no_output:
         print("No-output mode: skipping all disk writes (Ray hyperparameter search)")
