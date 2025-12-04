@@ -155,8 +155,10 @@ def main():
         loader_opts["processed_dir"] = (
             f"{server_config['processed_data_path']}/{dataset_name}/"
         )
-        print(f"✓ Auto-constructed data path from server config: {loader_opts['processed_dir']}")
-    
+        print(
+            f"✓ Auto-constructed data path from server config: {loader_opts['processed_dir']}"
+        )
+
     # Validate that the constructed/specified path exists
     data_path = pathlib.Path(loader_opts["processed_dir"])
     if not data_path.exists():
@@ -164,7 +166,7 @@ def main():
             f"Processed data directory does not exist: {data_path}\n"
             f"Please run preprocessing first or check your server config."
         )
-    
+
     # Check for required normalization file
     norm_file = data_path / "normalize_train.npy"
     if not norm_file.exists():
@@ -208,7 +210,20 @@ def main():
 
     # Get run name and output directory
     base_run_name = training_opts.get("run_name", "experiment")
-    output_dir = args.output_dir or training_opts.get("output_dir", "output/")
+    # Priority: CLI arg > config file > server config > fallback
+    output_dir_source: str
+    if args.output_dir:
+        output_dir: str = args.output_dir
+        output_dir_source = "CLI argument"
+    elif training_opts.get("output_dir"):
+        output_dir = str(training_opts.get("output_dir"))
+        output_dir_source = "config file"
+    elif server_config.get("output_path"):
+        output_dir = str(server_config.get("output_path"))
+        output_dir_source = f"server config ({args.server})"
+    else:
+        output_dir = "output/"
+        output_dir_source = "default fallback"
 
     # Generate MLflow experiment name and run name
     if mlflow_enabled and MLFLOW_AVAILABLE:
@@ -233,7 +248,7 @@ def main():
         print(f"MLflow experiment: {experiment_name}")
         print(f"MLflow run name: {run_name}")
     print(f"Base run name: {base_run_name}")
-    print(f"Output directory: {output_dir}")
+    print(f"Output directory: {output_dir} (source: {output_dir_source})")
     print(f"Data path: {loader_opts.get('processed_dir', 'NOT_SET')}")
     print(f"Using channels: {loader_opts.get('use_channels', 'NOT_SET')}")
     print(f"Output classes: {loader_opts.get('output_classes', 'NOT_SET')}")
