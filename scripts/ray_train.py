@@ -55,11 +55,14 @@ SERVER_CONFIGS = {
         "datasets": ["bibek_w512_o64_f1_v2"],  # Using available dataset only
         "num_samples": 4,  # 2 batch_sizes × 2 samples
         "max_epochs": 500,  # Maximum epochs for desktop validation runs
-        "gpu_per_trial": 1.0,  # 1 trial at a time
+        "gpu_per_trial": 1.0,  # 1 GPU = 1 trial at a time
         "batch_sizes": [4, 8],
+        "num_cpus": 2,  # Limit Ray CPU usage
+        "disable_mlflow": False,  # Desktop can use MLflow
     },
     "frodo": {
         # Frodo: All available datasets (window/overlap/filter variations)
+        # 4x 2080 Ti GPUs (11GB each)
         "skip_tier1": False,
         "tier1_datasets": [
             "bibek_w256_o64_f1_v2",
@@ -78,11 +81,14 @@ SERVER_CONFIGS = {
         "num_samples": 20,
         "max_epochs_tier1": 100,
         "max_epochs_tier2": 100,
-        "gpu_per_trial": 1.0,  # 1 trial per GPU = 3 concurrent
+        "gpu_per_trial": 0.25,  # 4 GPUs = 4 concurrent trials max
         "batch_sizes": [4, 8, 16],
+        "num_cpus": 8,  # Limit Ray CPU usage (4 trials + overhead)
+        "disable_mlflow": True,  # University server: no external connections
     },
     "bilbo": {
         # Bilbo: All available physics datasets (complete physics exploration)
+        # 2x 3090 GPUs (24GB each)
         "skip_tier1": False,
         "tier1_datasets": [
             "bibek_w512_o64_f1_v2",
@@ -96,8 +102,10 @@ SERVER_CONFIGS = {
         "num_samples": 20,
         "max_epochs_tier1": 100,
         "max_epochs_tier2": 100,
-        "gpu_per_trial": 1.0,  # 1 trial per GPU = 3 concurrent
-        "batch_sizes": [8, 16, 32, 64],  # Push boundaries on 4090s
+        "gpu_per_trial": 0.5,  # 2 GPUs = 2 concurrent trials max
+        "batch_sizes": [8, 16, 32, 64],  # Push boundaries on 3090s
+        "num_cpus": 6,  # Limit Ray CPU usage (2 trials + overhead)
+        "disable_mlflow": True,  # University server: no external connections
     },
 }
 
@@ -328,6 +336,7 @@ def ray_trainable(config: Dict[str, Any]):
     project_root = Path(__file__).parent.parent
     servers_yaml_path = project_root / "configs" / "servers.yaml"
     server_config = load_server_config(str(servers_yaml_path), server)
+    server_cfg = SERVER_CONFIGS.get(server, {})
 
     # Build complete training configuration
     full_config = build_base_config(
@@ -364,17 +373,23 @@ def ray_trainable(config: Dict[str, Any]):
             str(max_epochs),
             "--experiment-name",
             experiment_name,
-            "--tracking-uri",
-            MLFLOW_URI,
             "--output-dir",
             server_config["output_path"],
             # GPU auto-detected via Ray's CUDA_VISIBLE_DEVICES
         ]
 
-        # Conditional flags based on mode
+        # Conditional flags based on mode and server config
         if enable_viz:
-            # Test suite mode: enable MLflow, save outputs
-            sys.argv.extend(["--mlflow-enabled", "true"])
+            # Post-eval or test-suite mode: enable outputs
+            if server_cfg.get("disable_mlflow", False):
+                # University server: no MLflow, but keep local outputs
+                sys.argv.extend(["--mlflow-enabled", "false"])
+                print(f"[RAY] MLflow disabled for {server} (local logging only)")
+            else:
+                # Desktop: enable MLflow
+                sys.argv.extend(
+                    ["--mlflow-enabled", "true", "--tracking-uri", MLFLOW_URI]
+                )
         else:
             # Hyperparameter search mode: disable MLflow, skip disk writes
             sys.argv.extend(["--mlflow-enabled", "false", "--no-output"])
@@ -587,13 +602,25 @@ def run_post_evaluation(
                     str(max_epochs_final),
                     "--experiment-name",
                     experiment_name,
-                    "--tracking-uri",
-                    MLFLOW_URI,
                     "--output-dir",
                     server_config["output_path"],
-                    "--mlflow-enabled",
-                    "true",
                 ]
+
+                # Add MLflow args only if not disabled
+                server_cfg = SERVER_CONFIGS.get(server_name, {})
+                if not server_cfg.get("disable_mlflow", False):
+                    sys.argv.extend(
+                        [
+                            "--tracking-uri",
+                            MLFLOW_URI,
+                            "--mlflow-enabled",
+                            "true",
+                        ]
+                    )
+                    print(f"  MLflow enabled: {MLFLOW_URI}")
+                else:
+                    sys.argv.extend(["--mlflow-enabled", "false"])
+                    print(f"  MLflow disabled for {server_name} (local logging only)")
 
                 # Import and run training
                 from scripts.train import main as train_main
@@ -1183,22 +1210,37 @@ def main():
     if args.test_suite and not args.task:
         parser.error("--test-suite requires --task to be specified")
 
-    # Validate Ray availability
+    # Load server configuration FIRST (needed for Ray init)
+    server_config = load_server_config("configs/servers.yaml", args.server)
+    server_cfg = SERVER_CONFIGS.get(args.server, {})
+
+    # Initialize Ray with server-specific resource limits (quiet mode for universities)
     try:
         if not ray.is_initialized():
             ray.init(
+                num_cpus=server_cfg.get("num_cpus", 4),  # Limit CPU usage
+                include_dashboard=False,  # No web dashboard (saves ports)
+                configure_logging=False,  # Reduce logging overhead
                 runtime_env={
                     "working_dir": None,  # Disable packaging entirely
-                    "env_vars": {"PYTHONPATH": ".", "RAY_DISABLE_IMPORT_WARNING": "1"},
-                }
+                    "env_vars": {
+                        "PYTHONPATH": ".",
+                        "RAY_DISABLE_IMPORT_WARNING": "1",
+                        "RAY_DISABLE_DASHBOARD": "1",
+                    },
+                },
             )
+            print(
+                f"✓ Ray initialized: {server_cfg.get('num_cpus', 4)} CPUs, dashboard disabled"
+            )
+            if server_cfg.get("disable_mlflow", False):
+                print(
+                    f"✓ MLflow disabled for {args.server} (university server mode - local logging only)"
+                )
     except Exception as e:
         print(f"Failed to initialize Ray: {e}")
         print("Install Ray with: uv pip install ray[tune]")
         sys.exit(1)
-
-    # Load server configuration
-    server_config = load_server_config("configs/servers.yaml", args.server)
 
     # Handle test-suite mode separately
     if args.test_suite:
@@ -1206,7 +1248,10 @@ def main():
         print(f"Server: {args.server}")
         print(f"Task: {args.task}")
         print(f"Experiment: {TEST_EXPERIMENT}")
-        print(f"MLflow URI: {MLFLOW_URI}")
+        if not server_cfg.get("disable_mlflow", False):
+            print(f"MLflow URI: {MLFLOW_URI}")
+        else:
+            print("MLflow: DISABLED (local logging only)")
 
         try:
             run_test_suite(args.task, server_config, args.server)
@@ -1222,8 +1267,12 @@ def main():
         print("\n🎉 TEST SUITE COMPLETE!")
         print("✓ Phase 1 - Quick validation (2 epochs): PASSED")
         print("✓ Phase 2 - Full training with visualizations: COMPLETED")
-        print(f"\nCheck MLflow at: {MLFLOW_URI}")
-        print(f"Experiment: {TEST_EXPERIMENT}")
+        if not server_cfg.get("disable_mlflow", False):
+            print(f"\nCheck MLflow at: {MLFLOW_URI}")
+            print(f"Experiment: {TEST_EXPERIMENT}")
+        else:
+            print(f"\nResults saved locally to: {server_config['output_path']}")
+            print("Use rsync to copy to desktop, then upload with upload_to_mlflow.py")
         print(f"Look for runs starting with: posteval_rank1_{args.task}_")
         return
 
@@ -1238,7 +1287,10 @@ def main():
     print(f"Server: {args.server}")
     print(f"Tasks: {', '.join(tasks_to_run)}")
     print("Experiment: production")
-    print(f"MLflow URI: {MLFLOW_URI}")
+    if not server_cfg.get("disable_mlflow", False):
+        print(f"MLflow URI: {MLFLOW_URI}")
+    else:
+        print("MLflow: DISABLED (local logging only)")
 
     # Run each task sequentially
     for task in tasks_to_run:
@@ -1254,8 +1306,12 @@ def main():
         print("\nRay shutdown complete")
 
     print("\n🎉 HYPERPARAMETER SEARCH COMPLETE!")
-    print(f"Check MLflow at: {MLFLOW_URI}")
-    print("Experiments: clean_ice, debris_ice, multi_class")
+    if not server_cfg.get("disable_mlflow", False):
+        print(f"Check MLflow at: {MLFLOW_URI}")
+        print("Experiments: clean_ice, debris_ice, multi_class")
+    else:
+        print(f"Results saved locally to: {server_config['output_path']}")
+        print("Use rsync to copy to desktop, then upload with upload_to_mlflow.py")
 
 
 if __name__ == "__main__":
