@@ -1,0 +1,3 @@
+training_opts:
+  dataset_name: bibek_w512_o64_f00001_v2
+  run_name: ci_f00001

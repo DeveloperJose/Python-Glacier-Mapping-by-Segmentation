@@ -1,0 +1,70 @@
+# Global training configuration - base for all experiments
+# This is the top-level config file that all experiment configs inherit from.
+# Override any parameter in child configs for experiment-specific settings.
+
+training_opts:
+  dataset_name: "nameless_run"  # Default run name (override in experiment configs)
+  run_name: ""  # Optional run identifier (appended to dataset_name)
+  epochs: 500
+  fine_tune: false
+  find_lr: false
+  early_stopping: 100  # Epochs to wait for improvement before stopping
+  # Slice visualizations (validation batch samples, every N epochs)
+  num_slice_viz: 12  # 1+ to generate, 0 or less to skip
+  slice_viz_every_n_epochs: 10
+  # Full-tile evaluation (on best model only)
+  run_full_eval: true  # Run full-tile test set evaluation
+  num_full_viz: 12  # 1+ to generate PNGs, 0 or less for metrics only
+
+loader_opts:
+  batch_size: 16  # Default batch size (can be overridden by server config or experiment)
+  
+  # Channel groups (semantic selection)
+  landsat_channels: true  # [0-7] Landsat B1-B7
+  dem_channels: true  # [8-9] elevation, slope
+  spectral_indices_channels: true  # [10-12] NDVI, NDWI, NDSI
+  hsv_channels: true  # [13-15] H, S, V
+  velocity_channels: false  # [16-19] ITS_LIVE velocity, vx, vy, mask
+  physics_channels: false  # [20-23] flow_accumulation, tpi, roughness, curvature
+  
+  # Fine-grained channel selection examples (use in experiment configs):
+  # landsat_channels: [0, 1, 2]                    # Specific indices (B1, B2, B3)
+  # landsat_channels: ["B1", "B2", "B3"]           # By name
+  # spectral_indices_channels: ["NDVI", "NDSI"]    # Subset of indices
+  # velocity_channels: [0, 1]                      # magnitude, vx → auto-adds mask → [16, 17, 19]
+  # velocity_channels: false                       # Disable velocity entirely
+  
+  output_classes: [1]  # Binary segmentation: [1]=CleanIce, [2]=Debris, [1,2]=Multiclass
+  normalize: "mean-std"  # "min-max" or "mean-std"
+  class_names: ["BG", "CleanIce", "Debris"]
+
+metrics_opts:
+  metrics: ["IoU", "precision", "recall"]
+  threshold: [0.5, 0.5]  # Per-class thresholds for binary classification
+
+loss_opts:
+  name: "custom"
+  masked: false
+  gaussian_blur_sigma: null
+  label_smoothing: 0
+  use_unified: false
+
+model_opts:
+  args:
+    net_depth: 4
+    dropout: 0.1
+    spatial: true
+    first_channel_output: 32
+
+optim_opts:
+  name: "AdamW"
+  args:
+    lr: 0.0003
+    weight_decay: 5e-5
+
+scheduler_opts:
+  name: "OneCycleLR"
+  args:
+    max_lr: 0.001  # Peak LR (3.3x base lr)
+    pct_start: 0.3  # 30% warmup, 70% annealing
+    anneal_strategy: "cos"

@@ -12,6 +12,9 @@ desktop:
   labels_dir: /home/devj/local-debian/datasets/HKH_raw/labels_fixed
   # Preprocessing output directory
   processed_data_path: /home/devj/local-debian/datasets/HKH
+  # Training defaults
+  batch_size: 8
+  epochs: 500
 
 bilbo:
   hostname: bilbo
@@ -25,6 +28,9 @@ bilbo:
   labels_dir: /data/jperez/datasets/HKH_raw/labels_fixed
   # Preprocessing output directory
   processed_data_path: /home/jperez/datasets/HKH
+  # Training defaults
+  batch_size: 32
+  epochs: 500
 
 frodo:
   hostname: frodo
@@ -38,3 +44,6 @@ frodo:
   labels_dir: /home/jperez/datasets/HKH_raw/labels_fixed
   # Preprocessing output directory
   processed_data_path: /home/jperez/datasets/HKH
+  # Training defaults
+  batch_size: 16
+  epochs: 500

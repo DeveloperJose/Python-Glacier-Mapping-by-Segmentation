@@ -1,0 +1,5 @@
+# Debris-Covered Ice (DCI) binary segmentation task defaults
+loader_opts:
+  output_classes: [2]  # 0=BG, 2=Debris (ignore clean ice)
+metrics_opts:
+  threshold: [0.5, 0.5]  # BG, Debris

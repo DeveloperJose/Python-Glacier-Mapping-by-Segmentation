@@ -158,16 +158,29 @@ configs = sys.argv[1:]
 
 def parse_config(filename):
     """Extract task, dataset, sample_size, scale from filename."""
+    # New structure: configs/{server}/{task}/{experiment}.yaml
+    parts = filename.split("/")
     base = os.path.basename(filename).replace(".yaml", "")
-    server = os.environ.get("SERVER", "bilbo")
-    parts = base.replace(f"{server}_", "").split("_")
     
-    task = parts[0]  # ci, dci, multi
+    # Extract task from path (e.g., "configs/frodo/clean_ice/base.yaml")
+    if len(parts) >= 3:
+        task_folder = parts[2]  # clean_ice, debris_ice, multiclass
+        # Map to old naming convention
+        if task_folder == "clean_ice":
+            task = "ci"
+        elif task_folder == "debris_ice":
+            task = "dci"
+        elif task_folder == "multiclass":
+            task = "multi"
+        else:
+            task = "unknown"
+    else:
+        task = "unknown"
     
     # Determine if base
-    is_base = ("base" in parts)
+    is_base = (base == "base")
     
-    # Extract sample size
+    # Extract sample size from experiment name
     if "phys32" in base:
         sample_size = 32
     elif "phys64" in base:
@@ -235,12 +248,18 @@ filter_configs_by_tasks() {
     # Convert comma-separated tasks to array
     IFS=',' read -ra tasks <<<"$task_filter"
 
-    # Filter configs
+    # Filter configs (new structure: configs/{server}/{task}/{experiment}.yaml)
     for config in "${configs[@]}"; do
-        local basename=$(basename "$config" .yaml)
         for task in "${tasks[@]}"; do
             task=$(echo "$task" | xargs) # Trim whitespace
-            if [[ "$basename" =~ _${task}_ ]] || [[ "$basename" =~ _${task}$ ]]; then
+            # Map task abbreviation to folder name
+            if [[ "$task" == "ci" && "$config" =~ /clean_ice/ ]]; then
+                echo "$config"
+                break
+            elif [[ "$task" == "dci" && "$config" =~ /debris_ice/ ]]; then
+                echo "$config"
+                break
+            elif [[ "$task" == "multi" && "$config" =~ /multiclass/ ]]; then
                 echo "$config"
                 break
             fi
@@ -391,11 +410,11 @@ export PRIORITY_ORDER
 # Find and Sort Config Files
 ################################################################################
 
-# Step 1: Discover all configs
-mapfile -t ALL_CONFIGS < <(ls configs/${SERVER}_*.yaml 2>/dev/null)
+# Step 1: Discover all configs (new hierarchical structure)
+mapfile -t ALL_CONFIGS < <(find configs/${SERVER} -name "*.yaml" -type f 2>/dev/null | sort)
 
 if [ ${#ALL_CONFIGS[@]} -eq 0 ]; then
-    print_error "No config files found matching pattern: configs/${SERVER}_*.yaml"
+    print_error "No config files found in: configs/${SERVER}/"
     exit 1
 fi
 

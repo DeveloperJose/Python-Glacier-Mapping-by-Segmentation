@@ -1,0 +1,5 @@
+# Clean Ice (CI) binary segmentation task defaults
+loader_opts:
+  output_classes: [1]  # 0=BG, 1=CleanIce (ignore debris)
+metrics_opts:
+  threshold: [0.5, 0.5]  # BG, CleanIce

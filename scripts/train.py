@@ -41,11 +41,105 @@ except ImportError as e:
     ERROR_HANDLER_AVAILABLE = False
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    """Load YAML configuration file."""
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    return config
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deep merge two dictionaries, override takes precedence.
+    
+    Args:
+        base: Base dictionary
+        override: Override dictionary (takes precedence)
+    
+    Returns:
+        Merged dictionary
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(config_path: str, server: str) -> Dict[str, Any]:
+    """
+    Load YAML configuration with 4-level hierarchy:
+    1. train.yaml (global defaults)
+    2. servers.yaml[server] -> loader_opts/training_opts
+    3. tasks/{task}.yaml (inferred from path)
+    4. {experiment_path} (specific experiment)
+    
+    Args:
+        config_path: Path to experiment config (e.g., "configs/frodo/clean_ice/base.yaml")
+        server: Server name (e.g., "frodo")
+    
+    Returns:
+        Merged configuration dictionary
+    """
+    config_path_obj = pathlib.Path(config_path)
+    
+    # Parse task from path structure
+    path_parts = config_path_obj.parts
+    if len(path_parts) >= 3 and path_parts[0] == "configs":
+        server_from_path = path_parts[1]  # e.g., "frodo"
+        task = path_parts[2]  # e.g., "clean_ice"
+        
+        # Validate server consistency
+        if server != server_from_path:
+            raise ValueError(
+                f"Server mismatch: CLI arg '{server}' != path '{server_from_path}'\n"
+                f"Config path: {config_path}"
+            )
+    else:
+        # Fallback for configs not following new structure
+        print(f"Warning: Config path doesn't follow new structure: {config_path}")
+        print(f"Loading as standalone config without hierarchy")
+        with open(config_path) as f:
+            return yaml.safe_load(f)
+    
+    # 1. Load train.yaml (global base config)
+    base_config_path = pathlib.Path("configs/train.yaml")
+    if not base_config_path.exists():
+        raise FileNotFoundError(f"Base config not found: {base_config_path}")
+    
+    with open(base_config_path) as f:
+        merged = yaml.safe_load(f)
+    
+    # 2. Load server-specific training settings from servers.yaml
+    servers_yaml_path = pathlib.Path("configs/servers.yaml")
+    if servers_yaml_path.exists():
+        with open(servers_yaml_path) as f:
+            servers = yaml.safe_load(f)
+        
+        if server in servers:
+            server_config = servers[server]
+            # Extract training-relevant fields (batch_size, epochs)
+            if "batch_size" in server_config:
+                if "loader_opts" not in merged:
+                    merged["loader_opts"] = {}
+                merged["loader_opts"]["batch_size"] = server_config["batch_size"]
+            if "epochs" in server_config:
+                if "training_opts" not in merged:
+                    merged["training_opts"] = {}
+                merged["training_opts"]["epochs"] = server_config["epochs"]
+    
+    # 3. Load task config
+    task_config_path = pathlib.Path(f"configs/tasks/{task}.yaml")
+    if task_config_path.exists():
+        with open(task_config_path) as f:
+            task_config = yaml.safe_load(f)
+        merged = deep_merge(merged, task_config)
+    
+    # 4. Load experiment-specific config
+    with open(config_path) as f:
+        experiment_config = yaml.safe_load(f)
+    merged = deep_merge(merged, experiment_config)
+    
+    return merged
 
 
 def main():
@@ -111,10 +205,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Load configuration
+    # Load configuration with hierarchical merging
     config_path = pathlib.Path(args.config)
 
-    config = load_config(str(config_path))
+    config = load_config(str(config_path), args.server)
 
     # Parse MLflow arguments
     mlflow_enabled = args.mlflow_enabled.lower() == "true"
