@@ -53,14 +53,36 @@ class GlacierVisualizationCallback(Callback):
     ):
         """Generate and save visualization samples."""
         # Get a batch from validation dataloader
-        if trainer.val_dataloaders and len(trainer.val_dataloaders) > 0:
-            val_dataloader = trainer.val_dataloaders[0]
-            batch = next(iter(val_dataloader))
-        else:
+        # Handle both single DataLoader and list of DataLoaders (PL 2.x compatibility)
+        val_dataloaders = trainer.val_dataloaders
+        
+        if val_dataloaders is None:
             print("Warning: No validation dataloader available for visualization")
             return
+        
+        # Extract first dataloader (handle both single and multiple cases)
+        if isinstance(val_dataloaders, list):
+            if len(val_dataloaders) == 0:
+                print("Warning: No validation dataloader available for visualization")
+                return
+            val_dataloader = val_dataloaders[0]
+        else:
+            val_dataloader = val_dataloaders
+        
+        batch = next(iter(val_dataloader))
 
         x, y_onehot, y_int = batch
+        
+        # Convert from NHWC to NCHW format (matching training_step/validation_step)
+        x = x.permute(0, 3, 1, 2)
+        y_onehot = y_onehot.permute(0, 3, 1, 2)
+        y_int = y_int.squeeze(-1)  # Remove last dimension: (N, H, W, 1) -> (N, H, W)
+        
+        # Move to correct device
+        device = pl_module.device
+        x = x.to(device)
+        y_onehot = y_onehot.to(device)
+        y_int = y_int.to(device)
 
         # Get model predictions
         pl_module.eval()
@@ -72,9 +94,15 @@ class GlacierVisualizationCallback(Callback):
 
         # Generate visualizations for first N samples
         for i in range(min(self.num_samples, x.shape[0])):
-            sample_x = x[i : i + 1]
-            sample_y = y_int[i : i + 1]
-            sample_pred = torch.argmax(y_hat[i : i + 1], dim=1, keepdim=True)
+            # Extract single sample and convert to numpy (H, W, C) format
+            # x: (N, C, H, W) -> (H, W, C)
+            sample_x_np = x[i].permute(1, 2, 0).cpu().numpy()
+            
+            # y_int: (N, H, W) -> (H, W)
+            sample_y_np = y_int[i].cpu().numpy()
+            
+            # y_hat: (N, C, H, W) -> (H, W) prediction
+            sample_pred_np = torch.argmax(y_hat[i], dim=0).cpu().numpy()
 
             # Create and save 8-panel visualization
             if self.save_dir:
@@ -84,16 +112,35 @@ class GlacierVisualizationCallback(Callback):
                 save_path = slice_dir / f"epoch{trainer.current_epoch + 1:04d}.png"
 
                 from matplotlib import pyplot as plt
+                from glacier_mapping.model.visualize import make_rgb_preview, label_to_color, build_cmap
+
+                # Convert input to RGB preview
+                x_rgb = make_rgb_preview(sample_x_np)
+                
+                # Build colormap for ground truth and prediction
+                cmap = build_cmap(
+                    num_classes=len(pl_module.output_classes),
+                    is_binary=(len(pl_module.output_classes) == 1),
+                    classname=pl_module.class_names[pl_module.output_classes[0]] if len(pl_module.output_classes) == 1 else None
+                )
+                
+                # Convert labels to RGB
+                gt_rgb = label_to_color(sample_y_np, cmap)
+                pr_rgb = label_to_color(sample_pred_np, cmap)
+                
+                # Create placeholder images for None values (black images with same size as x_rgb)
+                import numpy as np
+                placeholder = np.zeros_like(x_rgb, dtype=np.uint8)
 
                 viz = make_eight_panel(
-                    x_rgb=sample_x,
-                    gt_rgb=sample_y,
-                    pr_rgb=sample_pred,
-                    conf_rgb=None,
-                    tp_rgb=None,
-                    fp_rgb=None,
-                    fn_rgb=None,
-                    entropy_rgb=None,
+                    x_rgb=x_rgb,
+                    gt_rgb=gt_rgb,
+                    pr_rgb=pr_rgb,
+                    conf_rgb=placeholder,  # Placeholder for confidence map
+                    tp_rgb=placeholder,    # Placeholder for TP
+                    fp_rgb=placeholder,    # Placeholder for FP
+                    fn_rgb=placeholder,    # Placeholder for FN
+                    entropy_rgb=placeholder,  # Placeholder for entropy
                     metrics_text=None,
                 )
 

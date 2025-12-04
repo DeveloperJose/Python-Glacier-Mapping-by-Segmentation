@@ -103,7 +103,7 @@ SERVER_CONFIGS = {
 # Fixed Tier 1 hyperparameters (same model, different datasets)
 TIER1_FIXED_PARAMS = {
     "net_depth": 4,
-    "first_channel_output": 64,
+    "first_channel_output": 32,  # Match unet_train.yaml baseline (64 is 4x larger model)
     "lr": 0.0003,
     "max_lr": 0.001,
     "dropout": 0.1,
@@ -148,6 +148,7 @@ def build_base_config(
     max_epochs: int,
     experiment_name: str,
     enable_viz: bool = False,
+    test_suite_mode: bool = False,
 ) -> Dict[str, Any]:
     """Build complete training configuration.
 
@@ -158,7 +159,8 @@ def build_base_config(
         server_config: Server configuration
         max_epochs: Maximum epochs to train
         experiment_name: MLflow experiment name
-        enable_viz: Enable visualizations (True for test-suite, False for HP search)
+        enable_viz: Enable visualizations (True for test-suite/post-eval, False for HP search)
+        test_suite_mode: If True, use slice_viz_every_n_epochs=1 for frequent visualization during test
     """
 
     task_config = TASK_CONFIGS[task]
@@ -171,12 +173,18 @@ def build_base_config(
             "epochs": max_epochs,
             "fine_tune": False,
             "find_lr": False,
-            "early_stopping": 100,
-            # Visualization settings - enabled for test-suite, disabled for HP search
-            "num_slice_viz": 4 if enable_viz else 0,
-            "slice_viz_every_n_epochs": 1 if enable_viz else 10,
+            "early_stopping": 200
+            if enable_viz
+            else 100,  # Match post-eval when viz enabled
+            # Visualization settings - match post-eval exactly when enable_viz=True
+            "num_slice_viz": 12 if enable_viz else 0,
+            "slice_viz_every_n_epochs": 1
+            if test_suite_mode
+            else (10 if enable_viz else 10),
             "run_full_eval": enable_viz,
-            "num_full_viz": 4 if enable_viz else 0,
+            "num_full_viz": 12
+            if test_suite_mode
+            else (12 if enable_viz else 0),
         },
         "loader_opts": {
             "batch_size": hyperparams.get("batch_size", 8),
@@ -317,6 +325,7 @@ def ray_trainable(config: Dict[str, Any]):
     experiment_name = config["experiment_name"]
     hyperparams = config["hyperparams"]
     enable_viz = config.get("enable_viz", False)
+    test_suite_mode = config.get("test_suite_mode", False)
 
     # Load server configuration (use absolute path for Ray workers)
     project_root = Path(__file__).parent.parent
@@ -332,6 +341,7 @@ def ray_trainable(config: Dict[str, Any]):
         max_epochs,
         experiment_name,
         enable_viz=enable_viz,
+        test_suite_mode=test_suite_mode,
     )
 
     # Create temporary config file
@@ -389,6 +399,15 @@ def ray_trainable(config: Dict[str, Any]):
         print(f"[RAY] Training failed: {e}")
         tune.report({"val_loss": 999.0})  # High loss for failed trials
     finally:
+        # GPU cleanup - critical for preventing OOM in subsequent trials
+        import torch
+        import gc
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        gc.collect()
+
         # Cleanup
         sys.argv = original_argv
         os.chdir(original_cwd)
@@ -405,75 +424,258 @@ def run_post_evaluation(
     server_config: Dict[str, Any],
     server_name: str,
     experiment_name: str,
-    top_k: int = 10,
+    top_k: int = 3,
     search_space_info: Optional[Dict[str, Any]] = None,
 ):
-    """Run post-search evaluation of top-K checkpoints.
+    """Run full training of top-K best configurations from hyperparameter search.
+
+    Trains the top-K hyperparameter configurations discovered during search with:
+    - Full max_epochs training (from server config)
+    - Early stopping (patience=200 epochs)
+    - Enhanced visualizations (12 tiles: top/middle/bottom IoU)
+    - Complete MLflow logging and checkpointing
 
     Args:
         task: Task type (ci, debris, multiclass)
         server_config: Server configuration dict
         server_name: Server name string
         experiment_name: MLflow experiment name
-        top_k: Number of top trials to evaluate
+        top_k: Number of top trials to fully train (default: 3)
         search_space_info: Search space configuration for metadata
     """
 
+    # Aggressive GPU cleanup before starting post-evaluation
+    import torch
+    import gc
+
+    print("\n🧹 Aggressive GPU cleanup before post-evaluation...")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
     print(f"\n{'=' * 60}")
-    print(f"POST-SEARCH EVALUATION: {task.upper()}")
+    print(f"POST-EVALUATION: {task.upper()}")
+    print(f"Training top-{top_k} configurations with full epochs")
     print(f"{'=' * 60}")
 
     ray_results_dir = get_ray_results_dir(server_config)
 
-    # Check for tier2 results first, then test_suite results
+    # Find results directory (prefer tier2, fallback to test_suite)
     tier2_dir = ray_results_dir / f"glacier_search_{task}_{server_name}_tier2"
     test_suite_dir = ray_results_dir / f"glacier_test_suite_{task}_{server_name}"
 
     if tier2_dir.exists():
         results_dir = tier2_dir
+        print(f"Using tier2 results: {tier2_dir.name}")
     elif test_suite_dir.exists():
         results_dir = test_suite_dir
+        print(f"Using test_suite results: {test_suite_dir.name}")
     else:
-        print(f"No results found for {task}, skipping evaluation")
+        print(f"❌ No results found for {task}, skipping post-evaluation")
         return
 
     try:
-        # Load analysis and get best trials
+        # Load Ray analysis and get results dataframe
         analysis = ExperimentAnalysis(str(results_dir))
-        best_trials = analysis.get_best_trial(metric="val_loss", mode="min")
 
-        results = []
-
-        # Handle single best trial case
-        if best_trials:
-            trials_list = [best_trials]
-        else:
-            trials_list = []
-
-        # If no trials found, create placeholder
-        if not trials_list:
-            trials_list = [None] * top_k
-
-        for i, trial in enumerate(trials_list[:top_k]):
-            print(
-                f"\nEvaluating trial {i + 1}/{top_k}: {trial.trial_id if trial else 'placeholder'}"
+        # Get all results as dataframe
+        try:
+            results_df = analysis.dataframe()
+        except Exception as e:
+            print(f"Failed to load results dataframe: {e}")
+            # Fallback: use get_best_trial
+            best_trial = analysis.get_best_trial(metric="val_loss", mode="min")
+            if not best_trial:
+                print("No trials found in results")
+                return
+            # Create minimal dataframe from best trial
+            results_df = pd.DataFrame(
+                [
+                    {
+                        "trial_id": best_trial.trial_id,
+                        "val_loss": best_trial.last_result.get("val_loss", 999.0),
+                        **{f"config/{k}": v for k, v in best_trial.config.items()},
+                    }
+                ]
             )
 
-            # In real implementation, would load actual checkpoint and evaluate
-            # For now, create placeholder results
-            result = {
-                "trial_id": trial.trial_id if trial else f"placeholder_{i}",
-                "rank": i + 1,
-                "hyperparameters": trial.config if trial else {},
-                "test_metrics": {
-                    "precision": 0.8 + (i * 0.01),  # Placeholder
-                    "recall": 0.75 + (i * 0.01),
-                    "IoU": 0.7 + (i * 0.01),
-                },
-            }
-            results.append(result)
+        if results_df.empty:
+            print(f"No trials found in {results_dir}")
+            return
 
-        # Save comparison CSV with unique timestamp
+        # Sort by val_loss and get top-K
+        results_df = results_df.sort_values("val_loss", ascending=True)
+        top_trials = results_df.head(top_k)
+
+        print(f"\n✓ Found {len(results_df)} total trials")
+        print(f"✓ Will train top-{len(top_trials)} configurations\n")
+
+        # Get max_epochs from server config
+        server_cfg = SERVER_CONFIGS[server_name]
+        max_epochs_final = server_cfg.get(
+            "max_epochs_tier2", server_cfg.get("max_epochs", 500)
+        )
+
+        print("Post-evaluation settings:")
+        print(f"  Max epochs: {max_epochs_final}")
+        print("  Early stopping patience: 200 epochs")
+        print("  Slice visualizations: every 10 epochs")
+        print("  Full evaluations: on model improvement (12 tiles)")
+
+        trained_results = []
+
+        # Train each top configuration sequentially
+        for rank, (idx, trial_row) in enumerate(top_trials.iterrows(), start=1):
+            trial_id = trial_row.get("trial_id", f"trial_{idx}")
+            search_val_loss = trial_row.get("val_loss", 999.0)
+
+            print(f"\n{'─' * 60}")
+            print(f"RANK {rank}/{top_k}: {trial_id}")
+            print(f"Search validation loss: {search_val_loss:.4f}")
+            print(f"{'─' * 60}")
+
+            # Extract hyperparameters from trial config columns
+            hyperparams = {}
+            dataset = None
+
+            for col in trial_row.index:
+                col_str = str(col)  # Ensure column name is string
+                if col_str.startswith("config/hyperparams/"):
+                    param_name = col_str.replace("config/hyperparams/", "")
+                    hyperparams[param_name] = trial_row[col]
+                elif col_str == "config/dataset":
+                    dataset = str(trial_row[col])
+
+            if not dataset:
+                print("⚠️  Could not extract dataset from trial config, skipping")
+                continue
+
+            print(f"Dataset: {dataset}")
+            print(f"Hyperparameters: {hyperparams}")
+
+            # Build full training configuration
+            # enable_viz=True, test_suite_mode=False gives us the production post-eval settings:
+            # - num_full_viz=12 (top/middle/bottom IoU selection)
+            # - slice_viz_every_n_epochs=10
+            # - early_stopping=200
+            # - run_full_eval=True
+            full_config = build_base_config(
+                task=task,
+                dataset=dataset,
+                hyperparams=hyperparams,
+                server_config=server_config,
+                max_epochs=max_epochs_final,
+                experiment_name=experiment_name,
+                enable_viz=True,  # Enable all visualizations
+                test_suite_mode=False,  # Use production settings (slice viz every 10 epochs)
+            )
+
+            # Modify run_name to indicate post-evaluation
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            full_config["training_opts"]["run_name"] = (
+                f"posteval_rank{rank}_{task}_{dataset}_{timestamp}"
+            )
+
+            # Create temporary config file
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False
+            ) as f:
+                yaml.dump(full_config, f)
+                temp_config_path = f.name
+
+            # Run full training
+            original_argv = sys.argv.copy()
+            original_cwd = os.getcwd()
+
+            try:
+                # Change to project root
+                project_root = Path(__file__).parent.parent
+                os.chdir(project_root)
+
+                # Set up arguments for train.py
+                sys.argv = [
+                    "train.py",
+                    "--config",
+                    temp_config_path,
+                    "--server",
+                    server_name,
+                    "--max-epochs",
+                    str(max_epochs_final),
+                    "--experiment-name",
+                    experiment_name,
+                    "--tracking-uri",
+                    MLFLOW_URI,
+                    "--output-dir",
+                    server_config["output_path"],
+                    "--mlflow-enabled",
+                    "true",
+                ]
+
+                # Import and run training
+                from scripts.train import main as train_main
+
+                print(
+                    f"\n🚀 Starting full training (max {max_epochs_final} epochs, early stop @ 200)..."
+                )
+                final_val_loss = train_main()
+
+                # Collect results
+                result = {
+                    "rank": rank,
+                    "trial_id": trial_id,
+                    "dataset": dataset,
+                    "search_val_loss": search_val_loss,
+                    "final_val_loss": final_val_loss if final_val_loss else 999.0,
+                    "hyperparameters": hyperparams,
+                    "run_name": full_config["training_opts"]["run_name"],
+                }
+                trained_results.append(result)
+
+                print(f"\n✓ Rank {rank} training complete!")
+                print(f"  Final validation loss: {result['final_val_loss']:.4f}")
+                print(f"  Run name: {result['run_name']}")
+
+            except Exception as e:
+                print(f"\n❌ Training failed for rank {rank}: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+                result = {
+                    "rank": rank,
+                    "trial_id": trial_id,
+                    "dataset": dataset,
+                    "search_val_loss": search_val_loss,
+                    "final_val_loss": 999.0,
+                    "hyperparameters": hyperparams,
+                    "run_name": full_config["training_opts"]["run_name"],
+                    "error": str(e),
+                }
+                trained_results.append(result)
+
+            finally:
+                # Cleanup
+                sys.argv = original_argv
+                os.chdir(original_cwd)
+                if Path(temp_config_path).exists():
+                    os.unlink(temp_config_path)
+
+                # GPU cleanup between trainings
+                import torch
+                import gc
+
+                print("\n🧹 Cleaning GPU memory before next training...")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                gc.collect()
+
+        # Save comparison results
+        if not trained_results:
+            print("\n⚠️  No models were successfully trained")
+            return
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = (
             Path(server_config["output_path"])
@@ -482,55 +684,90 @@ def run_post_evaluation(
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        csv_filename = f"{task}_{server_name}_{timestamp}_top{top_k}.csv"
+        csv_filename = f"{task}_{server_name}_{timestamp}_top{top_k}_trained.csv"
         comparison_path = output_dir / csv_filename
 
-        # Create CSV with all hyperparameters and metrics
+        # Create comprehensive CSV
         csv_data = []
-        for result in results:
-            row = {"rank": result["rank"], "trial_id": result["trial_id"]}
+        for result in trained_results:
+            row = {
+                "rank": result["rank"],
+                "trial_id": result["trial_id"],
+                "dataset": result["dataset"],
+                "search_val_loss": result["search_val_loss"],
+                "final_val_loss": result["final_val_loss"],
+                "run_name": result.get("run_name", ""),
+            }
             row.update(result["hyperparameters"])
-            row.update(result["test_metrics"])
+            if "error" in result:
+                row["error"] = result["error"]
             csv_data.append(row)
 
         df = pd.DataFrame(csv_data)
         df.to_csv(comparison_path, index=False)
 
-        print("\n✓ Post-search evaluation complete!")
-        print(f"  Results saved to: {comparison_path}")
+        print(f"\n{'=' * 60}")
+        print("POST-EVALUATION COMPLETE!")
+        print(f"{'=' * 60}")
+        print(f"✓ Results saved to: {comparison_path}")
 
-        # Save metadata JSON with search space info
-        best_result = results[0] if results else None
+        # Save metadata
+        best_result = trained_results[0] if trained_results else None
         metadata = {
             "task": task,
             "server": server_name,
             "experiment_name": experiment_name,
             "timestamp": timestamp,
             "top_k": top_k,
+            "max_epochs_final": max_epochs_final,
+            "early_stopping_patience": 200,
             "results_dir": str(results_dir),
             "search_space": search_space_info or {},
-            "best_trial": {
+            "trained_models": len(trained_results),
+            "successful_trainings": len(
+                [r for r in trained_results if "error" not in r]
+            ),
+            "failed_trainings": len([r for r in trained_results if "error" in r]),
+            "best_model": {
+                "rank": 1,
                 "trial_id": best_result["trial_id"],
+                "dataset": best_result["dataset"],
+                "search_val_loss": best_result["search_val_loss"],
+                "final_val_loss": best_result["final_val_loss"],
                 "hyperparameters": best_result["hyperparameters"],
-                "metrics": best_result["test_metrics"],
+                "run_name": best_result.get("run_name", ""),
             }
-            if best_result
+            if best_result and "error" not in best_result
             else None,
         }
+
         metadata_path = output_dir / f"{task}_{server_name}_{timestamp}_metadata.json"
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
-        print(f"  Metadata saved to: {metadata_path}")
+        print(f"✓ Metadata saved to: {metadata_path}")
 
-        # Print recommendation
-        if best_result:
-            print(f"\nRECOMMENDED CONFIGURATION for {task.upper()}:")
-            print(f"  Trial ID: {best_result['trial_id']}")
-            print(f"  IoU: {best_result['test_metrics']['IoU']:.3f}")
-            print(f"  Hyperparameters: {best_result['hyperparameters']}")
+        # Print summary
+        print("\nTraining Summary:")
+        print(f"  Total models: {len(trained_results)}")
+        print(f"  Successful: {metadata['successful_trainings']}")
+        print(f"  Failed: {metadata['failed_trainings']}")
+
+        # Print best model recommendation
+        if best_result and "error" not in best_result:
+            print(f"\n🏆 BEST TRAINED MODEL ({task.upper()}):")
+            print(f"  Run: {best_result.get('run_name')}")
+            print(f"  Dataset: {best_result['dataset']}")
+            print(f"  Search val_loss: {best_result['search_val_loss']:.4f}")
+            print(f"  Final val_loss: {best_result['final_val_loss']:.4f}")
+            print("  Hyperparameters:")
+            for k, v in best_result["hyperparameters"].items():
+                print(f"    {k}: {v}")
 
     except Exception as e:
-        print(f"Post-search evaluation failed: {e}")
+        print(f"\n❌ Post-evaluation failed: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 # =============================================================================
@@ -791,13 +1028,23 @@ def run_single_task(task: str, args, server_config: Dict[str, Any]):
         task, server_config, server_name, experiment_name, resume_path
     )
 
+    # GPU cleanup after search completes, before post-evaluation
+    import torch
+    import gc
+
+    print("\n🧹 Cleaning up GPU memory before post-evaluation...")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
     # Post-search evaluation
     run_post_evaluation(
         task,
         server_config,
         server_name,
         experiment_name,
-        top_k=10,
+        top_k=3,  # Train top-3 configurations
         search_space_info=search_space_info,
     )
 
@@ -821,7 +1068,9 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
     print(f"TEST SUITE: {task.upper()}")
     print(f"Server: {server_name}")
     print("Epochs: 2")
-    print("Visualizations: ENABLED")
+    print("Visualizations: ENABLED (12 full-tile, 4 slice)")
+    print("Slice viz frequency: Every 1 epoch")
+    print("Early stopping: 200 epochs (won't trigger in 2-epoch test)")
     print("MLflow: ENABLED")
     print(f"{'=' * 60}")
 
@@ -840,14 +1089,6 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
     # Fixed hyperparams for test suite (no search)
     hyperparams = TIER1_FIXED_PARAMS.copy()
 
-    # Search space info for metadata
-    search_space_info = {
-        "datasets": [dataset],
-        "hyperparams": hyperparams,
-        "mode": "test_suite",
-        "note": "Single 2-epoch test run with visualizations - no hyperparameter search",
-    }
-
     # Config for single trial with viz enabled
     param_space = {
         "task": task,
@@ -855,7 +1096,8 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
         "server": server_name,
         "max_epochs": 2,
         "experiment_name": TEST_EXPERIMENT,
-        "enable_viz": True,  # Enable all visualizations
+        "enable_viz": True,  # Enable all visualizations (12 tiles)
+        "test_suite_mode": True,  # Use slice_viz_every_n_epochs=1 for test
         "hyperparams": hyperparams,
     }
 
@@ -883,17 +1125,10 @@ def run_test_suite(task: str, server_config: Dict[str, Any], server_name: str):
     print("Starting test suite run...")
     results = tuner.fit()
 
-    # Post-evaluation (even for test suite)
-    run_post_evaluation(
-        task=task,
-        server_config=server_config,
-        server_name=server_name,
-        experiment_name=TEST_EXPERIMENT,
-        top_k=1,
-        search_space_info=search_space_info,
-    )
-
     print(f"\n✓ Test suite completed for {task}")
+    print("\nℹ️  Test suite mode does not run post-evaluation.")
+    print("   Use full hyperparameter search for post-evaluation training:")
+    print(f"   uv run python scripts/ray_train.py --server {server_name} --task {task}")
     return results
 
 

@@ -8,7 +8,7 @@ from typing import Dict, Any
 import torch
 import yaml
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
@@ -262,6 +262,19 @@ def main():
                 LearningRateMonitor(logging_interval="step"),
             ]
         )
+
+        # Early stopping callback (Lightning only - no manual logic)
+        early_stopping_patience = training_opts.get("early_stopping", None)
+        if early_stopping_patience and early_stopping_patience > 0:
+            callbacks.append(
+                EarlyStopping(
+                    monitor="val_loss",
+                    patience=early_stopping_patience,
+                    mode="min",
+                    verbose=True,
+                )
+            )
+            print(f"✓ Early stopping enabled (patience={early_stopping_patience} epochs)")
 
         # Slice visualization callback (only if output enabled and num >= 1)
         num_slice_viz = training_opts.get("num_slice_viz", 4)

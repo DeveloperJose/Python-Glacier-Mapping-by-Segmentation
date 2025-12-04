@@ -368,7 +368,10 @@ class GlacierSegmentationModule(pl.LightningModule):
         _mask = np.sum(slice_arr, axis=2) == 0
         
         _x = torch.from_numpy(np.expand_dims(slice_arr, axis=0)).float().to(self.device)
-        _y = self.forward(_x.permute(0, 3, 1, 2))  # NCHW format
+        
+        # Forward pass with no_grad to avoid building computation graph
+        with torch.no_grad():
+            _y = self.forward(_x.permute(0, 3, 1, 2))  # NCHW format
         
         if len(self.output_classes) == 1:  # Binary
             if threshold is None:
@@ -381,16 +384,19 @@ class GlacierSegmentationModule(pl.LightningModule):
                 threshold = [0.5]
             
             _y = torch.sigmoid(_y)
-            _y = _y.detach().cpu().numpy()  # (1, 2, H, W)
+            _y = _y.cpu().numpy()  # (1, 2, H, W) - move to CPU immediately
             if _y.shape[0] == 1:  # Remove batch dimension
                 _y = _y[0]  # (2, H, W)
             y_pred = (_y[1] >= threshold[0]).astype(np.uint8)  # Use positive class logits
         else:  # Multi-class
             _y = torch.nn.functional.softmax(_y, dim=1)
-            _y = _y.detach().cpu().numpy()  # (1, C, H, W)
+            _y = _y.cpu().numpy()  # (1, C, H, W) - move to CPU immediately
             if _y.shape[0] == 1:  # Remove batch dimension
                 _y = _y[0]  # (C, H, W)
             y_pred = np.argmax(_y, axis=0).astype(np.uint8) + 1  # 1..C
+        
+        # Explicitly delete GPU tensor to free memory
+        del _x
         
         if use_mask:
             # Ensure mask matches y_pred shape
