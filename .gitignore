@@ -15,6 +15,10 @@ CLAUDE**
 .python-version
 .vscode
 
+# PyTorch Lightning default directories (all output should be in output/ instead)
+checkpoints/
+lightning_logs/
+
 *.png
 *.tif
 *.nc
