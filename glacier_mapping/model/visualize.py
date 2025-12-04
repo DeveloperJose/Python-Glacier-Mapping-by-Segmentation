@@ -490,33 +490,35 @@ def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5):
 
 def create_legend_row(labels_dict, width, height=40):
     """
-    Create a horizontal legend bar with color boxes and labels.
+    Create a vertical legend with color boxes and labels stacked.
 
     Args:
         labels_dict: Dictionary mapping label text to RGB color tuples
                     Example: {"Background": [128, 128, 128], "Clean Ice": [0, 120, 255]}
-        width: Width of the legend bar
-        height: Height of the legend bar
+        width: Width of the legend (will be used fully)
+        height: Height per item (default 40, but will be overridden to fit all items)
 
     Returns:
-        RGB image (height, width, 3) with legend
+        RGB image (total_height, width, 3) with vertical legend
     """
-    legend = np.full((height, width, 3), 255, dtype=np.uint8)
-
-    # Calculate box and text positions
     num_items = len(labels_dict)
-    box_size = height - 16  # Leave padding
-    spacing = (width - 20) // num_items  # Distribute evenly
+    item_height = 35  # Height per legend item
+    padding = 5
+    total_height = num_items * item_height + padding * 2
+
+    legend = np.full((total_height, width, 3), 255, dtype=np.uint8)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.4
+    font_scale = 0.45
     thickness = 1
 
-    x_offset = 10
+    box_size = 20  # Color box size
+    y_offset = padding
+
     for label, color in labels_dict.items():
-        # Draw color box
-        box_x1 = x_offset
-        box_y1 = 8
+        # Draw color box (left side)
+        box_x1 = 10
+        box_y1 = y_offset + (item_height - box_size) // 2
         box_x2 = box_x1 + box_size
         box_y2 = box_y1 + box_size
 
@@ -527,9 +529,9 @@ def create_legend_row(labels_dict, width, height=40):
             legend, (box_x1, box_y1), (box_x2, box_y2), (0, 0, 0), 1
         )  # Black border
 
-        # Draw label text
-        text_x = box_x2 + 5
-        text_y = box_y1 + box_size // 2 + 4
+        # Draw label text (right of box)
+        text_x = box_x2 + 8
+        text_y = y_offset + item_height // 2 + 5
         cv2.putText(
             legend,
             label,
@@ -541,8 +543,8 @@ def create_legend_row(labels_dict, width, height=40):
             cv2.LINE_AA,
         )
 
-        # Move to next position
-        x_offset += spacing
+        # Move to next row
+        y_offset += item_height
 
     return legend
 
@@ -664,7 +666,8 @@ def make_redesigned_panel(
     # Get dimensions for legends
     row_width = r1_temp.shape[1]  # Full row width
     single_img_width = x_rgb.shape[1]  # Single image width (for legends on right)
-    legend_height = 40
+    img_height = x_rgb.shape[0]  # Image height (legend should match this)
+    legend_bar_height = 40  # Height of the actual legend content
 
     # Create legends for each row
     # Row 2-3: Class colors (always show all classes: BG, CleanIce, Debris, Mask)
@@ -680,9 +683,16 @@ def make_redesigned_panel(
         ]
     )
 
-    class_legend = create_legend_row(class_legend_dict, single_img_width, legend_height)
+    # Create vertical legends (they return their own calculated height)
+    class_legend_bar = create_legend_row(
+        class_legend_dict, single_img_width, legend_bar_height
+    )
+    # Pad legend to match image height
+    legend_actual_height = class_legend_bar.shape[0]
+    class_legend = np.full((img_height, single_img_width, 3), 255, dtype=np.uint8)
+    class_legend[:legend_actual_height, :, :] = class_legend_bar
 
-    # Row 4: Error colors
+    # Row 4: Error colors (vertical legend)
     error_legend_dict = OrderedDict(
         [
             ("True Positive", COLOR_TP.tolist()),
@@ -690,10 +700,15 @@ def make_redesigned_panel(
             ("False Negative", COLOR_FN.tolist()),
         ]
     )
-    error_legend = create_legend_row(error_legend_dict, single_img_width, legend_height)
+    error_legend_bar = create_legend_row(
+        error_legend_dict, single_img_width, legend_bar_height
+    )
+    error_legend_actual_height = error_legend_bar.shape[0]
+    error_legend = np.full((img_height, single_img_width, 3), 255, dtype=np.uint8)
+    error_legend[:error_legend_actual_height, :, :] = error_legend_bar
 
     # Row 5: Individual error types (combined legend for both FP and FN)
-    individual_error_legend = create_legend_row(
+    individual_error_legend_bar = create_legend_row(
         OrderedDict(
             [
                 ("False Positive", COLOR_FP.tolist()),
@@ -701,50 +716,19 @@ def make_redesigned_panel(
             ]
         ),
         single_img_width,
-        legend_height,
+        legend_bar_height,
     )
-
-    # Get width for single image + border (for legends on right)
-    single_img_width = r1_temp.shape[1] // 2  # Approximate single image width
-    legend_height = 40
-
-    # Create legends for each row
-    # Row 2-3: Class colors (always show all classes: BG, CleanIce, Debris, Mask)
-    # This ensures consistency even for binary tasks
-    from collections import OrderedDict
-
-    class_legend_dict = OrderedDict(
-        [
-            ("Background", COLOR_BG.tolist()),
-            ("Clean Ice", COLOR_CI.tolist()),
-            ("Debris", COLOR_DEB.tolist()),
-            ("Mask", COLOR_IGNORE.tolist()),
-        ]
+    individual_error_legend_actual_height = individual_error_legend_bar.shape[0]
+    individual_error_legend = np.full(
+        (img_height, single_img_width, 3), 255, dtype=np.uint8
     )
-
-    class_legend = create_legend_row(class_legend_dict, single_img_width, legend_height)
-
-    # Row 4: Error colors
-    error_legend_dict = {
-        "True Positive": COLOR_TP.tolist(),
-        "False Positive": COLOR_FP.tolist(),
-        "False Negative": COLOR_FN.tolist(),
-    }
-    error_legend = create_legend_row(error_legend_dict, row_width, legend_height)
-
-    # Row 5: Individual error types (same width as combined rows)
-    individual_error_legend = create_legend_row(
-        {
-            "False Positive": COLOR_FP.tolist(),
-            "False Negative": COLOR_FN.tolist(),
-        },
-        row_width,
-        legend_height,
+    individual_error_legend[:individual_error_legend_actual_height, :, :] = (
+        individual_error_legend_bar
     )
 
     # Build rows with titles and legends on the right
     # Legend needs to match height of image+title, so add title to legends too
-    # Row 1: Context + RGB (no legend)
+    # Row 1: Context + RGB (will add spacer after to match width)
     r1 = r1_temp
 
     # Row 2: GT | Pred | Legend
@@ -753,6 +737,12 @@ def make_redesigned_panel(
         add_title(pr_rgb, "Prediction"),
         add_title(class_legend, "Legend"),
     )
+
+    # Add spacer to r1 to match r2 width
+    width_diff = r2.shape[1] - r1.shape[1]
+    if width_diff > 0:
+        blank_spacer = np.full((r1.shape[0], width_diff, 3), 255, dtype=np.uint8)
+        r1 = np.concatenate([r1, blank_spacer], axis=1)
 
     # Row 3: GT Overlay | Pred Overlay | Legend
     r3 = concat_h(

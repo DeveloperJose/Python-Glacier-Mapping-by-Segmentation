@@ -19,23 +19,28 @@ Temporal alignment:
 - Velocity: 2002-2008 median (7-year robust estimator)
 
 Usage:
-    # Test with single image
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --max-images 1
+    # Test with single image on desktop
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --max-images 1
 
-    # Process first 10 images
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --max-images 10
+    # Process first 10 images on frodo
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server frodo --max-images 10
 
     # Process all 202 images (default)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server bilbo
 
     # Use 8 parallel workers
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --workers 8
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --workers 8
 
     # Skip existing valid files (only regenerate missing + corrupted)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --skip-existing
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --skip-existing
 
     # Custom threshold for skip-existing (regenerate if max >= 30000 m/yr)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --skip-existing --skip-threshold 30000
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --skip-existing --skip-threshold 30000
+
+    # Override server paths if needed
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop \
+        --landsat-dir /custom/path/Landsat7_2005 \
+        --output-dir /custom/path/Velocity
 """
 
 import argparse
@@ -55,6 +60,8 @@ from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 from shapely.geometry import box, shape
 from tqdm import tqdm
+
+from glacier_mapping.utils.config import load_server_config
 
 # Configure logging
 logging.basicConfig(
@@ -602,16 +609,22 @@ def main():
         description="Generate velocity products from ITS_LIVE mosaics"
     )
     parser.add_argument(
+        "--server",
+        required=True,
+        choices=["desktop", "bilbo", "frodo"],
+        help="Server name for path configuration (must be specified explicitly)",
+    )
+    parser.add_argument(
         "--landsat-dir",
         type=Path,
-        default=Path("/home/devj/local-debian/datasets/HKH_raw/Landsat7_2005"),
-        help="Input Landsat directory",
+        default=None,
+        help="Input Landsat directory (default: from servers.yaml)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/home/devj/local-debian/datasets/HKH_raw/Velocity"),
-        help="Output velocity directory",
+        default=None,
+        help="Output velocity directory (default: from servers.yaml)",
     )
     parser.add_argument(
         "--max-images",
@@ -653,6 +666,17 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Load server configuration and set path defaults
+    server_config = load_server_config(args.server)
+
+    if args.landsat_dir is None:
+        args.landsat_dir = Path(server_config["image_dir"])
+        logger.info(f"Using Landsat directory from servers.yaml: {args.landsat_dir}")
+
+    if args.output_dir is None:
+        args.output_dir = Path(server_config["velocity_dir"])
+        logger.info(f"Using output directory from servers.yaml: {args.output_dir}")
 
     # Load official ITS_LIVE catalog
     catalog_path = (
