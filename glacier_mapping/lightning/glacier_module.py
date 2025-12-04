@@ -405,6 +405,8 @@ class GlacierSegmentationModule(pl.LightningModule):
 
     def _load_normalization_params(self):
         """Load normalization array from processed data directory."""
+        from glacier_mapping.data.data import load_band_names, get_no_normalize_channel_names
+        
         norm_path = Path(self.processed_dir) / "normalize_train.npy"
         if norm_path.exists():
             self.norm_arr_full = np.load(norm_path)
@@ -422,19 +424,42 @@ class GlacierSegmentationModule(pl.LightningModule):
                 ]
             )  # mean, std, min, max
             self.norm_arr = self.norm_arr_full[:2, self.use_channels]
+        
+        # Identify channels that should NOT be normalized (e.g., binary masks)
+        band_names = load_band_names(self.processed_dir)
+        no_norm_names = get_no_normalize_channel_names()
+        
+        # Build boolean mask: True = skip normalization for this channel
+        self.no_normalize_mask = np.array([
+            band_names[ch] in no_norm_names for ch in self.use_channels
+        ])
 
     def normalize(self, x):
-        """Normalize input data (from Framework)."""
+        """Normalize input data (from Framework).
+        
+        Skips normalization for channels marked as no_normalize (e.g., binary masks).
+        """
+        # Store original values for no-normalize channels
+        x_no_norm = None
+        if hasattr(self, 'no_normalize_mask') and np.any(self.no_normalize_mask):
+            x_no_norm = x[:, :, self.no_normalize_mask].copy()
+        
         if self.normalization == "mean-std":
             _mean, _std = self.norm_arr[0], self.norm_arr[1]
-            return (x - _mean) / _std
+            x_normalized = (x - _mean) / _std
         elif self.normalization == "min-max":
             # Use full normalization array for min/max values (following original Framework)
             _min = self.norm_arr_full[2, self.use_channels]  # mins for used channels
             _max = self.norm_arr_full[3, self.use_channels]  # maxs for used channels
-            return (np.clip(x, _min, _max) - _min) / (_max - _min)
+            x_normalized = (np.clip(x, _min, _max) - _min) / (_max - _min)
         else:
             raise Exception("Invalid normalization")
+        
+        # Restore original values for no-normalize channels
+        if x_no_norm is not None:
+            x_normalized[:, :, self.no_normalize_mask] = x_no_norm
+        
+        return x_normalized
 
     def predict_slice(self, slice_arr, threshold=None, preprocess=True, use_mask=True):
         """Predict on single slice (from Framework)."""

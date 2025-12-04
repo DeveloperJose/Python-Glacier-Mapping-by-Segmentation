@@ -43,35 +43,32 @@ BAND_NAMES_LEGACY = np.array(
 BAND_NAMES = BAND_NAMES_LEGACY.copy()
 
 # Channel group definitions for semantic selection
+# NOTE: Indices are resolved dynamically from band_metadata.json at runtime.
+# The "names" field is the source of truth - indices are looked up by name.
 CHANNEL_GROUP_DEFINITIONS = {
     "landsat": {
-        "indices": [0, 1, 2, 3, 4, 5, 6, 7],
         "names": ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"],
         "description": "Landsat-7 spectral bands",
     },
     "dem": {
-        "indices": [8, 9],
         "names": ["elevation", "slope_deg"],
         "description": "Digital Elevation Model features",
     },
     "spectral_indices": {
-        "indices": [10, 11, 12],
         "names": ["NDVI", "NDWI", "NDSI"],
         "description": "Spectral indices",
     },
     "hsv": {
-        "indices": [13, 14, 15],
         "names": ["H", "S", "V"],
         "description": "HSV color space channels",
     },
     "velocity": {
-        "indices": [16, 17, 18, 19],
         "names": ["velocity", "velocity_x", "velocity_y", "velocity_mask"],
         "description": "ITS_LIVE glacier velocity data (magnitude, vx, vy, mask)",
-        "mandatory_indices": [19],  # velocity_mask must always be included
+        "mandatory": ["velocity_mask"],  # velocity_mask must always be included when any velocity channel is selected
+        "no_normalize": ["velocity_mask"],  # Binary mask - should NOT be normalized
     },
     "physics": {
-        "indices": [20, 21, 22, 23],
         "names": ["flow_accumulation", "tpi", "roughness", "plan_curvature"],
         "description": "Physics-based terrain features",
     },
@@ -108,6 +105,44 @@ def load_band_names(processed_dir):
         return BAND_NAMES_LEGACY.copy()
 
 
+def resolve_channel_indices_by_name(band_names, channel_names):
+    """
+    Look up channel indices by name from band_names array.
+    
+    Args:
+        band_names: np.ndarray of band names from dataset
+        channel_names: List of channel names to resolve
+        
+    Returns:
+        Dict[str, Optional[int]]: Mapping of channel name to index (None if not found)
+    """
+    band_names_list = band_names.tolist()
+    indices = {}
+    for name in channel_names:
+        if name in band_names_list:
+            indices[name] = band_names_list.index(name)
+        else:
+            indices[name] = None
+    return indices
+
+
+def get_no_normalize_channel_names():
+    """
+    Return set of channel names that should NOT be normalized.
+    
+    These are typically binary mask channels where normalization
+    would destroy semantic meaning (e.g., velocity_mask is 0/1).
+    
+    Returns:
+        Set[str]: Channel names to exclude from normalization
+    """
+    no_norm = set()
+    for group in CHANNEL_GROUP_DEFINITIONS.values():
+        if "no_normalize" in group:
+            no_norm.update(group["no_normalize"])
+    return no_norm
+
+
 def resolve_channel_selection(
     processed_dir,
     landsat_channels=None,
@@ -119,6 +154,9 @@ def resolve_channel_selection(
 ):
     """
     Resolve semantic channel group specifications to numerical indices.
+    
+    Uses name-based lookup from band_metadata.json to dynamically resolve
+    channel indices, making the system robust to different band orderings.
     
     Args:
         processed_dir: Path to processed dataset directory
@@ -138,15 +176,19 @@ def resolve_channel_selection(
     Warnings:
         - Logs warning if requested channel not in dataset (graceful skip)
     """
-    # Load band names to validate availability
+    # Load band names from metadata - this is the source of truth for channel indices
     band_names = load_band_names(processed_dir)
-    max_available_channels = len(band_names)
     
-    fn.log(logging.INFO, f"Available channels in dataset: {max_available_channels}")
-    fn.log(logging.INFO, f"Band names: {band_names.tolist()}")
+    fn.log(logging.INFO, f"Available channels in dataset: {len(band_names)}")
+    fn.log(logging.DEBUG, f"Band names: {band_names.tolist()}")
+    
+    # Build name-to-index lookup for all channels in dataset
+    all_channel_indices = resolve_channel_indices_by_name(
+        band_names, band_names.tolist()
+    )
     
     selected_channels = []
-    velocity_selected = False  # Track if any velocity channel was selected
+    selected_channel_names = []  # Track names for mandatory channel logic
     
     # Process each channel group
     channel_groups = [
@@ -168,85 +210,102 @@ def resolve_channel_selection(
             continue
         
         group_def = CHANNEL_GROUP_DEFINITIONS[group_name]
+        group_channel_names = group_def["names"]
+        
+        # Resolve indices for this group's channels by name
+        group_indices = resolve_channel_indices_by_name(band_names, group_channel_names)
         
         if group_value is True:
-            # Use all channels in this group (if available)
+            # Use all channels in this group (if available in dataset)
             fn.log(logging.INFO, f"Enabling all {group_name} channels")
-            for idx in group_def["indices"]:
-                if idx < max_available_channels:
+            for name in group_channel_names:
+                idx = group_indices.get(name)
+                if idx is not None:
                     selected_channels.append(idx)
-                    if group_name == "velocity":
-                        velocity_selected = True
+                    selected_channel_names.append(name)
                 else:
-                    channel_name = group_def["names"][group_def["indices"].index(idx)]
                     fn.log(
                         logging.WARNING,
-                        f"Channel {idx} ({channel_name}) from {group_name} not available in dataset "
-                        f"(only {max_available_channels} channels). Skipping."
+                        f"Channel '{name}' from {group_name} not found in dataset. Skipping."
                     )
                     
         elif isinstance(group_value, list):
-            # Parse list of indices and/or names
+            # Parse list of indices (within group) and/or names
             fn.log(logging.INFO, f"Enabling selected {group_name} channels: {group_value}")
             for item in group_value:
                 if isinstance(item, int):
                     # Treat as index WITHIN the group (0-based)
-                    if 0 <= item < len(group_def["indices"]):
-                        channel_idx = group_def["indices"][item]
-                        if channel_idx < max_available_channels:
-                            selected_channels.append(channel_idx)
-                            if group_name == "velocity":
-                                velocity_selected = True
+                    if 0 <= item < len(group_channel_names):
+                        name = group_channel_names[item]
+                        idx = group_indices.get(name)
+                        if idx is not None:
+                            selected_channels.append(idx)
+                            selected_channel_names.append(name)
                         else:
                             fn.log(
                                 logging.WARNING,
-                                f"Channel index {channel_idx} from {group_name} not available in dataset. Skipping."
+                                f"Channel '{name}' (group index {item}) from {group_name} "
+                                f"not found in dataset. Skipping."
                             )
                     else:
                         fn.log(
                             logging.WARNING,
-                            f"Index {item} out of range for {group_name} (valid: 0-{len(group_def['indices'])-1})"
+                            f"Index {item} out of range for {group_name} "
+                            f"(valid: 0-{len(group_channel_names)-1})"
                         )
                         
                 elif isinstance(item, str):
                     # Channel name - resolve to index
-                    if item in group_def["names"]:
-                        idx_in_group = group_def["names"].index(item)
-                        channel_idx = group_def["indices"][idx_in_group]
-                        if channel_idx < max_available_channels:
-                            selected_channels.append(channel_idx)
-                            if group_name == "velocity":
-                                velocity_selected = True
+                    if item in group_channel_names:
+                        idx = group_indices.get(item)
+                        if idx is not None:
+                            selected_channels.append(idx)
+                            selected_channel_names.append(item)
                         else:
                             fn.log(
                                 logging.WARNING,
-                                f"Channel '{item}' (index {channel_idx}) from {group_name} "
-                                f"not available in dataset. Skipping."
+                                f"Channel '{item}' from {group_name} not found in dataset. Skipping."
                             )
                     else:
                         fn.log(
                             logging.WARNING,
-                            f"Channel name '{item}' not found in {group_name} group. "
-                            f"Valid names: {group_def['names']}"
+                            f"Channel name '{item}' not in {group_name} group. "
+                            f"Valid names: {group_channel_names}"
                         )
                 else:
                     fn.log(
                         logging.WARNING,
                         f"Invalid channel specification in {group_name}: {item}. "
-                        f"Must be int (index) or str (name)."
+                        f"Must be int (group index) or str (name)."
                     )
     
-    # CRITICAL: Add mandatory velocity mask if any velocity channel selected
-    if velocity_selected:
-        mask_idx = 19  # velocity_mask is always at index 19
-        if mask_idx not in selected_channels:
-            if mask_idx < max_available_channels:
-                selected_channels.append(mask_idx)
-                fn.log(logging.INFO, 
-                       "✓ Auto-included mandatory velocity_mask channel (index 19)")
-            else:
-                fn.log(logging.WARNING,
-                       "⚠ velocity_mask (index 19) not available in dataset!")
+    # Add mandatory channels for groups that have them (e.g., velocity_mask for velocity)
+    for group_name, group_value in channel_groups:
+        if group_value is None or group_value is False or group_value == []:
+            continue
+            
+        group_def = CHANNEL_GROUP_DEFINITIONS[group_name]
+        mandatory = group_def.get("mandatory", [])
+        
+        for mandatory_name in mandatory:
+            if mandatory_name not in selected_channel_names:
+                # Check if any channel from this group was selected
+                group_channel_names = group_def["names"]
+                if any(name in selected_channel_names for name in group_channel_names):
+                    # Try to add the mandatory channel
+                    idx = all_channel_indices.get(mandatory_name)
+                    if idx is not None:
+                        selected_channels.append(idx)
+                        selected_channel_names.append(mandatory_name)
+                        fn.log(
+                            logging.INFO,
+                            f"Auto-included mandatory '{mandatory_name}' channel (index {idx})"
+                        )
+                    else:
+                        fn.log(
+                            logging.WARNING,
+                            f"Mandatory channel '{mandatory_name}' not found in dataset!"
+                        )
     
     # Remove duplicates and sort
     selected_channels = sorted(list(set(selected_channels)))
@@ -258,9 +317,9 @@ def resolve_channel_selection(
             "hsv_channels, physics_channels, or velocity_channels to true or provide a list."
         )
     
-    fn.log(logging.INFO, f"✓ Resolved channel selection: {selected_channels}")
-    fn.log(logging.INFO, f"✓ Selected band names: {band_names[selected_channels].tolist()}")
-    fn.log(logging.INFO, f"✓ Total channels: {len(selected_channels)}")
+    fn.log(logging.INFO, f"Resolved channel selection: {selected_channels}")
+    fn.log(logging.INFO, f"Selected band names: {band_names[selected_channels].tolist()}")
+    fn.log(logging.INFO, f"Total channels: {len(selected_channels)}")
     
     return selected_channels
 
@@ -389,7 +448,7 @@ class GlacierDataset(Dataset):
     Custom Dataset for Glacier Data.
 
     Returns:
-        x        : float32 tensor (H, W, C_in) (normalized)
+        x        : float32 tensor (H, W, C_in) (normalized, except mask channels)
         y_onehot: float32 tensor (H, W, C_out) (one-hot)
         y_int   : int64   tensor (H, W, 1) with values {0,1,2,255}
     """
@@ -432,16 +491,39 @@ class GlacierDataset(Dataset):
             self.mean, self.std = self.mean[use_channels], self.std[use_channels]
         else:
             raise ValueError("normalize must be 'min-max' or 'mean-std'")
+        
+        # Identify channels that should NOT be normalized (e.g., binary masks)
+        # These channels retain their original values (typically 0/1)
+        band_names = load_band_names(folder_path.parent)
+        no_norm_names = get_no_normalize_channel_names()
+        
+        # Build boolean mask: True = skip normalization for this channel
+        self.no_normalize_mask = np.array([
+            band_names[ch] in no_norm_names for ch in use_channels
+        ])
+        
+        if np.any(self.no_normalize_mask):
+            skip_names = [band_names[ch] for ch, skip in zip(use_channels, self.no_normalize_mask) if skip]
+            fn.log(logging.INFO, f"Channels excluded from normalization: {skip_names}")
 
     def __getitem__(self, index):
         file_data = np.load(self.img_files[index])
         data = file_data[:, :, self.use_channels]
+        
+        # Store original values for channels that should not be normalized
+        data_no_norm = None
+        if np.any(self.no_normalize_mask):
+            data_no_norm = data[:, :, self.no_normalize_mask].copy()
 
         if self.normalize == "min-max":
             data = np.clip(data, self.min, self.max)
             data = (data - self.min) / (self.max - self.min)
         elif self.normalize == "mean-std":
             data = (data - self.mean) / self.std
+        
+        # Restore original values for no-normalize channels (e.g., binary masks)
+        if data_no_norm is not None:
+            data[:, :, self.no_normalize_mask] = data_no_norm
 
         label_int = np.load(self.mask_files[index]).astype(np.uint8)
         label_int = np.expand_dims(label_int, axis=2)
