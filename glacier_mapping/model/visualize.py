@@ -8,7 +8,7 @@ COLOR_CI = np.array([135, 206, 250], dtype=np.uint8)  # Light Blue
 COLOR_DEB = np.array([255, 0, 0], dtype=np.uint8)  # Red
 COLOR_IGNORE = np.array([0, 0, 0], dtype=np.uint8)  # Black
 
-GLOBAL_CMAP = {
+DEFAULT_CLASS_COLORMAP = {
     0: COLOR_BG,
     1: COLOR_CI,
     2: COLOR_DEB,
@@ -59,7 +59,7 @@ def build_cmap(num_classes, is_binary, classname=None):
     """
     if not is_binary:
         # Full 3-class dataset
-        return GLOBAL_CMAP
+        return DEFAULT_CLASS_COLORMAP
 
     # Binary case: 0 = NOT~class, 1 = class, 255 = mask
     if classname == "CleanIce":

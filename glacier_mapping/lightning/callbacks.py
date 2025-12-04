@@ -6,7 +6,6 @@ from typing import Any, Optional
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback
-from pytorch_lightning.loggers import MLFlowLogger
 
 from glacier_mapping.model.visualize import make_eight_panel
 import glacier_mapping.utils.logging as log

@@ -18,7 +18,6 @@ from addict import Dict
 from tqdm import tqdm
 
 import glacier_mapping.data.slice as fn
-import glacier_mapping.utils.parallel
 
 import matplotlib
 
@@ -32,8 +31,29 @@ def remove_and_create(dirpath):
     os.makedirs(dirpath)
 
 
+# Inline istarmap helper for progress tracking with multiprocessing
+# Source: https://stackoverflow.com/questions/57354700/starmap-combined-with-tqdm
+def istarmap(pool_self, func, iterable, chunksize=1):
+    """starmap-version of imap for progress tracking."""
+    pool_self._check_running()
+    if chunksize < 1:
+        raise ValueError("Chunksize must be 1+, not {0:n}".format(chunksize))
+
+    task_batches = multiprocessing.pool.Pool._get_tasks(func, iterable, chunksize)
+    result = multiprocessing.pool.IMapIterator(pool_self)
+    pool_self._taskqueue.put(
+        (
+            pool_self._guarded_task_generation(
+                result._job, multiprocessing.pool.starmapstar, task_batches
+            ),
+            result._set_length,
+        )
+    )
+    return (item for chunk in result for item in chunk)
+
+
 # Monkey patch istarmap into multiprocessing.Pool
-multiprocessing.pool.Pool.istarmap = glacier_mapping.utils.parallel.istarmap
+multiprocessing.pool.Pool.istarmap = istarmap
 
 
 def load_config_with_server_paths(config_path, server_name="desktop"):
