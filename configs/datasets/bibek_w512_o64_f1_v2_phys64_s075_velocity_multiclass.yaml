@@ -1,0 +1,15 @@
+# Multi-class Physics + Velocity (phys64_s075)
+output_name: "bibek_w512_o64_f1_v2_phys64_s075_velocity"
+window_size: [512, 512]
+overlap: 64
+filter: 0.1
+test: 0.2
+val: 0.1
+add_velocity: true
+add_ndvi: true
+add_ndwi: true
+add_ndsi: true
+add_hsv: true
+physics_res: 64
+physics_scale: 0.75
+save_skipped_visualizations: false

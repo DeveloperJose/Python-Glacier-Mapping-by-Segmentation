@@ -88,6 +88,12 @@ if __name__ == "__main__":
         help="Server name (must be specified explicitly)",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default="./configs/preprocess.yaml",
+        help="Path to preprocessing config file",
+    )
+    parser.add_argument(
         "--save-skipped-visualizations",
         action="store_true",
         help="Save PNG visualizations of skipped slices (overrides config file)",
@@ -99,7 +105,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
 
     # Load config with server paths
-    conf = load_config_with_server_paths("./configs/preprocess.yaml", args.server)
+    conf = load_config_with_server_paths(args.config, args.server)
 
     # Override config with CLI argument if provided
     if args.save_skipped_visualizations:
