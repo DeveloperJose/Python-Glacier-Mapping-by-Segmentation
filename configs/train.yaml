@@ -17,6 +17,10 @@ training_opts:
   run_test_eval: true # Run test set evaluation on best model
   test_eval_n: 4 # Number per third for visualization. n=4 → 12 total (4+4+4). 0=metrics only
   viz_scale_factor: 1 # Scale factor for visualization panels (0.5=256x256, 1.0=full resolution)
+  # Test evaluation optimization (3-phase strategy to reduce training time)
+  test_eval_baseline_epoch: 15 # Single baseline evaluation at this epoch
+  test_eval_aggressive_threshold: 0.05 # 5% improvement threshold during phase 2
+  test_eval_transition_epoch: 50 # Switch from phase 2 to phase 3 at this epoch
 
 loader_opts:
   batch_size: 16 # Default batch size (can be overridden by server config or experiment)

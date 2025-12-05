@@ -24,7 +24,13 @@ class TestEvaluationCallback(Callback):
     """
 
     def __init__(
-        self, viz_n: int = 4, image_dir: str | None = None, scale_factor: float = 1
+        self,
+        viz_n: int = 4,
+        image_dir: str | None = None,
+        scale_factor: float = 1,
+        baseline_epoch: int = 15,
+        aggressive_threshold: float = 0.05,
+        transition_epoch: int = 50,
     ):
         """
         Initialize test evaluation callback.
@@ -34,6 +40,10 @@ class TestEvaluationCallback(Callback):
                    Total visualizations = 3 * viz_n.
                    Set to 0 to compute metrics only (no visualizations).
             image_dir: Path to raw Landsat image TIFFs (from servers.yaml)
+            scale_factor: Scale factor for visualization panels
+            baseline_epoch: Single baseline evaluation at this epoch
+            aggressive_threshold: Improvement threshold during phase 2 (e.g., 0.05 = 5%)
+            transition_epoch: Switch from phase 2 to phase 3 at this epoch
         """
         super().__init__()
         self.viz_n = viz_n
@@ -42,25 +52,48 @@ class TestEvaluationCallback(Callback):
         self.best_val_loss = float("inf")
         self.best_test_metrics = {}  # Track best test metrics
 
+        # 3-phase optimization parameters
+        self.baseline_epoch = baseline_epoch
+        self.aggressive_threshold = aggressive_threshold
+        self.transition_epoch = transition_epoch
+
+        # 3-phase tracking variables
+        self.baseline_completed = False
+        self.last_val_loss = float("inf")
+
         # Cache for metadata to avoid reloading
         self._metadata_cache = None
 
     def on_validation_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ):
-        """Trigger full-tile evaluation only on new best model."""
+        """Trigger full-tile evaluation using 3-phase optimization strategy."""
         # Skip evaluation during sanity check to prevent OOM
         if trainer.sanity_checking:
             log.info("Skipping full-tile evaluation during sanity check")
             return
 
         current_val_loss = trainer.callback_metrics.get("val_loss", float("inf"))
+        current_epoch = trainer.current_epoch
 
-        if current_val_loss < self.best_val_loss:
-            self.best_val_loss = current_val_loss
-            log.info(f"🎯 New best model detected (val_loss: {current_val_loss:.4f})")
-            log.info("Running test set evaluation...")
+        # Check if we should evaluate based on 3-phase strategy
+        should_evaluate, reason = self._should_evaluate(current_epoch, current_val_loss)
+
+        if should_evaluate:
+            # Update best tracking
+            if current_val_loss < self.best_val_loss:
+                self.best_val_loss = current_val_loss
+
+            # Always update last_val_loss for improvement calculations
+            self.last_val_loss = current_val_loss
+
+            log.info(f"🎯 Running test set evaluation ({reason})")
+            log.info(f"   Epoch: {current_epoch}, Val Loss: {current_val_loss:.4f}")
             self._run_full_evaluation(trainer, pl_module)
+        else:
+            # Update last_val_loss for next improvement calculation
+            if current_val_loss < self.last_val_loss:
+                self.last_val_loss = current_val_loss
 
     def _run_full_evaluation(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         """Test set evaluation using Lightning module directly."""
@@ -356,3 +389,68 @@ class TestEvaluationCallback(Callback):
                 )
             except Exception as e:
                 log.error(f"Error generating visualization for {x_path}: {e}")
+
+    def _should_evaluate(
+        self, current_epoch: int, current_val_loss: float
+    ) -> tuple[bool, str]:
+        """Determine if test evaluation should run based on 3-phase strategy.
+
+        Returns:
+            Tuple of (should_evaluate: bool, reason: str)
+        """
+        # Phase 1: Skip until baseline epoch
+        if current_epoch < self.baseline_epoch:
+            return (
+                False,
+                f"pre-baseline phase (epoch {current_epoch} < {self.baseline_epoch})",
+            )
+
+        # Handle baseline evaluation
+        if current_epoch == self.baseline_epoch and not self.baseline_completed:
+            self.baseline_completed = True
+            return True, f"baseline evaluation (epoch {self.baseline_epoch})"
+
+        # Phase 2: Aggressive threshold (epochs baseline+1 to transition-1)
+        if current_epoch < self.transition_epoch:
+            if current_val_loss < self.last_val_loss:
+                improvement = self._calculate_improvement_percentage(
+                    current_val_loss, self.last_val_loss
+                )
+                if improvement >= self.aggressive_threshold:
+                    return (
+                        True,
+                        f"phase 2 (improvement: {improvement:.1%} >= {self.aggressive_threshold:.1%})",
+                    )
+                else:
+                    return (
+                        False,
+                        f"phase 2 (improvement: {improvement:.1%} < {self.aggressive_threshold:.1%})",
+                    )
+            else:
+                return False, "phase 2 (no improvement)"
+
+        # Phase 3: Any improvement (epochs transition+)
+        if current_val_loss < self.best_val_loss:
+            return (
+                True,
+                f"phase 3 (any improvement: {current_val_loss:.4f} < {self.best_val_loss:.4f})",
+            )
+        else:
+            return False, "phase 3 (no improvement)"
+
+    def _calculate_improvement_percentage(
+        self, new_loss: float, old_loss: float
+    ) -> float:
+        """Calculate percentage improvement in loss.
+
+        Args:
+            new_loss: Current validation loss
+            old_loss: Previous validation loss
+
+        Returns:
+            Percentage improvement (0.05 = 5% improvement)
+        """
+        if old_loss == float("inf") or old_loss == 0:
+            return 0.0
+        improvement = (old_loss - new_loss) / old_loss
+        return max(0.0, improvement)  # Ensure non-negative

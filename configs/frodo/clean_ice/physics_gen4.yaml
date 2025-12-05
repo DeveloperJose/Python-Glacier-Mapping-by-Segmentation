@@ -1,0 +1,9 @@
+# Gen4 Clean Ice Physics Only - Frodo
+# Uses phys64_s075 dataset (same as combined)
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2_phys64_s075_velocity
+  run_name: ci_physics_gen4
+
+loader_opts:
+  physics_channels: true
+  velocity_channels: false

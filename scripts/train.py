@@ -477,11 +477,21 @@ def main():
     run_test_eval = training_opts.get("run_test_eval", True) and not args.skip_test_eval
     if run_test_eval:
         test_eval_n = training_opts.get("test_eval_n", 4) if not args.no_output else 0
+        # Extract optimization parameters
+        test_eval_baseline_epoch = training_opts.get("test_eval_baseline_epoch", 15)
+        test_eval_aggressive_threshold = training_opts.get(
+            "test_eval_aggressive_threshold", 0.05
+        )
+        test_eval_transition_epoch = training_opts.get("test_eval_transition_epoch", 50)
+
         callbacks.append(
             TestEvaluationCallback(
                 viz_n=test_eval_n,
                 image_dir=server_config.get("image_dir"),
                 scale_factor=viz_scale_factor,
+                baseline_epoch=test_eval_baseline_epoch,
+                aggressive_threshold=test_eval_aggressive_threshold,
+                transition_epoch=test_eval_transition_epoch,
             )
         )
 
