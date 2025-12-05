@@ -271,7 +271,9 @@ def get_tiff_np(
     return tiff_np
 
 
-def save_slices(filenum, fname, labels, savepath, save_skipped_visualizations=False, **conf):
+def save_slices(
+    filenum, fname, labels, savepath, save_skipped_visualizations=False, **conf
+):
     tiff_fname = pathlib.Path(conf["image_dir"]) / fname
     dem_fname = pathlib.Path(conf["dem_dir"]) / fname
 
@@ -323,7 +325,14 @@ def save_slices(filenum, fname, labels, savepath, save_skipped_visualizations=Fa
             slice = temp
         return slice
 
-    def filter_percentage(slice, percentage, type="mask", name="noname", image=None, save_visualization=False):
+    def filter_percentage(
+        slice,
+        percentage,
+        type="mask",
+        name="noname",
+        image=None,
+        save_visualization=False,
+    ):
         if type == "image":
             return True
 

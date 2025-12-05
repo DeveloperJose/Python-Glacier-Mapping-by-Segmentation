@@ -690,7 +690,7 @@ def make_redesigned_panel(
         conf_rgb = scale_image(conf_rgb, scale_factor)
 
     # -------------------------------
-    # 10. Row 1
+    # 10. Row 1: [Satellite] [Tested] [Confidence] [Class Legend]
     # -------------------------------
     r1_components = [
         add_title(context_masked, "Satellite Image (RGB)"),
@@ -702,6 +702,9 @@ def make_redesigned_panel(
         r1_components.append(add_title(conf_block, "Confidence"))
     else:
         r1_components.append(add_title(empty, "No Confidence Data"))
+
+    # Add class legend to Row 1
+    r1_components.append(class_legend)
 
     # Pad row 1 components
     maxh = max(im.shape[0] for im in r1_components)
@@ -715,40 +718,25 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 11. Row 2
+    # 11. Row 2: [GT Overlay] [Prediction Overlay] [Ground Truth] [Prediction]
     # -------------------------------
     r2 = concat_h(
         add_title(gt_overlay_rgb, "Ground Truth Overlay"),
         add_title(pr_overlay_rgb, "Prediction Overlay"),
-        class_legend,
-    )
-
-    # -------------------------------
-    # 12. Row 3
-    # -------------------------------
-    r3 = concat_h(
         add_title(gt_rgb, "Ground Truth"),
         add_title(pr_rgb, "Prediction"),
-        class_legend,
     )
 
     # -------------------------------
-    # 13. Row 4
-    # -------------------------------
-    r4 = concat_h(
-        add_title(errors_overlay, "Errors Overlay (TP+FP+FN)"),
-        add_title(combined_errors, "Errors (TP+FP+FN)"),
-        error_legend,
-    )
-
-    # -------------------------------
-    # 14. Row 5
+    # 12. Row 3: [Errors Overlay] [Errors] [False Positives] [False Negatives] [Error Legend]
     # -------------------------------
     target_class_name = (
         "Clean Ice" if (class_names and "Clean" in class_names[1]) else "Debris"
     )
 
-    r5 = concat_h(
+    r3 = concat_h(
+        add_title(errors_overlay, "Errors Overlay (TP+FP+FN)"),
+        add_title(combined_errors, "Errors (TP+FP+FN)"),
         add_title(
             fp_rgb, f"False Positives (predicted {target_class_name} but incorrect)"
         ),
@@ -759,9 +747,9 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 15. Composite
+    # 13. Composite
     # -------------------------------
-    composite = concat_v(r1, r2, r3, r4, r5)
+    composite = concat_v(r1, r2, r3)
 
     if metrics_text is not None:
         header = title_bar(metrics_text, composite.shape[1], height=40, font_scale=0.6)
