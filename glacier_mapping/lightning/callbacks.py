@@ -9,8 +9,7 @@ from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from glacier_mapping.utils.callback_utils import (
     load_dataset_metadata,
     generate_single_visualization,
-    select_informative_test_tiles,
-    log_visualizations_to_all_loggers,
+    select_slices_by_iou_thirds,
     parse_slice_path,
 )
 from glacier_mapping.utils import cleanup_gpu_memory
@@ -95,11 +94,10 @@ class ValidationVisualizationCallback(Callback):
         if self.selected_slice_paths is None:
             num_samples = 3 * self.viz_n
             if self.selection == "iou":
-                self.selected_slice_paths, self.tile_rank_map = (
-                    select_informative_test_tiles(
-                        val_slices_all, pl_module, num_samples
-                    )
+                self.selected_slice_paths = select_slices_by_iou_thirds(
+                    val_slices_all, pl_module, num_samples
                 )
+                self.tile_rank_map = {}
             else:  # random
                 self.selected_slice_paths = val_slices_all[:num_samples]
                 self.tile_rank_map = {}

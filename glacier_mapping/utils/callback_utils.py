@@ -671,12 +671,13 @@ def log_visualizations_to_all_loggers(
                     )
 
                 # Log TIFF directories with proper nesting
+                # viz_type is "val_visualizations" or "test_evaluations"
                 for tile_dir in output_dir.glob("tiff_*"):
                     if tile_dir.is_dir():
                         logger.experiment.log_artifact(
                             logger.run_id,
                             str(tile_dir),
-                            artifact_path=tile_dir.name,
+                            artifact_path=f"{viz_type}/{tile_dir.name}",
                         )
 
             # TensorBoard logging
