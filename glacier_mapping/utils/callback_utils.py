@@ -647,13 +647,13 @@ def log_visualizations_to_all_loggers(
                         artifact_path="csv_metrics",
                     )
 
-                # Log TIFF directories without double nesting
+                # Log TIFF directories with proper nesting
                 for tile_dir in output_dir.glob("tiff_*"):
                     if tile_dir.is_dir():
                         logger.experiment.log_artifact(
                             logger.run_id,
                             str(tile_dir),
-                            artifact_path=None,  # Fix: remove double nesting
+                            artifact_path=f"{viz_type}/{tile_dir.name}",
                         )
 
             # TensorBoard logging

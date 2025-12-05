@@ -132,43 +132,15 @@ class ValidationVisualizationCallback(Callback):
         # GPU cleanup after visualization generation
         cleanup_gpu_memory()
 
-        # Log to MLflow (if available)
+        # Log to both MLflow and TensorBoard (if available)
         if self.save_dir:
-            self._log_to_mlflow(trainer)
+            from glacier_mapping.utils.callback_utils import (
+                log_visualizations_to_all_loggers,
+            )
 
-    def _log_to_mlflow(self, trainer: pl.Trainer):
-        """Log saved visualizations to MLflow."""
-        # Check if MLflow is available
-        try:
-            import importlib.util
-
-            MLFLOW_AVAILABLE = importlib.util.find_spec("mlflow") is not None
-        except ImportError:
-            MLFLOW_AVAILABLE = False
-
-        if not MLFLOW_AVAILABLE:
-            return
-
-        try:
-            from pytorch_lightning.loggers import MLFlowLogger
-
-            for logger in trainer.loggers:
-                if isinstance(logger, MLFlowLogger):
-                    try:
-                        for tiff_dir in self.save_dir.glob("tiff_*"):  # type: ignore[union-attr]
-                            if tiff_dir.is_dir():
-                                for png_file in tiff_dir.glob("*.png"):
-                                    logger.experiment.log_artifact(  # type: ignore[attr-defined]
-                                        logger.run_id,  # type: ignore[attr-defined]
-                                        str(png_file),
-                                        artifact_path=f"val_visualizations/{tiff_dir.name}",
-                                    )
-                    except Exception as e:
-                        log.warning(
-                            f"Failed to log validation visualization to MLflow: {e}"
-                        )
-        except ImportError:
-            log.debug("MLflow not available, skipping MLflow logging")
+            log_visualizations_to_all_loggers(
+                trainer, self.save_dir, trainer.current_epoch + 1, "val_visualizations"
+            )
 
 
 class GlacierModelCheckpoint(ModelCheckpoint):
