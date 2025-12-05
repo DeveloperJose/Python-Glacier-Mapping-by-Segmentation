@@ -1,0 +1,12 @@
+# Desktop Multi-class Production Gen3
+# Inherits from configs/train.yaml + configs/servers.yaml[desktop] + configs/tasks/multiclass.yaml
+
+# Dataset configuration (baseline - no velocity, no physics)
+dataset_name: bibek_w512_o64_f1_v2
+
+# Run configuration
+run_name: desktop_multiclass_base_gen3
+
+# Multi-class fix: foreground_classes must include both clean ice (1) and debris ice (2)
+foreground_classes: [1, 2]
+

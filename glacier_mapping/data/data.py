@@ -352,6 +352,7 @@ def fetch_loaders(
     val_folder="val",
     test_folder="test",
     shuffle=True,
+    num_workers=8,
 ):
     """
     Build train/val/test dataloaders.
@@ -431,7 +432,7 @@ def fetch_loaders(
     common_loader_kwargs = dict(
         worker_init_fn=seed_worker,
         generator=g,
-        num_workers=8,
+        num_workers=num_workers,
     )
 
     train_loader = DataLoader(

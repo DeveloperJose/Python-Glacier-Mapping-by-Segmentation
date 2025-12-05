@@ -111,7 +111,7 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
 
         if server in servers:
             server_config = servers[server]
-            # Extract training-relevant fields (batch_size, epochs)
+            # Extract training-relevant fields (batch_size, epochs, num_workers)
             if "batch_size" in server_config:
                 if "loader_opts" not in merged:
                     merged["loader_opts"] = {}
@@ -120,6 +120,10 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
                 if "training_opts" not in merged:
                     merged["training_opts"] = {}
                 merged["training_opts"]["epochs"] = server_config["epochs"]
+            if "num_workers" in server_config:
+                if "loader_opts" not in merged:
+                    merged["loader_opts"] = {}
+                merged["loader_opts"]["num_workers"] = server_config["num_workers"]
 
     # 3. Load task config
     task_config_path = pathlib.Path(f"configs/tasks/{task}.yaml")
@@ -359,6 +363,7 @@ def main():
         output_classes=loader_opts.get("output_classes", [1]),
         class_names=loader_opts.get("class_names", ["BG", "CleanIce", "Debris"]),
         normalize=loader_opts.get("normalize", "mean-std"),
+        num_workers=loader_opts.get("num_workers", 4),
     )
 
     # Create model

@@ -15,6 +15,7 @@ desktop:
   # Training defaults
   batch_size: 8
   epochs: 150
+  num_workers: 4
 
 bilbo:
   hostname: bilbo
@@ -31,6 +32,7 @@ bilbo:
   # Training defaults
   batch_size: 32
   epochs: 150
+  num_workers: 12
 
 frodo:
   hostname: frodo
@@ -47,3 +49,4 @@ frodo:
   # Training defaults
   batch_size: 16
   epochs: 150
+  num_workers: 8
