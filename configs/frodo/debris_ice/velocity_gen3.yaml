@@ -1,0 +1,14 @@
+# Gen3 Debris Ice with velocity channels - Frodo
+# Validates Gen2 breakthrough (+92% improvement) on Frodo
+training_opts:
+  dataset_name: bibek_w512_o64_f1_velocity
+  run_name: dci_velocity_gen3
+
+loader_opts:
+  # Explicitly enable all channels EXCEPT physics
+  landsat_channels: true        # [0-7] Landsat B1-B7
+  dem_channels: true            # [8-9] elevation, slope
+  spectral_indices_channels: true  # [10-12] NDVI, NDWI, NDSI
+  hsv_channels: true            # [13-15] H, S, V
+  velocity_channels: true       # [16-19] ITS_LIVE velocity, vx, vy, mask
+  physics_channels: false       # [20-23] flow_accumulation, tpi, roughness, curvature

@@ -14,7 +14,7 @@ from glacier_mapping.lightning.glacier_module import GlacierSegmentationModule
 from glacier_mapping.lightning.callbacks import ValidationVisualizationCallback
 from glacier_mapping.lightning.glacier_datamodule import GlacierDataModule
 from glacier_mapping.utils.prediction import get_probabilities, predict_from_probs
-from glacier_mapping.model.visualize import (
+from glacier_mapping.utils.visualize import (
     make_rgb_preview,
     label_to_color,
     make_overlay,
