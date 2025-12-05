@@ -128,10 +128,8 @@ def build_cmap_from_mask_names(mask_names):
 
     Always adds 255 -> black for mask.
     """
-    print(f"DEBUG CMAP: mask_names={mask_names}, len={len(mask_names)}")
     cmap = {}
     for i, name in enumerate(mask_names):
-        print(f"DEBUG CMAP: i={i}, name={name}")
         name_lower = name.lower()
 
         if name_lower.startswith("bg") or name_lower.startswith("not~"):

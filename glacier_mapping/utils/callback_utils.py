@@ -385,9 +385,6 @@ def generate_single_visualization(
             else:
                 cname = f"Class_{ci}"
 
-            print(
-                f"DEBUG METRICS: ci={ci}, cname={cname}, len(class_names)={len(class_names)}"
-            )
             pred_c = (y_pred_vis == ci).astype(np.uint8)
             true_c = (y_gt_vis == ci).astype(np.uint8)
             tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(pred_c), torch.from_numpy(true_c))
