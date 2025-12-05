@@ -1,0 +1,11 @@
+# Gen3 Multi-class w256 variant - Frodo (150 epochs)
+# Tests smaller window size for faster multi-class training
+training_opts:
+  dataset_name: bibek_w256_o64_f1_v2
+  run_name: multi_w256_gen3
+
+loader_opts:
+  output_classes: [0, 1, 2]  # All three classes: BG, CleanIce, Debris
+
+loss_opts:
+  foreground_classes: [1, 2]  # Critical fix: include both glacier classes for loss

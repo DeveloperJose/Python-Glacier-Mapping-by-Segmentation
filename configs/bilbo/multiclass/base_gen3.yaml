@@ -1,0 +1,12 @@
+# Gen3 Multi-class baseline - Bilbo (150 epochs)
+# Full production run for comparison with physics variants
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: multi_base_gen3
+
+loader_opts:
+  output_classes: [0, 1, 2]  # All three classes: BG, CleanIce, Debris
+  physics_channels: false       # Disable physics for baseline comparison
+
+loss_opts:
+  foreground_classes: [1, 2]  # Critical fix: include both glacier classes for loss

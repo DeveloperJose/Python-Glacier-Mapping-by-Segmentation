@@ -1,0 +1,14 @@
+# Gen3 Multi-class with velocity - Frodo (150 epochs)
+# Tests velocity breakthrough on multi-class (never tested before)
+training_opts:
+  dataset_name: bibek_w512_o64_f1_velocity
+  run_name: multi_velocity_gen3
+
+loader_opts:
+  output_classes: [0, 1, 2]  # All three classes: BG, CleanIce, Debris
+  # Enable velocity channels (inherited from train.yaml: false)
+  velocity_channels: true       # [16-19] ITS_LIVE velocity, vx, vy, mask
+  physics_channels: false       # [20-23] flow_accumulation, tpi, roughness, curvature
+
+loss_opts:
+  foreground_classes: [1, 2]  # Critical fix: include both glacier classes for loss

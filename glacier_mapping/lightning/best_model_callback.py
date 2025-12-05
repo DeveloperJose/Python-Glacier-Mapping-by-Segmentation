@@ -23,7 +23,9 @@ class TestEvaluationCallback(Callback):
     Uses n-based thirds system: n=4 → 12 visualizations (4 top + 4 middle + 4 bottom).
     """
 
-    def __init__(self, viz_n: int = 4, image_dir: str | None = None):
+    def __init__(
+        self, viz_n: int = 4, image_dir: str | None = None, scale_factor: float = 0.5
+    ):
         """
         Initialize test evaluation callback.
 
@@ -36,6 +38,7 @@ class TestEvaluationCallback(Callback):
         super().__init__()
         self.viz_n = viz_n
         self.image_dir = Path(image_dir) if image_dir else None
+        self.scale_factor = scale_factor
         self.best_val_loss = float("inf")
         self.best_test_metrics = {}  # Track best test metrics
 
@@ -348,6 +351,8 @@ class TestEvaluationCallback(Callback):
                     title_prefix="TEST",
                     metadata_cache=self._metadata_cache,
                     image_dir=self.image_dir,
+                    scale_factor=self.scale_factor,
+                    tile_rank_map=tile_rank_map,
                 )
             except Exception as e:
                 log.error(f"Error generating visualization for {x_path}: {e}")

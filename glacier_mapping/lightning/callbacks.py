@@ -9,7 +9,8 @@ from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from glacier_mapping.utils.callback_utils import (
     load_dataset_metadata,
     generate_single_visualization,
-    select_slices_by_iou_thirds,
+    select_informative_test_tiles,
+    log_visualizations_to_all_loggers,
     parse_slice_path,
 )
 from glacier_mapping.utils import cleanup_gpu_memory
@@ -30,6 +31,7 @@ class ValidationVisualizationCallback(Callback):
         selection: str = "iou",
         save_dir: Optional[str] = None,
         image_dir: Optional[str] = None,
+        scale_factor: float = 0.5,
     ):
         """
         Initialize validation visualization callback.
@@ -49,12 +51,14 @@ class ValidationVisualizationCallback(Callback):
         self.selection = selection
         self.save_dir = Path(save_dir) if save_dir else None
         self.image_dir = Path(image_dir) if image_dir else None
+        self.scale_factor = scale_factor
 
         # Track selected slices across epochs for consistency
         self.selected_slice_paths: Optional[List[Path]] = None
         self.slice_metadata: Dict[
             Path, Tuple[int, int]
         ] = {}  # {path: (tiff_num, slice_num)}
+        self.tile_rank_map: Dict[Path, int] = {}  # {path: absolute_rank}
 
         # Cache for metadata to avoid reloading
         self._metadata_cache = None
@@ -91,11 +95,14 @@ class ValidationVisualizationCallback(Callback):
         if self.selected_slice_paths is None:
             num_samples = 3 * self.viz_n
             if self.selection == "iou":
-                self.selected_slice_paths = select_slices_by_iou_thirds(
-                    val_slices_all, pl_module, num_samples
+                self.selected_slice_paths, self.tile_rank_map = (
+                    select_informative_test_tiles(
+                        val_slices_all, pl_module, num_samples
+                    )
                 )
             else:  # random
                 self.selected_slice_paths = val_slices_all[:num_samples]
+                self.tile_rank_map = {}
 
             # Extract metadata for each selected slice
             for path in self.selected_slice_paths:
@@ -125,6 +132,8 @@ class ValidationVisualizationCallback(Callback):
                     title_prefix="VAL",
                     metadata_cache=self._metadata_cache,
                     image_dir=self.image_dir,
+                    scale_factor=self.scale_factor,
+                    tile_rank_map=self.tile_rank_map,
                 )
             except Exception as e:
                 log.error(f"Error generating visualization for {slice_path}: {e}")
@@ -138,8 +147,10 @@ class ValidationVisualizationCallback(Callback):
                 log_visualizations_to_all_loggers,
             )
 
+            # Use the actual output directory where visualizations are saved
+            val_output_dir = self.save_dir / "val_visualizations"
             log_visualizations_to_all_loggers(
-                trainer, self.save_dir, trainer.current_epoch + 1, "val_visualizations"
+                trainer, val_output_dir, trainer.current_epoch + 1, "val_visualizations"
             )
 
 

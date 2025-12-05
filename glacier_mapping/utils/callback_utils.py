@@ -215,6 +215,8 @@ def generate_single_visualization(
     title_prefix: str = "",
     metadata_cache: Optional[Dict] = None,
     image_dir: Optional[Path] = None,
+    scale_factor: float = 0.5,
+    tile_rank_map: Optional[Dict[Path, int]] = None,
     **kwargs,
 ) -> Path:
     """Generate single visualization using existing visualize.py functions.
@@ -290,13 +292,17 @@ def generate_single_visualization(
         )
 
         # Generate context with yellow box
+        scaled_size = (
+            int(x_full.shape[1] * scale_factor),
+            int(x_full.shape[0] * scale_factor),
+        )
         context_rgb = make_context_image(
             tiff_full_rgb,
             row_start,
             col_start,
             row_end,
             col_end,
-            target_size=(x_full.shape[1], x_full.shape[0]),
+            target_size=scaled_size,
             box_color=(255, 255, 0),
         )
 
@@ -314,7 +320,7 @@ def generate_single_visualization(
         context_rgb = make_error_overlay(x_full.shape[:2], "Context unavailable")
 
     # Create RGB visualizations
-    x_rgb = make_rgb_preview(x_full)
+    x_rgb = make_rgb_preview(x_full, scale_factor=scale_factor)
 
     # Calculate confidence map
     ignore = y_true_raw == 255
@@ -351,14 +357,30 @@ def generate_single_visualization(
             I_val = IoU(tp_, fp_, fn_)
             metric_parts.append(f"{cname}: P={P_val:.3f} R={R_val:.3f} IoU={I_val:.3f}")
 
-    # Build title
-    title_text = f"{title_prefix} TIFF {tiff_num:04d}, Slice {slice_num:02d}"
+    # Build title with rank information
+    if tile_rank_map is not None and x_path in tile_rank_map:
+        rank = tile_rank_map[x_path]
+        # Determine rank category
+        if rank <= 4:  # Top 4
+            rank_text = f"#{rank} (top-{rank})"
+        elif rank >= len(tile_rank_map) - 3:  # Bottom 3
+            bottom_rank = rank - (len(tile_rank_map) - 3) + 1
+            rank_text = f"#{rank} (bottom-{bottom_rank})"
+        else:  # Middle
+            rank_text = f"#{rank} (middle)"
+
+        title_text = (
+            f"{title_prefix} TIFF {tiff_num:04d}, Slice {slice_num:02d} {rank_text}"
+        )
+    else:
+        title_text = f"{title_prefix} TIFF {tiff_num:04d}, Slice {slice_num:02d}"
+
     metrics_text = title_text + " | " + " | ".join(metric_parts)
 
     # Create confidence map visualization
     from glacier_mapping.utils.visualize import make_confidence_map
 
-    conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
+    conf_rgb = make_confidence_map(conf, invalid_mask=ignore, scale_factor=scale_factor)
 
     # Create composite visualization
     composite = make_redesigned_panel(
@@ -371,6 +393,7 @@ def generate_single_visualization(
         metrics_text=metrics_text,
         conf_rgb=conf_rgb,
         mask=~ignore,  # boolean valid mask
+        scale_factor=scale_factor,
     )
 
     # Save and return path
@@ -653,7 +676,7 @@ def log_visualizations_to_all_loggers(
                         logger.experiment.log_artifact(
                             logger.run_id,
                             str(tile_dir),
-                            artifact_path=f"{viz_type}/{tile_dir.name}",
+                            artifact_path=tile_dir.name,
                         )
 
             # TensorBoard logging
@@ -670,8 +693,10 @@ def log_visualizations_to_all_loggers(
                             img_tensor = (
                                 torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
                             )
+                            # Use the same directory name extraction for consistency
+                            dir_name = output_dir.name
                             logger.experiment.add_image(
-                                f"{viz_type}/{tile_dir.name}/{png_file.stem}",
+                                f"{dir_name}/{tile_dir.name}/{png_file.stem}",
                                 img_tensor,
                                 global_step=epoch,
                                 dataformats="CHW",

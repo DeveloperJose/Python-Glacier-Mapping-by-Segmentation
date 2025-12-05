@@ -1,0 +1,13 @@
+# Gen3 Multi-class baseline - Frodo (150 epochs)
+# Full production run with validated multi-class pipeline
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: multi_base_gen3
+  # epochs: 150 (inherited from servers.yaml)
+  # early_stopping: 75 (inherited from train.yaml)
+
+loader_opts:
+  output_classes: [0, 1, 2]  # All three classes: BG, CleanIce, Debris
+
+loss_opts:
+  foreground_classes: [1, 2]  # Critical fix: include both glacier classes for loss

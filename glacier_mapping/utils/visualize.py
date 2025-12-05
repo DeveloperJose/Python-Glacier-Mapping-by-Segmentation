@@ -30,7 +30,30 @@ DEFAULT_CLASS_COLORMAP = {
 # -----------------------------
 
 
-def make_rgb_preview(x):
+def scale_image(img, scale_factor=0.5):
+    """Scale image by factor using cv2.resize.
+
+    Args:
+        img: Input image array (H, W, C) or (H, W)
+        scale_factor: Scaling factor (0.5 = half size, 1.0 = original)
+
+    Returns:
+        Scaled image array
+    """
+    if scale_factor == 1.0:
+        return img
+
+    new_size = (int(img.shape[1] * scale_factor), int(img.shape[0] * scale_factor))
+
+    if len(img.shape) == 3:
+        return cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+    elif len(img.shape) == 2:
+        return cv2.resize(img, new_size, interpolation=cv2.INTER_NEAREST)
+    else:
+        raise ValueError(f"Unsupported image shape: {img.shape}")
+
+
+def make_rgb_preview(x, scale_factor=0.5):
     """Convert multispectral tile into normalized RGB preview."""
     R = x[..., 2]
     G = x[..., 1]
@@ -39,7 +62,8 @@ def make_rgb_preview(x):
     rgb_min = rgb_stack.min(axis=(0, 1), keepdims=True)
     rgb_max = rgb_stack.max(axis=(0, 1), keepdims=True)
     rgb_norm = (rgb_stack - rgb_min) / (rgb_max - rgb_min + 1e-6)
-    return (rgb_norm * 255).clip(0, 255).astype(np.uint8)
+    rgb_uint8 = (rgb_norm * 255).clip(0, 255).astype(np.uint8)
+    return scale_image(rgb_uint8, scale_factor)
 
 
 def build_cmap(num_classes, is_binary, classname=None):
@@ -126,11 +150,11 @@ def _viridis_from_scalar(scalar_01):
     return (rgba[..., :3] * 255).astype(np.uint8)
 
 
-def make_confidence_map(prob, invalid_mask=None):
+def make_confidence_map(prob, invalid_mask=None, scale_factor=0.5):
     rgb = _viridis_from_scalar(prob)
     if invalid_mask is not None:
         rgb[invalid_mask] = 0
-    return rgb
+    return scale_image(rgb, scale_factor)
 
 
 def make_confidence_colorbar(width, height=40, font_scale=0.4):
@@ -188,7 +212,7 @@ def make_confidence_colorbar(width, height=40, font_scale=0.4):
     return colorbar
 
 
-def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None):
+def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None, scale_factor=0.5):
     H, W = labels.shape
     overlay = np.zeros((H, W, 3), dtype=np.uint8)
     for cls, col in cmap.items():
@@ -201,7 +225,7 @@ def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None):
     result = (tiff_rgb * (1 - alpha_mask) + overlay * alpha_mask).astype(np.uint8)
     if mask is not None:
         result[~mask] = COLOR_IGNORE
-    return result
+    return scale_image(result, scale_factor)
 
 
 def pad_border(img, pad=4):
@@ -254,7 +278,9 @@ def make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=None):
     return combined
 
 
-def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=None):
+def make_errors_overlay(
+    tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=None, scale_factor=0.5
+):
     H, W = tiff_rgb.shape[:2]
     overlay = np.zeros((H, W, 3), dtype=np.uint8)
     overlay[tp_mask] = COLOR_TP
@@ -266,7 +292,7 @@ def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=Non
     out = (tiff_rgb * (1 - alpha_mask) + overlay * alpha_mask).astype(np.uint8)
     if mask is not None:
         out[~mask] = COLOR_IGNORE
-    return out
+    return scale_image(out, scale_factor)
 
 
 def make_fp_fn_individual_masks(fp_mask, fn_mask, mask=None):
@@ -456,7 +482,7 @@ def make_context_image(
     slice_col_start,
     slice_row_end,
     slice_col_end,
-    target_size=(512, 512),
+    target_size=(256, 256),
     box_color=(255, 255, 0),
 ):
     """
@@ -546,6 +572,7 @@ def make_redesigned_panel(
     metrics_text=None,
     conf_rgb=None,
     mask=None,
+    scale_factor=0.5,
 ):
     """
     Clean + correct version:
@@ -555,16 +582,22 @@ def make_redesigned_panel(
     """
 
     # -------------------------------
-    # 1. Apply mask to labels (Option A fix)
+    # 1. Scale labels and mask first
     # -------------------------------
-    gt = gt_labels.copy()
-    pr = pr_labels.copy()
+    gt = scale_image(gt_labels, scale_factor)
+    pr = scale_image(pr_labels, scale_factor)
+    if mask is not None:
+        mask = scale_image(mask.astype(np.uint8), scale_factor) > 0
+
+    # -------------------------------
+    # 2. Apply mask to scaled labels (Option A fix)
+    # -------------------------------
     if mask is not None:
         gt[~mask] = 255
         pr[~mask] = 255
 
     # -------------------------------
-    # 2. Compute TP / FP / FN
+    # 3. Compute TP / FP / FN on scaled labels
     # -------------------------------
     tp_mask = (gt == 1) & (pr == 1)
     fp_mask = (gt != 1) & (pr == 1) & (gt != 255)
@@ -579,26 +612,46 @@ def make_redesigned_panel(
     # -------------------------------
     # 4. Overlay images
     # -------------------------------
-    gt_overlay_rgb = make_overlay(x_rgb, gt, cmap, alpha=0.5, mask=mask)
-    pr_overlay_rgb = make_overlay(x_rgb, pr, cmap, alpha=0.5, mask=mask)
+    gt_overlay_rgb = make_overlay(
+        x_rgb, gt, cmap, alpha=0.5, mask=mask, scale_factor=1.0
+    )
+    pr_overlay_rgb = make_overlay(
+        x_rgb, pr, cmap, alpha=0.5, mask=mask, scale_factor=1.0
+    )
 
     # -------------------------------
     # 5. Error visualizations
     # -------------------------------
     combined_errors = make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=mask)
     errors_overlay = make_errors_overlay(
-        x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=mask
+        x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=mask, scale_factor=1.0
     )
     fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask, mask=mask)
 
     # -------------------------------
-    # 6. Mask context_rgb and x_rgb
+    # 6. Scale all panels at the end
+    # -------------------------------
+    context_rgb = scale_image(context_rgb, scale_factor)
+    x_rgb = scale_image(x_rgb, scale_factor)
+    gt_rgb = scale_image(gt_rgb, scale_factor)
+    pr_rgb = scale_image(pr_rgb, scale_factor)
+    gt_overlay_rgb = scale_image(gt_overlay_rgb, scale_factor)
+    pr_overlay_rgb = scale_image(pr_overlay_rgb, scale_factor)
+    combined_errors = scale_image(combined_errors, scale_factor)
+    errors_overlay = scale_image(errors_overlay, scale_factor)
+    fp_rgb = scale_image(fp_rgb, scale_factor)
+    fn_rgb = scale_image(fn_rgb, scale_factor)
+
+    # -------------------------------
+    # 8. Mask context_rgb and x_rgb (after scaling)
     # -------------------------------
     if mask is not None:
+        # Scale mask to match panel dimensions
+        mask_scaled = scale_image(mask.astype(np.uint8), scale_factor) > 0
         context_masked = context_rgb.copy()
         x_masked = x_rgb.copy()
-        context_masked[~mask] = COLOR_IGNORE
-        x_masked[~mask] = COLOR_IGNORE
+        context_masked[~mask_scaled] = COLOR_IGNORE
+        x_masked[~mask_scaled] = COLOR_IGNORE
     else:
         context_masked = context_rgb
         x_masked = x_rgb
@@ -631,7 +684,13 @@ def make_redesigned_panel(
     error_legend = add_title(create_legend_row(error_legend_dict, W), "Error Types")
 
     # -------------------------------
-    # 8. Row 1
+    # 9. Scale confidence map if provided
+    # -------------------------------
+    if conf_rgb is not None:
+        conf_rgb = scale_image(conf_rgb, scale_factor)
+
+    # -------------------------------
+    # 10. Row 1
     # -------------------------------
     r1_components = [
         add_title(context_masked, "Satellite Image (RGB)"),
@@ -656,7 +715,7 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 9. Row 2
+    # 11. Row 2
     # -------------------------------
     r2 = concat_h(
         add_title(gt_overlay_rgb, "Ground Truth Overlay"),
@@ -665,7 +724,7 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 10. Row 3
+    # 12. Row 3
     # -------------------------------
     r3 = concat_h(
         add_title(gt_rgb, "Ground Truth"),
@@ -674,7 +733,7 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 11. Row 4
+    # 13. Row 4
     # -------------------------------
     r4 = concat_h(
         add_title(errors_overlay, "Errors Overlay (TP+FP+FN)"),
@@ -683,7 +742,7 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 12. Row 5
+    # 14. Row 5
     # -------------------------------
     target_class_name = (
         "Clean Ice" if (class_names and "Clean" in class_names[1]) else "Debris"
@@ -700,7 +759,7 @@ def make_redesigned_panel(
     )
 
     # -------------------------------
-    # 13. Composite
+    # 15. Composite
     # -------------------------------
     composite = concat_v(r1, r2, r3, r4, r5)
 
