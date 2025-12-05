@@ -1,12 +1,10 @@
 # Desktop Debris Ice Velocity Gen3
 # Inherits from configs/train.yaml + configs/servers.yaml[desktop] + configs/tasks/debris_ice.yaml
 
-# Dataset configuration (with velocity channels)
-dataset_name: bibek_w512_o64_f1_velocity
+training_opts:
+  dataset_name: bibek_w512_o64_f1_velocity
+  run_name: desktop_debris_ice_velocity_gen3
 
-# Run configuration
-run_name: desktop_debris_ice_velocity_gen3
-
-# Enable velocity channels
-velocity_channels: true
+loader_opts:
+  velocity_channels: true
 

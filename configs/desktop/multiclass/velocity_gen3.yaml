@@ -1,15 +1,10 @@
 # Desktop Multi-class Velocity Gen3
 # Inherits from configs/train.yaml + configs/servers.yaml[desktop] + configs/tasks/multiclass.yaml
 
-# Dataset configuration (with velocity channels)
-dataset_name: bibek_w512_o64_f1_velocity
+training_opts:
+  dataset_name: bibek_w512_o64_f1_velocity
+  run_name: desktop_multiclass_velocity_gen3
 
-# Run configuration
-run_name: desktop_multiclass_velocity_gen3
-
-# Enable velocity channels
-velocity_channels: true
-
-# Multi-class fix: foreground_classes must include both clean ice (1) and debris ice (2)
-foreground_classes: [1, 2]
+loader_opts:
+  velocity_channels: true
 
