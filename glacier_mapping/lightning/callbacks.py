@@ -134,7 +134,10 @@ class ValidationVisualizationCallback(Callback):
                     tile_rank_map=self.tile_rank_map,
                 )
             except Exception as e:
+                import traceback
+
                 log.error(f"Error generating visualization for {slice_path}: {e}")
+                log.error(f"Full traceback: {traceback.format_exc()}")
 
         # GPU cleanup after visualization generation
         cleanup_gpu_memory()

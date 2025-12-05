@@ -243,6 +243,19 @@ def generate_single_visualization(
             )
         )
 
+    # Get output_classes and class_names from module
+    output_classes = getattr(pl_module, "output_classes", [1])
+    class_names = getattr(pl_module, "class_names", ["BG", "CleanIce", "Debris"])
+
+    # Validate configuration consistency
+    if len(output_classes) > 1:  # Multiclass
+        max_class = max(output_classes)
+        if len(class_names) <= max_class:
+            raise ValueError(
+                f"class_names length ({len(class_names)}) insufficient for max class index ({max_class}). "
+                f"output_classes: {output_classes}, class_names: {class_names}"
+            )
+
     # Extract TIFF and slice numbers
     tiff_num = extract_tiff_number(x_path)
     slice_num = extract_slice_number(x_path)
@@ -258,6 +271,17 @@ def generate_single_visualization(
     y_pred = predict_from_probs(probs, pl_module, threshold[0] if threshold else None)
 
     output_classes = getattr(pl_module, "output_classes", [1])
+    class_names = getattr(pl_module, "class_names", ["BG", "CleanIce", "Debris"])
+
+    # Validate configuration consistency
+    if len(output_classes) > 1:  # Multiclass
+        max_class = max(output_classes)
+        if len(class_names) <= max_class:
+            raise ValueError(
+                f"class_names length ({len(class_names)}) insufficient for max class index ({max_class}). "
+                f"output_classes: {output_classes}, class_names: {class_names}"
+            )
+
     y_gt_vis, y_pred_vis = prepare_labels_for_visualization(
         y_true_raw, y_pred, output_classes
     )
@@ -351,9 +375,19 @@ def generate_single_visualization(
             target_class_name = "CleanIce" if target_class == 1 else "Debris"
         metric_parts.append(f"{target_class_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}")
     else:  # Multi-class
-        for ci, cname in enumerate(class_names):
+        # Use output_classes for iteration, not enumerate(class_names)
+        for ci in output_classes:
             if ci == 0:  # Skip background
                 continue
+            # Safe class name retrieval
+            if ci < len(class_names):
+                cname = class_names[ci]
+            else:
+                cname = f"Class_{ci}"
+
+            print(
+                f"DEBUG METRICS: ci={ci}, cname={cname}, len(class_names)={len(class_names)}"
+            )
             pred_c = (y_pred_vis == ci).astype(np.uint8)
             true_c = (y_gt_vis == ci).astype(np.uint8)
             tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(pred_c), torch.from_numpy(true_c))
@@ -394,6 +428,7 @@ def generate_single_visualization(
         gt_labels=y_gt_vis,
         pr_labels=y_pred_vis,
         cmap=cmap,
+        output_classes=output_classes,
         class_names=class_names,
         metrics_text=metrics_text,
         conf_rgb=conf_rgb,
@@ -461,13 +496,16 @@ def select_slices_by_iou_thirds(
             y_true_valid = y_true_raw[valid]
 
             ious = []
-            for ci in range(len(output_classes)):
+            # Use output_classes for iteration, not range(len(output_classes))
+            for ci in output_classes:
+                if ci == 0:  # Skip background in mean IoU calculation
+                    continue
                 label = ci
                 p = (y_pred_valid == label).astype(np.uint8)
                 t = (y_true_valid == label).astype(np.uint8)
                 tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
                 ious.append(IoU(tp_, fp_, fn_))
-            iou = np.mean(ious)
+            iou = np.mean(ious) if ious else 0.0
 
         slice_ious.append((x_path, float(iou)))
 
@@ -574,13 +612,16 @@ def select_informative_test_tiles(
             y_true_valid = y_true_raw[valid]
 
             ious = []
-            for ci in range(len(output_classes)):
+            # Use output_classes for iteration, not range(len(output_classes))
+            for ci in output_classes:
+                if ci == 0:  # Skip background in mean IoU calculation
+                    continue
                 label = ci  # Compare directly: 0=BG, 1=CI, 2=Debris
                 p = (y_pred_valid == label).astype(np.uint8)
                 t = (y_true_valid == label).astype(np.uint8)
                 tp_, fp_, fn_ = tp_fp_fn(torch.from_numpy(p), torch.from_numpy(t))
                 ious.append(IoU(tp_, fp_, fn_))
-            iou = np.mean(ious)
+            iou = np.mean(ious) if ious else 0.0
 
         tile_ious.append((x_path, float(iou)))
 

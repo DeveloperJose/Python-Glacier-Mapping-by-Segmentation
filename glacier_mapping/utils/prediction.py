@@ -134,7 +134,7 @@ def predict_from_probs(probs, module, threshold=None):
             )
         return (probs[:, :, 1] >= threshold).astype(np.uint8)
     else:  # Multi-class
-        return np.argmax(probs, axis=2).astype(np.uint8) + 1
+        return np.argmax(probs, axis=2).astype(np.uint8)
 
 
 def predict_with_probs(module, x_full, threshold=None):

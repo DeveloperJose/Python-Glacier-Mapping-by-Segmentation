@@ -55,6 +55,15 @@ def scale_image(img, scale_factor=0.5):
 
 def make_rgb_preview(x, scale_factor=0.5):
     """Convert multispectral tile into normalized RGB preview."""
+    import glacier_mapping.utils.logging as log
+
+    # Strict validation: require exactly 3 channels for RGB preview
+    if x.shape[-1] < 3:
+        error_msg = f"make_rgb_preview requires at least 3 channels for RGB preview, got {x.shape[-1]} channels. Input shape: {x.shape}"
+        log.error(error_msg)
+        raise ValueError(error_msg)
+
+    log.debug(f"make_rgb_preview: processing input with shape {x.shape}")
     R = x[..., 2]
     G = x[..., 1]
     B = x[..., 0]
@@ -119,8 +128,10 @@ def build_cmap_from_mask_names(mask_names):
 
     Always adds 255 -> black for mask.
     """
+    print(f"DEBUG CMAP: mask_names={mask_names}, len={len(mask_names)}")
     cmap = {}
     for i, name in enumerate(mask_names):
+        print(f"DEBUG CMAP: i={i}, name={name}")
         name_lower = name.lower()
 
         if name_lower.startswith("bg") or name_lower.startswith("not~"):
@@ -686,6 +697,12 @@ def _stack_images_with_legends(
     components, legend_indices, axis, spacing=4, bg_color=(255, 255, 255)
 ):
     """Stack images with legends, handling legends specially to avoid resizing."""
+    import glacier_mapping.utils.logging as log
+
+    log.debug(
+        f"_stack_images_with_legends: components={len(components)}, legend_indices={legend_indices}"
+    )
+
     if axis == 0:  # Vertical stacking
         return _stack_images(components, axis, spacing, bg_color)
 
@@ -695,6 +712,10 @@ def _stack_images_with_legends(
             c for i, c in enumerate(components) if i not in legend_indices
         ]
         legend_components = [c for i, c in enumerate(components) if i in legend_indices]
+
+        log.debug(
+            f"_stack_images_with_legends: regular_components={len(regular_components)}, legend_components={len(legend_components)}"
+        )
 
         if not legend_components:
             return _stack_images(components, axis, spacing, bg_color)
@@ -717,42 +738,71 @@ def _stack_images_with_legends(
                 )
             padded_regular.append(c)
 
-        # Process legend components - center them vertically
-        padded_legends = []
-        for c in legend_components:
-            h, w = c.shape[:2]
-            if h < max_h:
-                # Center the legend vertically
-                pad_top = (max_h - h) // 2
-                pad_bottom = max_h - h - pad_top
-                c = cv2.copyMakeBorder(
-                    c, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color
-                )
-            elif h > max_h:
-                # Legend is taller than regular components (unlikely but handle it)
-                # Resize regular components to match legend height
-                max_h = h
-                padded_regular = []
-                for c_orig in regular_components:
-                    h_orig, w_orig = c_orig.shape[:2]
-                    if h_orig != max_h:
-                        new_w = int(w_orig * (max_h / h_orig))
-                        c_resized = cv2.resize(
-                            c_orig, (new_w, max_h), interpolation=cv2.INTER_AREA
-                        )
-                        padded_regular.append(c_resized)
-                    else:
-                        padded_regular.append(c_orig)
-                padded_legends.append(c)
-            else:
-                padded_legends.append(c)
+    # Process legend components - center them vertically
+    padded_legends = []
+    log.debug(
+        f"_stack_images_with_legends: processing {len(legend_components)} legend components, max_h={max_h}"
+    )
+    for i, c in enumerate(legend_components):
+        h, w = c.shape[:2]
+        log.debug(f"_stack_images_with_legends: legend {i} shape=({h}, {w})")
+        if h < max_h:
+            # Center legend vertically
+            pad_top = (max_h - h) // 2
+            pad_bottom = max_h - h - pad_top
+            c = cv2.copyMakeBorder(
+                c, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color
+            )
+            log.debug(
+                f"_stack_images_with_legends: padded legend {i} to height {max_h}"
+            )
+        elif h > max_h:
+            # Legend is taller than regular components (unlikely but handle it)
+            # Resize regular components to match legend height
+            max_h = h
+            padded_regular = []
+            for c_orig in regular_components:
+                h_orig, w_orig = c_orig.shape[:2]
+                if h_orig != max_h:
+                    new_w = int(w_orig * (max_h / h_orig))
+                    c_resized = cv2.resize(
+                        c_orig, (new_w, max_h), interpolation=cv2.INTER_AREA
+                    )
+                    padded_regular.append(c_resized)
+                else:
+                    padded_regular.append(c_orig)
+            log.debug(
+                f"_stack_images_with_legends: resized regular components to match legend height {max_h}"
+            )
+        else:
+            # Legend height equals max_h, no padding needed
+            pass
+
+        # Always append the legend (whether padded or not)
+        padded_legends.append(c)
+        log.debug(
+            f"_stack_images_with_legends: added legend {i} to padded_legends, now {len(padded_legends)} total"
+        )
 
         # Rebuild components list in original order
         final_components = []
         legend_idx = 0
         regular_idx = 0
+        log.debug(
+            f"_stack_images_with_legends: rebuilding components, padded_legends={len(padded_legends)}, padded_regular={len(padded_regular)}"
+        )
         for i in range(len(components)):
             if i in legend_indices:
+                log.debug(
+                    f"_stack_images_with_legends: i={i}, legend_idx={legend_idx}, padded_legends length={len(padded_legends)}"
+                )
+                if legend_idx >= len(padded_legends):
+                    log.error(
+                        f"_stack_images_with_legends: legend_idx {legend_idx} >= len(padded_legends) {len(padded_legends)}"
+                    )
+                    raise IndexError(
+                        f"Legend index out of range: {legend_idx} >= {len(padded_legends)}"
+                    )
                 final_components.append(padded_legends[legend_idx])
                 legend_idx += 1
             else:
@@ -776,6 +826,7 @@ def make_redesigned_panel(
     gt_labels,
     pr_labels,
     cmap,
+    output_classes=None,
     class_names=None,
     metrics_text=None,
     conf_rgb=None,
@@ -814,9 +865,27 @@ def make_redesigned_panel(
         gt_labels[~mask] = 255
         pr_labels[~mask] = 255
 
-    tp_mask = (gt_labels == 1) & (pr_labels == 1)
-    fp_mask = (gt_labels != 1) & (pr_labels == 1) & (gt_labels != 255)
-    fn_mask = (gt_labels == 1) & (pr_labels != 1)
+    # Handle binary vs. multiclass error calculation
+    if output_classes is None:
+        # Default to binary clean ice if not provided
+        output_classes = [1]
+
+    tp_mask = np.zeros_like(gt_labels, dtype=bool)
+    fp_mask = np.zeros_like(gt_labels, dtype=bool)
+    fn_mask = np.zeros_like(gt_labels, dtype=bool)
+
+    for target_class in output_classes:
+        if target_class == 0:  # Skip background
+            continue
+
+        # For binary models, predictions are always 1 for the target class
+        pr_class = 1 if len(output_classes) == 1 else target_class
+
+        tp_mask |= (gt_labels == target_class) & (pr_labels == pr_class)
+        fp_mask |= (
+            (gt_labels != target_class) & (pr_labels == pr_class) & (gt_labels != 255)
+        )
+        fn_mask |= (gt_labels == target_class) & (pr_labels != pr_class)
 
     # --------------------------------------------------------------------------
     # Stage 3: Generate Visual Components
