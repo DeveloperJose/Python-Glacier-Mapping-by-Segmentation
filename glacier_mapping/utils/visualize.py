@@ -121,14 +121,28 @@ def build_cmap_from_mask_names(mask_names):
     """
     cmap = {}
     for i, name in enumerate(mask_names):
-        if name.lower().startswith("bg") or name.lower().startswith("not~"):
+        name_lower = name.lower()
+
+        if name_lower.startswith("bg") or name_lower.startswith("not~"):
             cmap[i] = COLOR_BG
-        elif name.lower().startswith("clean"):
+        elif name_lower.startswith("clean"):
             cmap[i] = COLOR_CI
-        elif name.lower().startswith("debr"):
+        elif name_lower.startswith("debr"):
             cmap[i] = COLOR_DEB
         else:
-            cmap[i] = np.array([255, 255, 255], np.uint8)  # fallback white
+            # For multi-class, use default mapping based on index
+            if len(mask_names) == 3:  # Multi-class scenario
+                if i == 0:
+                    cmap[i] = COLOR_BG
+                elif i == 1:
+                    cmap[i] = COLOR_CI
+                elif i == 2:
+                    cmap[i] = COLOR_DEB
+                else:
+                    cmap[i] = np.array([255, 255, 255], np.uint8)
+            else:
+                cmap[i] = np.array([255, 255, 255], np.uint8)
+
     cmap[255] = COLOR_IGNORE
     return cmap
 
@@ -180,31 +194,32 @@ def make_confidence_colorbar(width, height=40, font_scale=0.4):
     label_space = np.full((15, width, 3), 255, dtype=np.uint8)
     colorbar = np.vstack([colorbar, label_space])
 
-    # Add text labels
+    # Add text labels with better rendering
     font = cv2.FONT_HERSHEY_SIMPLEX
-    thickness = 1
+    thickness = max(1, int(1 * font_scale / 0.4))
+    text_color = (40, 40, 40)  # Softer black
 
     # Low confidence label
     cv2.putText(
         colorbar,
         "Low",
-        (5, height - 5),
+        (8, height - 6),
         font,
         font_scale,
-        (0, 0, 0),
+        text_color,
         thickness,
         cv2.LINE_AA,
     )
 
-    # High confidence label
-    text_width = cv2.getTextSize("High", font, font_scale, thickness)[0][0]
+    # High confidence label with better positioning
+    (text_w, text_h), baseline = cv2.getTextSize("High", font, font_scale, thickness)
     cv2.putText(
         colorbar,
         "High",
-        (width - text_width - 5, height - 5),
+        (width - text_w - 8, height - 6),
         font,
         font_scale,
-        (0, 0, 0),
+        text_color,
         thickness,
         cv2.LINE_AA,
     )
@@ -235,9 +250,19 @@ def pad_border(img, pad=4, value=(255, 255, 255)):
 
 def title_bar(text, width, height=32, font_scale=0.6):
     bar = np.full((height, width, 3), 255, dtype=np.uint8)
-    cv2.putText(
-        bar, text, (10, height - 8), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 2
-    )
+    # Use better font rendering with anti-aliasing and improved positioning
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    thickness = max(1, int(2 * font_scale / 0.6))  # Scale thickness with font
+    color = (20, 20, 20)  # Softer black instead of pure black
+
+    # Get text size for better centering
+    (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+    # Position text with better vertical centering
+    x = 10
+    y = height // 2 + text_h // 2
+
+    cv2.putText(bar, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
     return bar
 
 
@@ -322,7 +347,7 @@ def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
     return tp_rgb, fp_rgb, fn_rgb
 
 
-def create_legend_row(labels_dict, width, height=40):
+def create_legend_row(labels_dict, width, height=40, scale_factor=0.5):
     """
     Create a vertical legend with color boxes and labels stacked.
 
@@ -331,27 +356,28 @@ def create_legend_row(labels_dict, width, height=40):
                     Example: {"Background": [128, 128, 128], "Clean Ice": [0, 120, 255]}
         width: Width of the legend (will be used fully)
         height: Height per item (default 40, but will be overridden to fit all items)
+        scale_factor: Scale factor for font sizing
 
     Returns:
         RGB image (total_height, width, 3) with vertical legend
     """
     num_items = len(labels_dict)
-    item_height = 35  # Height per legend item
-    padding = 5
+    item_height = max(30, int(30 * scale_factor))  # Scale item height
+    padding = max(5, int(5 * scale_factor))
     total_height = num_items * item_height + padding * 2
 
     legend = np.full((total_height, width, 3), 255, dtype=np.uint8)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.45
-    thickness = 1
+    font_scale = max(0.35, 0.45 * scale_factor)  # Scale font size
+    thickness = max(1, int(1 * scale_factor))
 
-    box_size = 20  # Color box size
+    box_size = max(15, int(18 * scale_factor))  # Scale box size
     y_offset = padding
 
     for label, color in labels_dict.items():
         # Draw color box (left side)
-        box_x1 = 10
+        box_x1 = padding
         box_y1 = y_offset + (item_height - box_size) // 2
         box_x2 = box_x1 + box_size
         box_y2 = box_y1 + box_size
@@ -360,19 +386,23 @@ def create_legend_row(labels_dict, width, height=40):
             legend, (box_x1, box_y1), (box_x2, box_y2), tuple(int(c) for c in color), -1
         )
         cv2.rectangle(
-            legend, (box_x1, box_y1), (box_x2, box_y2), (0, 0, 0), 1
-        )  # Black border
+            legend, (box_x1, box_y1), (box_x2, box_y2), (40, 40, 40), 1
+        )  # Softer border
 
-        # Draw label text (right of box)
-        text_x = box_x2 + 8
-        text_y = y_offset + item_height // 2 + 5
+        # Draw label text with better positioning
+        text_x = box_x2 + max(6, int(8 * scale_factor))
+
+        # Get text size for better vertical centering
+        (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+        text_y = y_offset + item_height // 2 + text_h // 2
+
         cv2.putText(
             legend,
             label,
             (text_x, text_y),
             font,
             font_scale,
-            (0, 0, 0),
+            (40, 40, 40),  # Softer text color
             thickness,
             cv2.LINE_AA,
         )
@@ -536,6 +566,27 @@ def make_error_overlay(shape, error_message):
     return img
 
 
+def _get_spacing_for_scale(scale_factor, component_type="default"):
+    """Calculate appropriate spacing based on scale factor and component type."""
+    base_spacing = {
+        "images": 3,  # Tighter spacing for image rows
+        "overlays": 4,  # Medium spacing for overlay rows
+        "errors": 3,  # Tighter spacing for error rows
+        "default": 4,  # Default spacing
+    }
+    spacing = base_spacing.get(component_type, 4)
+    return max(1, int(spacing * scale_factor))
+
+
+def _get_legend_width(main_width, scale_factor):
+    """Calculate appropriate legend width based on main image width and scale."""
+    # Use proportional width with reasonable minimum and maximum
+    min_width = max(120, int(120 * scale_factor))
+    max_width = min(250, int(250 * scale_factor))
+    proportional_width = int(main_width * 0.25)
+    return max(min_width, min(proportional_width, max_width))
+
+
 # ============================================================
 # === make_redesigned_panel  (Option A, clean + corrected) ===
 # ============================================================
@@ -550,13 +601,36 @@ def _create_component(img, title, font_scale=0.6, border_value=(255, 255, 255)):
     return pad_border(component, value=border_value)
 
 
-def _resize_to_match_height(components):
-    """Resize a list of images to the maximum height."""
-    max_h = max(c.shape[0] for c in components)
+def _create_legend_component(legend_img, title, font_scale=0.6):
+    """Create a legend component that doesn't get resized with other components."""
+    if legend_img.dtype != np.uint8:
+        legend_img = legend_img.astype(np.uint8)
+
+    # Add title but keep the legend at its native size
+    component = add_title(legend_img, title, font_scale=font_scale)
+    return pad_border(component, value=(255, 255, 255))
+
+
+def _resize_to_match_height(components, legend_indices=None):
+    """Resize a list of images to the maximum height, skipping legends."""
+    if legend_indices is None:
+        legend_indices = []
+
+    # Find max height excluding legends
+    non_legend_heights = [
+        c.shape[0] for i, c in enumerate(components) if i not in legend_indices
+    ]
+    if not non_legend_heights:  # All are legends
+        return components
+
+    max_h = max(non_legend_heights)
     resized_components = []
-    for c in components:
+    for i, c in enumerate(components):
         h, w = c.shape[:2]
-        if h != max_h:
+        if i in legend_indices:
+            # Don't resize legends
+            resized_components.append(c)
+        elif h != max_h:
             new_w = int(w * (max_h / h))
             resized = cv2.resize(c, (new_w, max_h), interpolation=cv2.INTER_AREA)
             resized_components.append(resized)
@@ -605,6 +679,94 @@ def _stack_images(components, axis, spacing=4, bg_color=(255, 255, 255)):
             if i < len(padded_components) - 1:
                 spacer = np.full((c.shape[0], spacing, 3), bg_color, dtype=np.uint8)
                 spaced_components.append(spacer)
+        return np.hstack(spaced_components)
+
+
+def _stack_images_with_legends(
+    components, legend_indices, axis, spacing=4, bg_color=(255, 255, 255)
+):
+    """Stack images with legends, handling legends specially to avoid resizing."""
+    if axis == 0:  # Vertical stacking
+        return _stack_images(components, axis, spacing, bg_color)
+
+    else:  # Horizontal stacking with special legend handling
+        # Separate regular components and legends
+        regular_components = [
+            c for i, c in enumerate(components) if i not in legend_indices
+        ]
+        legend_components = [c for i, c in enumerate(components) if i in legend_indices]
+
+        if not legend_components:
+            return _stack_images(components, axis, spacing, bg_color)
+
+        # Get max height of regular components only
+        max_h = (
+            max(c.shape[0] for c in regular_components)
+            if regular_components
+            else max(c.shape[0] for c in legend_components)
+        )
+
+        # Process regular components
+        padded_regular = []
+        for c in regular_components:
+            h, w = c.shape[:2]
+            if h != max_h:
+                pad_h = max_h - h
+                c = cv2.copyMakeBorder(
+                    c, 0, pad_h, 0, 0, cv2.BORDER_CONSTANT, value=bg_color
+                )
+            padded_regular.append(c)
+
+        # Process legend components - center them vertically
+        padded_legends = []
+        for c in legend_components:
+            h, w = c.shape[:2]
+            if h < max_h:
+                # Center the legend vertically
+                pad_top = (max_h - h) // 2
+                pad_bottom = max_h - h - pad_top
+                c = cv2.copyMakeBorder(
+                    c, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color
+                )
+            elif h > max_h:
+                # Legend is taller than regular components (unlikely but handle it)
+                # Resize regular components to match legend height
+                max_h = h
+                padded_regular = []
+                for c_orig in regular_components:
+                    h_orig, w_orig = c_orig.shape[:2]
+                    if h_orig != max_h:
+                        new_w = int(w_orig * (max_h / h_orig))
+                        c_resized = cv2.resize(
+                            c_orig, (new_w, max_h), interpolation=cv2.INTER_AREA
+                        )
+                        padded_regular.append(c_resized)
+                    else:
+                        padded_regular.append(c_orig)
+                padded_legends.append(c)
+            else:
+                padded_legends.append(c)
+
+        # Rebuild components list in original order
+        final_components = []
+        legend_idx = 0
+        regular_idx = 0
+        for i in range(len(components)):
+            if i in legend_indices:
+                final_components.append(padded_legends[legend_idx])
+                legend_idx += 1
+            else:
+                final_components.append(padded_regular[regular_idx])
+                regular_idx += 1
+
+        # Add spacing
+        spaced_components = []
+        for i, c in enumerate(final_components):
+            spaced_components.append(c)
+            if i < len(final_components) - 1:
+                spacer = np.full((c.shape[0], spacing, 3), bg_color, dtype=np.uint8)
+                spaced_components.append(spacer)
+
         return np.hstack(spaced_components)
 
 
@@ -684,7 +846,11 @@ def make_redesigned_panel(
             ("Mask", COLOR_IGNORE.tolist()),
         ]
     )
-    class_legend = create_legend_row(class_legend_dict, width=W)
+    # Calculate smart legend width
+    legend_width = _get_legend_width(W, scale_factor)
+    class_legend = create_legend_row(
+        class_legend_dict, width=legend_width, scale_factor=scale_factor
+    )
 
     error_legend_dict = OrderedDict(
         [
@@ -693,7 +859,9 @@ def make_redesigned_panel(
             ("False Negative", COLOR_FN.tolist()),
         ]
     )
-    error_legend = create_legend_row(error_legend_dict, width=W)
+    error_legend = create_legend_row(
+        error_legend_dict, width=legend_width, scale_factor=scale_factor
+    )
 
     # --------------------------------------------------------------------------
     # Stage 5: Assemble Panel Rows
@@ -711,8 +879,12 @@ def make_redesigned_panel(
         empty = np.full((H, W, 3), 255, dtype=np.uint8)
         row1_components.append(_create_component(empty, "No Confidence Data"))
 
-    row1_components.append(_create_component(class_legend, "Class Colors"))
-    row1 = _stack_images(_resize_to_match_height(row1_components), axis=1)
+    row1_components.append(_create_legend_component(class_legend, "Class Colors"))
+    row1_legend_indices = [len(row1_components) - 1]  # Last component is legend
+    row1_spacing = _get_spacing_for_scale(scale_factor, "images")
+    row1 = _stack_images_with_legends(
+        row1_components, row1_legend_indices, axis=1, spacing=row1_spacing
+    )
 
     # Row 2: Overlays and Masks
     row2_components = [
@@ -721,7 +893,10 @@ def make_redesigned_panel(
         _create_component(gt_rgb, "Ground Truth"),
         _create_component(pr_rgb, "Prediction"),
     ]
-    row2 = _stack_images(_resize_to_match_height(row2_components), axis=1)
+    row2_spacing = _get_spacing_for_scale(scale_factor, "overlays")
+    row2 = _stack_images(
+        _resize_to_match_height(row2_components), axis=1, spacing=row2_spacing
+    )
 
     # Row 3: Error Visualizations
     row3_components = [
@@ -729,17 +904,25 @@ def make_redesigned_panel(
         _create_component(combined_errors, "Errors (TP+FP+FN)"),
         _create_component(fp_rgb, "False Positives"),
         _create_component(fn_rgb, "False Negatives"),
-        _create_component(error_legend, "Error Types"),
+        _create_legend_component(error_legend, "Error Types"),
     ]
-    row3 = _stack_images(_resize_to_match_height(row3_components), axis=1)
+    row3_legend_indices = [len(row3_components) - 1]  # Last component is legend
+    row3_spacing = _get_spacing_for_scale(scale_factor, "errors")
+    row3 = _stack_images_with_legends(
+        row3_components, row3_legend_indices, axis=1, spacing=row3_spacing
+    )
 
     # --------------------------------------------------------------------------
     # Stage 6: Final Assembly
     # --------------------------------------------------------------------------
-    composite = _stack_images([row1, row2, row3], axis=0)
+    vertical_spacing = _get_spacing_for_scale(scale_factor, "default")
+    composite = _stack_images([row1, row2, row3], axis=0, spacing=vertical_spacing)
 
     if metrics_text:
-        header = title_bar(metrics_text, composite.shape[1], height=40, font_scale=0.6)
+        header_font_scale = max(0.5, 0.6 * scale_factor)
+        header = title_bar(
+            metrics_text, composite.shape[1], height=40, font_scale=header_font_scale
+        )
         composite = np.vstack([header, composite])
 
     return composite
