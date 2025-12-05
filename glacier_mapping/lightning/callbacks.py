@@ -241,7 +241,7 @@ class ValidationVisualizationCallback(Callback):
                 y_gt_vis_binary[y_true_raw == 255] = 255
                 y_gt_vis = y_gt_vis_binary
 
-            y_pred_vis[ignore] = 255
+            # Don't pre-mask - let make_redesigned_panel handle it with mask parameter
 
             # Create RGB visualizations
             x_rgb = make_rgb_preview(x_full)
@@ -375,13 +375,13 @@ class ValidationVisualizationCallback(Callback):
             composite = make_redesigned_panel(
                 context_rgb=context_rgb,
                 x_rgb=x_rgb,
-                gt_labels=y_gt_vis,          # integer labels, masked version
-                pr_labels=y_pred_vis,        # integer labels, masked version
+                gt_labels=y_gt_vis,  # integer labels, masked version
+                pr_labels=y_pred_vis,  # integer labels, masked version
                 cmap=cmap,
                 class_names=class_names,
                 metrics_text=metrics_text,
                 conf_rgb=conf_rgb,
-                mask=~ignore,                # boolean valid mask
+                mask=~ignore,  # boolean valid mask
             )
 
             # Save to: val_visualizations/tiff_XXXX/slice_YY_epochZZZZ.png

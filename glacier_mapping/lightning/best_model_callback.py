@@ -725,7 +725,7 @@ class TestEvaluationCallback(Callback):
             # Generate 8-panel visualization
             ignore = y_true_raw == 255
 
-            # GT/PRED for visualization
+            # GT/PRED for visualization (don't pre-mask - let make_redesigned_panel handle it)
             y_gt_vis = y_true_raw.copy()
             y_pred_vis = y_pred_viz.copy()
 
@@ -738,9 +738,7 @@ class TestEvaluationCallback(Callback):
             else:  # Multi-class
                 # Keep original 0,1,2 range - don't map to 1,2,3
                 y_gt_vis = y_true_raw.copy()
-                y_gt_vis[ignore] = 255
-
-            y_pred_vis[ignore] = 255
+                # Don't pre-mask - let make_redesigned_panel handle it with mask parameter
 
             # Predictions are already in 0,1,2 range (0=BG, 1=CI, 2=Debris)
             # No conversion needed
@@ -910,21 +908,12 @@ class TestEvaluationCallback(Callback):
             composite = make_redesigned_panel(
                 context_rgb=context_rgb,
                 x_rgb=x_rgb,
-                gt_rgb=label_to_color(y_gt_vis, cmap),
-                pr_rgb=label_to_color(y_pred_vis, cmap),
-                gt_overlay_rgb=gt_overlay_rgb,
-                pr_overlay_rgb=pr_overlay_rgb,
-                tp_mask=tp_mask,
-                fp_mask=fp_mask,
-                fn_mask=fn_mask,
+                gt_labels=y_gt_vis,
+                pr_labels=y_pred_vis,
                 cmap=cmap,
                 class_names=class_names,
                 metrics_text=metrics_text,
-                output_classes=output_classes,
-                gt_mask=y_gt_vis,
-                pred_mask=y_pred_viz,
-                x_data=x_full,
-                probs=probs,
+                mask=~ignore,  # boolean valid mask
             )
 
             # Extract slice number from filename (tiff_XX_slice_YY.npy)
