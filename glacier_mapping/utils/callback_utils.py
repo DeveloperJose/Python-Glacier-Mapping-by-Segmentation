@@ -343,7 +343,12 @@ def generate_single_visualization(
         P, R, iou, _, _, _ = calculate_binary_metrics(
             y_pred, y_true_raw, target_class, mask=ignore
         )
-        target_class_name = class_names[target_class]
+        # Safe indexing with fallback
+        if target_class < len(class_names):
+            target_class_name = class_names[target_class]
+        else:
+            # Fallback naming based on target_class value
+            target_class_name = "CleanIce" if target_class == 1 else "Debris"
         metric_parts.append(f"{target_class_name}: P={P:.3f} R={R:.3f} IoU={iou:.3f}")
     else:  # Multi-class
         for ci, cname in enumerate(class_names):
@@ -482,12 +487,17 @@ def select_slices_by_iou_thirds(
     bottom_k = k + (1 if remainder > 1 else 0)
     middle_k = k
 
+    # Add bounds checking for small datasets
+    if len(slice_ious) < 3:
+        # Fallback for very small datasets
+        return [path for path, iou in slice_ious[:num_samples]]
+
     # Select slices
     top_slices = [path for path, iou in slice_ious[:top_k]]
     bottom_slices = [path for path, iou in slice_ious[-bottom_k:]]
 
-    middle_start = len(slice_ious) // 2 - middle_k // 2
-    middle_end = middle_start + middle_k
+    middle_start = max(0, len(slice_ious) // 2 - middle_k // 2)
+    middle_end = min(len(slice_ious), middle_start + middle_k)
     middle_slices = [path for path, iou in slice_ious[middle_start:middle_end]]
 
     selected = top_slices + middle_slices + bottom_slices
@@ -592,13 +602,18 @@ def select_informative_test_tiles(
     bottom_k = k + (1 if remainder > 1 else 0)
     middle_k = k
 
+    # Add bounds checking for small datasets
+    if len(tile_ious) < 3:
+        # Fallback for very small datasets
+        return [path for path, iou in tile_ious[:num_samples]], {}, {}
+
     # Select tiles
     top_tiles = [path for path, iou in tile_ious[:top_k]]
     bottom_tiles = [path for path, iou in tile_ious[-bottom_k:]]
 
     # Middle tiles from median region
-    middle_start = len(tile_ious) // 2 - middle_k // 2
-    middle_end = middle_start + middle_k
+    middle_start = max(0, len(tile_ious) // 2 - middle_k // 2)
+    middle_end = min(len(tile_ious), middle_start + middle_k)
     middle_tiles = [path for path, iou in tile_ious[middle_start:middle_end]]
 
     selected = top_tiles + middle_tiles + bottom_tiles
