@@ -1,5 +1,6 @@
 # Multi-class segmentation (BG + CleanIce + Debris) task defaults
 loader_opts:
   output_classes: [0, 1, 2]  # All three classes
+  foreground_classes: [1, 2]  # Critical fix for multi-class loss
 metrics_opts:
   threshold: [0.5, 0.5, 0.5]  # BG, CleanIce, Debris

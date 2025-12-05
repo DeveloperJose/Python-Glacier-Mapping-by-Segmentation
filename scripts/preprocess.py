@@ -150,7 +150,7 @@ if __name__ == "__main__":
         ]
     )
 
-    images = sorted(os.listdir(Path(conf.image_dir)))
+    images = sorted(Path(conf.image_dir).glob("*.tif"))
     idx = np.random.permutation(len(images))
     splits = {
         "test": sorted([images[i] for i in idx[: int(conf.test * len(images))]]),
