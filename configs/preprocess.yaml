@@ -7,13 +7,11 @@ overlap: 64
 filter: 0.1
 test: 0.2
 val: 0.1
-add_velocity: True  # Enable ITS_LIVE velocity features (4 bands)
+add_velocity: True # Enable ITS_LIVE velocity features (4 bands)
 add_ndvi: True
 add_ndwi: True
 add_ndsi: True
 add_hsv: True
-physics_res: None  # 64 or int or "full" or None
-physics_scale: 1  # float between (0, 1]
-save_skipped_visualizations: (
-    false  # Save PNG images of filtered slices (takes lots of disk space)
-)
+physics_res: None # 64 or int or "full" or None
+physics_scale: 1 # float between (0, 1]
+save_skipped_visualizations: False
