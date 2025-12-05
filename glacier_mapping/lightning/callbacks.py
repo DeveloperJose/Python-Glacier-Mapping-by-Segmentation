@@ -12,18 +12,18 @@ from tqdm import tqdm
 
 from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.visualize import (
+    make_rgb_preview,
+    label_to_color,
+    make_overlay,
+    make_tp_fp_fn_masks,
+    make_redesigned_panel,
     build_binary_cmap,
     build_cmap_from_mask_names,
     calculate_slice_position,
-    label_to_color,
     load_full_tiff_rgb,
     make_context_image,
-    make_eight_panel,
-    make_redesigned_panel,
     make_error_overlay,
-    make_overlay,
-    make_rgb_preview,
-    make_tp_fp_fn_masks,
+    make_confidence_map,
 )
 from glacier_mapping.utils import cleanup_gpu_memory
 import glacier_mapping.utils.logging as log
@@ -113,14 +113,16 @@ class ValidationVisualizationCallback(Callback):
         if slice_meta_path.exists():
             try:
                 slice_meta = pd.read_csv(slice_meta_path)
+                # Filter to validation split to get correct image mappings
+                val_meta = slice_meta[slice_meta["split"] == "val"]
                 self._image_index_to_filename = {}
-                for _, row in slice_meta.iterrows():
+                for _, row in val_meta.iterrows():
                     img_idx = int(row["Image"])
                     filename = str(row["Landsat ID"])
                     if img_idx not in self._image_index_to_filename:
                         self._image_index_to_filename[img_idx] = filename
                 log.info(
-                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings"
+                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings for validation split"
                 )
             except Exception as e:
                 log.warning(f"Failed to load slice_meta.csv: {e}")
@@ -220,11 +222,11 @@ class ValidationVisualizationCallback(Callback):
                 probs, pl_module, threshold[0] if threshold else None
             )
 
-            # Commented out: Confidence calculation (not currently used)
-            # if len(output_classes) == 1:  # Binary
-            #     conf = probs[:, :, 1]  # Foreground probability
-            # else:  # Multi-class
-            #     conf = np.max(probs, axis=-1)
+            # Calculate confidence map
+            if len(output_classes) == 1:  # Binary
+                conf = probs[:, :, 1]  # Foreground probability
+            else:  # Multi-class
+                conf = np.max(probs, axis=-1)
 
             # Prepare visualization masks
             ignore = y_true_raw == 255
@@ -314,14 +316,8 @@ class ValidationVisualizationCallback(Callback):
             # Create overlay visualizations
             pr_overlay_rgb = make_overlay(x_rgb, y_pred_vis, cmap, alpha=0.5)
 
-            # Commented out: Confidence and entropy maps (kept for future use)
-            # conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
-            # if len(output_classes) == 1 and probs.shape[-1] == 2:
-            #     entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
-            # elif len(output_classes) > 1:
-            #     entropy_rgb = make_entropy_map(probs, invalid_mask=ignore)
-            # else:
-            #     entropy_rgb = make_confidence_map(conf, invalid_mask=ignore)
+            # Create confidence map visualization
+            conf_rgb = make_confidence_map(conf, invalid_mask=ignore)
 
             # TP/FP/FN masks
             tp_mask = (
@@ -392,6 +388,8 @@ class ValidationVisualizationCallback(Callback):
                 cmap=cmap,
                 class_names=class_names,
                 metrics_text=metrics_text,
+                conf_rgb=conf_rgb,
+                mask=~ignore,  # Valid pixels mask (True = valid, False = ignore)
             )
 
             # Save to: val_visualizations/tiff_XXXX/slice_YY_epochZZZZ.png

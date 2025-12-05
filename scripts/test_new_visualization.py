@@ -103,8 +103,10 @@ def test_visualization():
     slice_meta_path = processed_dir / "slice_meta.csv"
     if slice_meta_path.exists():
         slice_meta = pd.read_csv(slice_meta_path)
+        # Filter to only validation split to get correct mappings
+        val_meta = slice_meta[slice_meta["split"] == "val"]
         image_index_to_filename = {}
-        for _, row in slice_meta.iterrows():
+        for _, row in val_meta.iterrows():
             img_idx = int(row["Image"])
             filename = str(row["Landsat ID"])
             if img_idx not in image_index_to_filename:
@@ -170,6 +172,9 @@ def test_visualization():
 
             tiff_filename = image_index_to_filename[tiff_num]
             tiff_path = image_dir / tiff_filename
+
+            # Debug output
+            print(f"  TIFF mapping: tiff_{tiff_num} -> {tiff_filename}")
 
             if not tiff_path.exists():
                 raise FileNotFoundError(f"Landsat TIFF not found: {tiff_path}")
@@ -252,6 +257,11 @@ def test_visualization():
             cmap=cmap,
             class_names=class_names,
             metrics_text=metrics_text,
+            output_classes=output_classes,
+            gt_mask=y_gt_vis,
+            pred_mask=y_pred,
+            x_data=x_full,
+            probs=probs,
         )
 
         # Save visualization

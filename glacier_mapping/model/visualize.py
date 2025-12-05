@@ -6,13 +6,13 @@ from matplotlib import cm
 COLOR_BG = np.array([128, 128, 128], dtype=np.uint8)  # Medium Gray
 COLOR_CI = np.array([0, 120, 255], dtype=np.uint8)  # Saturated Blue
 COLOR_DEB = np.array(
-    [255, 120, 0], dtype=np.uint8
+    [200, 80, 0], dtype=np.uint8
 )  # Darker Orange (more orange, less yellow)
 COLOR_IGNORE = np.array([0, 0, 0], dtype=np.uint8)  # Black
 
 # Error visualization colors
 COLOR_TP = np.array([0, 255, 0], dtype=np.uint8)  # Green - True Positive
-COLOR_FP = np.array([255, 0, 0], dtype=np.uint8)  # Red - False Positive
+COLOR_FP = np.array([0, 0, 255], dtype=np.uint8)  # Blue - False Positive
 COLOR_FN = np.array([255, 0, 255], dtype=np.uint8)  # Magenta - False Negative
 
 DEFAULT_CLASS_COLORMAP = {
@@ -158,6 +158,61 @@ def make_confidence_map(prob, invalid_mask=None):
     if invalid_mask is not None:
         rgb[invalid_mask, :] = 0
     return rgb
+
+
+def make_confidence_colorbar(width, height=40, font_scale=0.4):
+    """
+    Create a horizontal colorbar for confidence visualization.
+
+    Args:
+        width: Width of the colorbar
+        height: Height of the colorbar (default 40)
+        font_scale: Font scale for labels (default 0.4)
+
+    Returns:
+        RGB image (height, width, 3) with colorbar and labels
+    """
+    # Create gradient from 0 to 1
+    gradient = np.linspace(0, 1, width).reshape(1, -1)
+    colorbar = _viridis_from_scalar(gradient)
+
+    # Expand to full height
+    colorbar = np.repeat(colorbar, height - 15, axis=0)  # Leave space for labels
+
+    # Add white space for labels at bottom
+    label_space = np.full((15, width, 3), 255, dtype=np.uint8)
+    colorbar = np.vstack([colorbar, label_space])
+
+    # Add text labels
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    thickness = 1
+
+    # Low confidence label
+    cv2.putText(
+        colorbar,
+        "Low",
+        (5, height - 5),
+        font,
+        font_scale,
+        (0, 0, 0),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+    # High confidence label
+    text_width = cv2.getTextSize("High", font, font_scale, thickness)[0][0]
+    cv2.putText(
+        colorbar,
+        "High",
+        (width - text_width - 5, height - 5),
+        font,
+        font_scale,
+        (0, 0, 0),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+    return colorbar
 
 
 def make_entropy_map(prob_cube, invalid_mask=None):
@@ -426,7 +481,9 @@ def add_title(img, text, font_scale=0.6):
     return concat_v(bar, img)
 
 
-def make_combined_error_mask(tp_mask, fp_mask, fn_mask, background_color=128):
+def make_combined_error_mask(
+    tp_mask, fp_mask, fn_mask, background_color=128, mask=None
+):
     """
     Create a single RGB image with all error types combined.
 
@@ -435,17 +492,22 @@ def make_combined_error_mask(tp_mask, fp_mask, fn_mask, background_color=128):
         fp_mask: Boolean array (H, W) for false positives
         fn_mask: Boolean array (H, W) for false negatives
         background_color: Background gray value (0-255), default 128
+        mask: Optional boolean mask for valid pixels (True = valid, False = ignore)
 
     Returns:
         RGB image (H, W, 3) with colored error masks:
         - TP = Green
-        - FP = Red
+        - FP = Blue
         - FN = Magenta
-        - Background = Gray
+        - Background = Gray (or Black if masked)
     """
     H, W = tp_mask.shape
     # Create gray background
     combined = np.full((H, W, 3), background_color, dtype=np.uint8)
+
+    # Apply mask if provided (set masked areas to black)
+    if mask is not None:
+        combined[~mask] = COLOR_IGNORE
 
     # Apply colors in order: TP, FP, FN (overlapping pixels take last applied color)
     combined[tp_mask] = COLOR_TP
@@ -455,7 +517,7 @@ def make_combined_error_mask(tp_mask, fp_mask, fn_mask, background_color=128):
     return combined
 
 
-def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5):
+def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=None):
     """
     Create semi-transparent overlay of error masks on TIFF RGB.
 
@@ -465,6 +527,7 @@ def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5):
         fp_mask: Boolean array (H, W) for false positives
         fn_mask: Boolean array (H, W) for false negatives
         alpha: Transparency (0.0=invisible, 1.0=opaque)
+        mask: Optional boolean mask for valid pixels (True = valid, False = ignore)
 
     Returns:
         RGB image with semi-transparent error overlay
@@ -480,12 +543,47 @@ def make_errors_overlay(tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5):
     # Create alpha mask: 0 for background, alpha for error pixels
     alpha_mask = np.zeros((H, W, 1), dtype=np.float32)
     error_pixels = tp_mask | fp_mask | fn_mask
+
+    # Apply mask if provided
+    if mask is not None:
+        error_pixels = error_pixels & mask
+
     alpha_mask[error_pixels] = alpha
 
     # Blend: result = tiff * (1 - alpha) + overlay * alpha
     result = (tiff_rgb * (1.0 - alpha_mask) + overlay * alpha_mask).astype(np.uint8)
 
     return result
+
+
+def make_fp_fn_individual_masks(fp_mask, fn_mask, mask=None):
+    """
+    Create individual FP and FN masks with gray background and black masked areas.
+
+    Args:
+        fp_mask: Boolean array (H, W) for false positives
+        fn_mask: Boolean array (H, W) for false negatives
+        mask: Optional boolean mask for valid pixels (True = valid, False = ignore)
+
+    Returns:
+        Tuple of (fp_rgb, fn_rgb) with gray background and colored error pixels
+    """
+    H, W = fp_mask.shape
+
+    # Create gray background
+    fp_rgb = np.full((H, W, 3), COLOR_BG, dtype=np.uint8)
+    fn_rgb = np.full((H, W, 3), COLOR_BG, dtype=np.uint8)
+
+    # Apply mask if provided (set masked areas to black)
+    if mask is not None:
+        fp_rgb[~mask] = COLOR_IGNORE
+        fn_rgb[~mask] = COLOR_IGNORE
+
+    # Apply colored error pixels
+    fp_rgb[fp_mask] = COLOR_FP
+    fn_rgb[fn_mask] = COLOR_FN
+
+    return fp_rgb, fn_rgb
 
 
 def create_legend_row(labels_dict, width, height=40):
@@ -616,19 +714,20 @@ def make_redesigned_panel(
     cmap,
     class_names=None,
     metrics_text=None,
+    conf_rgb=None,
+    mask=None,
 ):
     """
-    Create 5-row × 2-column visualization with legends.
+    Create 3-row × 4-column visualization with legends and colorbar.
 
     Layout:
-        Row 1: Context (TIFF with box) | RGB Slice
-        Row 2: Ground Truth | Prediction
-        Row 3: GT Overlay | Pred Overlay
-        Row 4: TP+FP+FN Combined | TP+FP+FN Overlay
-        Row 5: False Positive | False Negative
+        Row 1: Satellite Image (RGB) | Tested Image Slice | Confidence | Empty
+        Row 2: Ground Truth Overlay | Prediction Overlay | Ground Truth | Prediction
+        Row 3: Errors Overlay (TP+FP+FN) | Errors (TP+FP+FN) | False Positives | False Negatives
+        Row 4: Colorbar | Class Legend | Error Legend | Empty
 
     Args:
-        context_rgb: Full TIFF with slice location box
+        context_rgb: Full TIFF with slice location box (unused in new layout)
         x_rgb: RGB satellite slice
         gt_rgb: Ground truth categorical visualization
         pr_rgb: Prediction categorical visualization
@@ -640,39 +739,101 @@ def make_redesigned_panel(
         cmap: Color mapping dict
         class_names: List of class names for legend
         metrics_text: Optional header text with metrics
+        conf_rgb: Optional confidence map (viridis colormap)
+        mask: Optional boolean mask for valid pixels
 
     Returns:
         Composite visualization image with all rows and legends
     """
-    # Generate error visualizations
+    # Generate error visualizations with mask support
     combined_errors = make_combined_error_mask(
-        tp_mask, fp_mask, fn_mask, background_color=128
+        tp_mask, fp_mask, fn_mask, background_color=128, mask=mask
     )
-    errors_overlay = make_errors_overlay(x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5)
-
-    # Generate FP and FN individual masks
-    fp_rgb = np.zeros_like(x_rgb)
-    fp_rgb[fp_mask] = COLOR_FP
-
-    fn_rgb = np.zeros_like(x_rgb)
-    fn_rgb[fn_mask] = COLOR_FN
-
-    # Build first row to get correct width with borders
-    r1_temp = concat_h(
-        add_title(context_rgb, "Context (Full TIFF)"),
-        add_title(x_rgb, "RGB Satellite Image"),
+    errors_overlay = make_errors_overlay(
+        x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=mask
     )
 
-    # Get dimensions for legends
-    row_width = r1_temp.shape[1]  # Full row width
-    single_img_width = x_rgb.shape[1]  # Single image width (for legends on right)
-    img_height = x_rgb.shape[0]  # Image height (legend should match this)
-    legend_bar_height = 40  # Height of the actual legend content
+    # Generate FP and FN individual masks with gray background and black mask
+    fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask, mask=mask)
 
-    # Create legends for each row
-    # Row 2-3: Class colors (always show all classes: BG, CleanIce, Debris, Mask)
-    # This ensures consistency even for binary tasks
+    # Get dimensions
+    img_height = x_rgb.shape[0]
+    img_width = x_rgb.shape[1]
+
+    # Create empty spacer
+    empty = np.full((img_height, img_width, 3), 255, dtype=np.uint8)
+
+    # Determine target class name for FP/FN labels
+    target_class_name = "Target"
+    if class_names and len(class_names) > 2:
+        # Multi-class case - need to determine which class has errors
+        if fp_mask.sum() > fn_mask.sum():
+            target_class_name = class_names[2] if len(class_names) > 2 else "Debris"
+        else:
+            target_class_name = class_names[1] if len(class_names) > 1 else "Clean Ice"
+    elif class_names and len(class_names) == 3:
+        # Binary case - determine target class from class_names
+        if "Debris" in class_names:
+            target_class_name = "Debris"
+        elif "Clean Ice" in class_names:
+            target_class_name = "Clean Ice"
+
+    # Create all components with titles first, then ensure consistent heights
+    r1_components_raw = [
+        add_title(x_rgb, "Satellite Image (RGB)"),
+        add_title(x_rgb, "Tested Image Slice"),
+    ]
+
+    # Handle confidence map
+    if conf_rgb is not None:
+        conf_colorbar = make_confidence_colorbar(img_width, height=40, font_scale=0.5)
+        conf_with_colorbar = concat_v(conf_rgb, conf_colorbar)
+        r1_components_raw.append(add_title(conf_with_colorbar, "Confidence"))
+    else:
+        r1_components_raw.append(add_title(empty, "No Confidence Data"))
+
+    r1_components_raw.append(add_title(empty, "Empty"))
+
+    # Ensure all components have the same height
+    max_height = max(comp.shape[0] for comp in r1_components_raw)
+    r1_components = []
+    for comp in r1_components_raw:
+        if comp.shape[0] != max_height:
+            # Pad to match max height
+            padding = max_height - comp.shape[0]
+            comp = np.pad(
+                comp,
+                ((0, padding), (0, 0), (0, 0)),
+                mode="constant",
+                constant_values=255,
+            )
+        r1_components.append(comp)
+
+    # Build Row 1: Satellite Image | Tested Image Slice | Confidence | Empty
+    r1 = concat_h(*r1_components)
+
+    # Build Row 2: Ground Truth Overlay | Prediction Overlay | Ground Truth | Prediction
+    r2 = concat_h(
+        add_title(gt_overlay_rgb, "Ground Truth Overlay"),
+        add_title(pr_overlay_rgb, "Prediction Overlay"),
+        add_title(gt_rgb, "Ground Truth"),
+        add_title(pr_rgb, "Prediction"),
+    )
+
+    # Build Row 3: Errors Overlay | Errors | False Positives | False Negatives
+    r3 = concat_h(
+        add_title(errors_overlay, "Errors Overlay (TP+FP+FN)"),
+        add_title(combined_errors, "Errors (TP+FP+FN)"),
+        add_title(fp_rgb, f"False Positives (predicted {target_class_name}) incorrect"),
+        add_title(fn_rgb, f"False Negatives ({target_class_name}) but not predicted"),
+    )
+
+    # Create legends for Row 4
     from collections import OrderedDict
+
+    # Create all legend components with titles
+    conf_legend_raw = make_confidence_colorbar(img_width, height=40, font_scale=0.5)
+    conf_legend = add_title(conf_legend_raw, "Confidence Scale")
 
     class_legend_dict = OrderedDict(
         [
@@ -682,17 +843,9 @@ def make_redesigned_panel(
             ("Mask", COLOR_IGNORE.tolist()),
         ]
     )
+    class_legend_bar = create_legend_row(class_legend_dict, img_width, 40)
+    class_legend = add_title(class_legend_bar, "Class Colors")
 
-    # Create vertical legends (they return their own calculated height)
-    class_legend_bar = create_legend_row(
-        class_legend_dict, single_img_width, legend_bar_height
-    )
-    # Pad legend to match image height
-    legend_actual_height = class_legend_bar.shape[0]
-    class_legend = np.full((img_height, single_img_width, 3), 255, dtype=np.uint8)
-    class_legend[:legend_actual_height, :, :] = class_legend_bar
-
-    # Row 4: Error colors (vertical legend)
     error_legend_dict = OrderedDict(
         [
             ("True Positive", COLOR_TP.tolist()),
@@ -700,73 +853,36 @@ def make_redesigned_panel(
             ("False Negative", COLOR_FN.tolist()),
         ]
     )
-    error_legend_bar = create_legend_row(
-        error_legend_dict, single_img_width, legend_bar_height
-    )
-    error_legend_actual_height = error_legend_bar.shape[0]
-    error_legend = np.full((img_height, single_img_width, 3), 255, dtype=np.uint8)
-    error_legend[:error_legend_actual_height, :, :] = error_legend_bar
+    error_legend_bar = create_legend_row(error_legend_dict, img_width, 40)
+    error_legend = add_title(error_legend_bar, "Error Types")
 
-    # Row 5: Individual error types (combined legend for both FP and FN)
-    individual_error_legend_bar = create_legend_row(
-        OrderedDict(
-            [
-                ("False Positive", COLOR_FP.tolist()),
-                ("False Negative", COLOR_FN.tolist()),
-            ]
-        ),
-        single_img_width,
-        legend_bar_height,
-    )
-    individual_error_legend_actual_height = individual_error_legend_bar.shape[0]
-    individual_error_legend = np.full(
-        (img_height, single_img_width, 3), 255, dtype=np.uint8
-    )
-    individual_error_legend[:individual_error_legend_actual_height, :, :] = (
-        individual_error_legend_bar
-    )
+    # Ensure all legend components have the same height
+    r4_components_raw = [
+        conf_legend,
+        class_legend,
+        error_legend,
+        add_title(empty, "Empty"),
+    ]
 
-    # Build rows with titles and legends on the right
-    # Legend needs to match height of image+title, so add title to legends too
-    # Row 1: Context + RGB (will add spacer after to match width)
-    r1 = r1_temp
+    max_legend_height = max(comp.shape[0] for comp in r4_components_raw)
+    r4_components = []
+    for comp in r4_components_raw:
+        if comp.shape[0] != max_legend_height:
+            # Pad to match max height
+            padding = max_legend_height - comp.shape[0]
+            comp = np.pad(
+                comp,
+                ((0, padding), (0, 0), (0, 0)),
+                mode="constant",
+                constant_values=255,
+            )
+        r4_components.append(comp)
 
-    # Row 2: GT | Pred | Legend
-    r2 = concat_h(
-        add_title(gt_rgb, "Ground Truth"),
-        add_title(pr_rgb, "Prediction"),
-        add_title(class_legend, "Legend"),
-    )
-
-    # Add spacer to r1 to match r2 width
-    width_diff = r2.shape[1] - r1.shape[1]
-    if width_diff > 0:
-        blank_spacer = np.full((r1.shape[0], width_diff, 3), 255, dtype=np.uint8)
-        r1 = np.concatenate([r1, blank_spacer], axis=1)
-
-    # Row 3: GT Overlay | Pred Overlay | Legend
-    r3 = concat_h(
-        add_title(gt_overlay_rgb, "GT Overlay (semi-transparent)"),
-        add_title(pr_overlay_rgb, "Pred Overlay (semi-transparent)"),
-        add_title(class_legend, "Legend"),
-    )
-
-    # Row 4: Errors Overlay | Combined Errors | Legend (swapped order)
-    r4 = concat_h(
-        add_title(errors_overlay, "Errors Overlay on RGB"),
-        add_title(combined_errors, "Combined Errors (TP+FP+FN)"),
-        add_title(error_legend, "Legend"),
-    )
-
-    # Row 5: FP | FN | Legend
-    r5 = concat_h(
-        add_title(fp_rgb, "False Positive (predicted but not true)"),
-        add_title(fn_rgb, "False Negative (true but not predicted)"),
-        add_title(individual_error_legend, "Legend"),
-    )
+    # Build Row 4: Confidence Scale | Class Legend | Error Legend | Empty
+    r4 = concat_h(*r4_components)
 
     # Combine all rows
-    composite = concat_v(r1, r2, r3, r4, r5)
+    composite = concat_v(r1, r2, r3, r4)
 
     # Add header with metrics
     if metrics_text is not None:

@@ -20,7 +20,6 @@ from glacier_mapping.model.visualize import (
     label_to_color,
     load_full_tiff_rgb,
     make_context_image,
-    make_eight_panel,
     make_redesigned_panel,
     make_error_overlay,
     make_overlay,
@@ -104,14 +103,16 @@ class TestEvaluationCallback(Callback):
         if slice_meta_path.exists():
             try:
                 slice_meta = pd.read_csv(slice_meta_path)
+                # Filter to test split to get correct image mappings
+                test_meta = slice_meta[slice_meta["split"] == "test"]
                 self._image_index_to_filename = {}
-                for _, row in slice_meta.iterrows():
+                for _, row in test_meta.iterrows():
                     img_idx = int(row["Image"])
                     filename = str(row["Landsat ID"])
                     if img_idx not in self._image_index_to_filename:
                         self._image_index_to_filename[img_idx] = filename
                 log.info(
-                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings"
+                    f"Loaded {len(self._image_index_to_filename)} Landsat image mappings for test split"
                 )
             except Exception as e:
                 log.warning(f"Failed to load slice_meta.csv: {e}")
@@ -195,12 +196,14 @@ class TestEvaluationCallback(Callback):
 
         # Evaluate all test tiles (reuse cached predictions when available)
         for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Test evaluation")):
+            # Load data for visualization
+            x = np.load(x_path)
+
             # Use cached prediction if available, otherwise compute
-            if x_path in prediction_cache:
-                y_pred, invalid_mask = prediction_cache[x_path]
-            else:
-                x = np.load(x_path)
+            if x_path not in prediction_cache:
                 y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
+            else:
+                y_pred, invalid_mask = prediction_cache[x_path]
 
             y_true_raw = np.load(
                 x_path.with_name(x_path.name.replace("tiff", "mask"))
@@ -917,6 +920,11 @@ class TestEvaluationCallback(Callback):
                 cmap=cmap,
                 class_names=class_names,
                 metrics_text=metrics_text,
+                output_classes=output_classes,
+                gt_mask=y_gt_vis,
+                pred_mask=y_pred_viz,
+                x_data=x_full,
+                probs=probs,
             )
 
             # Extract slice number from filename (tiff_XX_slice_YY.npy)
