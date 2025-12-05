@@ -91,7 +91,7 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
     else:
         # Fallback for configs not following new structure
         print(f"Warning: Config path doesn't follow new structure: {config_path}")
-        print(f"Loading as standalone config without hierarchy")
+        print("Loading as standalone config without hierarchy")
         with open(config_path) as f:
             return yaml.safe_load(f)
 
@@ -305,14 +305,13 @@ def main():
             config
         )  # type: ignore[assignment]
         run_name = mlflow_utils.generate_run_name(base_run_name, args.server)  # type: ignore[assignment]
-        mlflow_params = mlflow_utils.extract_mlflow_params(config, server_config)  # type: ignore[assignment]
+        mlflow_utils.extract_mlflow_params(config, server_config)  # type: ignore[assignment]
         mlflow_tags = mlflow_utils.generate_run_tags(
             config, server_config, str(config_path)
         )  # type: ignore[assignment]
     else:
         experiment_name = None
         run_name = base_run_name
-        mlflow_params = {}
         mlflow_tags = {}
 
     print(f"Loaded config from: {config_path}")
@@ -324,7 +323,7 @@ def main():
     print(f"Base run name: {base_run_name}")
     print(f"Output directory: {output_dir} (source: {output_dir_source})")
     print(f"Data path: {loader_opts.get('processed_dir', 'NOT_SET')}")
-    print(f"\nChannel Selection:")
+    print("\nChannel Selection:")
     print(f"  Landsat: {landsat_channels}")
     print(f"  DEM: {dem_channels}")
     print(f"  Spectral Indices: {spectral_indices_channels}")
@@ -462,7 +461,7 @@ def main():
                     viz_n=val_viz_n,
                     log_every_n_epochs=training_opts.get("val_viz_every_n_epochs", 10),
                     selection=training_opts.get("val_viz_selection", "iou"),
-                    save_dir=f"{output_dir}/{run_name}/val_visualizations",
+                    save_dir=f"{output_dir}/{run_name}",
                     image_dir=server_config.get("image_dir"),
                 )
             )

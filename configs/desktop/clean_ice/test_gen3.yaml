@@ -1,0 +1,12 @@
+# Gen3 Clean Ice test run - Desktop (3 epochs)
+# Quick validation of CI pipeline before server experiments
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: ci_test_gen3
+  epochs: 3  # Test mode - quick validation
+  early_stopping: 3
+
+# Inherits all other settings from:
+# - train.yaml (global defaults)
+# - servers.yaml[desktop] (batch_size: 8, epochs: 150 overridden)
+# - tasks/clean_ice.yaml (output_classes: [1])

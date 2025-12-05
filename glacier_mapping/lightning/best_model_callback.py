@@ -118,7 +118,8 @@ class TestEvaluationCallback(Callback):
         for idx, x_path in enumerate(tqdm(test_tiles_all, desc="Test evaluation")):
             # Use cached prediction if available, otherwise compute
             if x_path not in prediction_cache:
-                y_pred, invalid_mask = pl_module.predict_slice(x_path, threshold)  # type: ignore[call-arg]
+                x = np.load(x_path)
+                y_pred, invalid_mask = pl_module.predict_slice(x, threshold)  # type: ignore[call-arg]
             else:
                 y_pred, invalid_mask = prediction_cache[x_path]
 

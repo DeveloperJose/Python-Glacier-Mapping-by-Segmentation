@@ -21,7 +21,7 @@ from glacier_mapping.utils.visualize import (
     build_cmap_from_mask_names,
 )
 
-from glacier_mapping.utils.logging import info, warning
+from glacier_mapping.utils.logging import warning
 from glacier_mapping.utils.prediction import (
     calculate_binary_metrics,
     get_probabilities,
@@ -80,9 +80,9 @@ def load_dataset_metadata(
                 if img_idx not in image_index_to_filename:
                     image_index_to_filename[img_idx] = filename
 
-            info(
-                f"Loaded {len(image_index_to_filename)} Landsat image mappings for {split_type} split"
-            )
+            # info(
+            #     f"Loaded {len(image_index_to_filename)} Landsat image mappings for {split_type} split"
+            # )
         except Exception as e:
             warning(f"Failed to load slice_meta.csv: {e}")
             image_index_to_filename = {}
@@ -101,7 +101,7 @@ def load_dataset_metadata(
                 config = stats.get("config", {})
                 window_size = tuple(config.get("window_size", [512, 512]))
                 overlap = config.get("overlap", 64)
-            info(f"Loaded dataset config: window_size={window_size}, overlap={overlap}")
+            # info(f"Loaded dataset config: window_size={window_size}, overlap={overlap}")
         except Exception as e:
             warning(f"Failed to load dataset_statistics.json: {e}")
 
@@ -407,11 +407,9 @@ def select_slices_by_iou_thirds(
     metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
     threshold = metrics_opts.get("threshold", [0.5, 0.5])
 
-    info(f"Computing IoU for {len(slice_paths)} validation slices...")
-
-    from tqdm import tqdm
-
-    for idx, x_path in enumerate(tqdm(slice_paths, desc="Val IoU computation")):
+    # info(f"Computing IoU for {len(slice_paths)} validation slices...")
+    # for idx, x_path in enumerate(tqdm(slice_paths, desc="Val IoU computation")):
+    for idx, x_path in enumerate(slice_paths):
         x = np.load(x_path)
         y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
 
@@ -471,16 +469,16 @@ def select_slices_by_iou_thirds(
 
     selected = top_slices + middle_slices + bottom_slices
 
-    info(f"Selected {len(selected)} validation slices by IoU:")
-    info(
-        f"  Top {top_k}:    {[f'{slice_ious[i][1]:.3f}' for i in range(min(top_k, len(slice_ious)))]}"
-    )
-    info(
-        f"  Middle {middle_k}: {[f'{slice_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(slice_ious) - middle_start))]}"
-    )
-    info(
-        f"  Bottom {bottom_k}: {[f'{slice_ious[len(slice_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(slice_ious)))]}"
-    )
+    # info(f"Selected {len(selected)} validation slices by IoU:")
+    # info(
+    #     f"  Top {top_k}:    {[f'{slice_ious[i][1]:.3f}' for i in range(min(top_k, len(slice_ious)))]}"
+    # )
+    # info(
+    #     f"  Middle {middle_k}: {[f'{slice_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(slice_ious) - middle_start))]}"
+    # )
+    # info(
+    #     f"  Bottom {bottom_k}: {[f'{slice_ious[len(slice_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(slice_ious)))]}"
+    # )
 
     return selected
 
@@ -500,8 +498,8 @@ def select_informative_test_tiles(
     """
     # Use lightweight selection for small num_samples to avoid GPU OOM
     if num_samples > 0 and num_samples < 12:
-        info(f"Using class-pixel selection for {num_samples} tiles (lightweight mode)")
-        info("⚠️  Skipping rank computation in lightweight mode")
+        # info(f"Using class-pixel selection for {num_samples} tiles (lightweight mode)")
+        # info("⚠️  Skipping rank computation in lightweight mode")
         selected = _select_by_class_pixels(tile_paths, pl_module, num_samples)
         return selected, {}, {}
 
@@ -512,11 +510,11 @@ def select_informative_test_tiles(
     metrics_opts = getattr(pl_module, "metrics_opts", {"threshold": [0.5, 0.5]})
     threshold = metrics_opts.get("threshold", [0.5, 0.5])
 
-    info(f"Computing IoU for {len(tile_paths)} tiles (predictions cached for reuse)...")
+    # info(f"Computing IoU for {len(tile_paths)} tiles (predictions cached for reuse)...")
 
-    from tqdm import tqdm
-
-    for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation + caching")):
+    # from tqdm import tqdm
+    # for idx, x_path in enumerate(tqdm(tile_paths, desc="IoU computation + caching")):
+    for idx, x_path in enumerate(tile_paths):
         x = np.load(x_path)
         y_pred, invalid_mask = pl_module.predict_slice(x, threshold)
 
@@ -588,16 +586,16 @@ def select_informative_test_tiles(
         rank_map[path] = rank
 
     # Log IoU distribution
-    info(f"Selected {len(selected)} tiles by IoU:")
-    info(
-        f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}"
-    )
-    info(
-        f"  Middle {middle_k}: {[f'{tile_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(tile_ious) - middle_start))]}"
-    )
-    info(
-        f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}"
-    )
+    # info(f"Selected {len(selected)} tiles by IoU:")
+    # info(
+    #     f"  Top {top_k}:    {[f'{tile_ious[i][1]:.3f}' for i in range(min(top_k, len(tile_ious)))]}"
+    # )
+    # info(
+    #     f"  Middle {middle_k}: {[f'{tile_ious[middle_start + i][1]:.3f}' for i in range(min(middle_k, len(tile_ious) - middle_start))]}"
+    # )
+    # info(
+    #     f"  Bottom {bottom_k}: {[f'{tile_ious[len(tile_ious) - bottom_k + i][1]:.3f}' for i in range(min(bottom_k, len(tile_ious)))]}"
+    # )
 
     return selected, rank_map, prediction_cache
 
