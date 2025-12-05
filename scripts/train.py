@@ -460,7 +460,7 @@ def main():
 
         # Validation visualization callback (only if output enabled and viz_n >= 1)
         val_viz_n = training_opts.get("val_viz_n", 4)
-        viz_scale_factor = training_opts.get("viz_scale_factor", 0.5)
+        viz_scale_factor = training_opts.get("viz_scale_factor", 1)
         if val_viz_n >= 1:
             callbacks.append(
                 ValidationVisualizationCallback(

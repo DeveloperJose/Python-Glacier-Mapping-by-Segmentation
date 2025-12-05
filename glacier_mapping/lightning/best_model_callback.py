@@ -24,7 +24,7 @@ class TestEvaluationCallback(Callback):
     """
 
     def __init__(
-        self, viz_n: int = 4, image_dir: str | None = None, scale_factor: float = 0.5
+        self, viz_n: int = 4, image_dir: str | None = None, scale_factor: float = 1
     ):
         """
         Initialize test evaluation callback.

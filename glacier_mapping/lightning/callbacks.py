@@ -30,7 +30,7 @@ class ValidationVisualizationCallback(Callback):
         selection: str = "iou",
         save_dir: Optional[str] = None,
         image_dir: Optional[str] = None,
-        scale_factor: float = 0.5,
+        scale_factor: float = 1,
     ):
         """
         Initialize validation visualization callback.

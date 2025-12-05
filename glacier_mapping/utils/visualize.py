@@ -30,7 +30,7 @@ DEFAULT_CLASS_COLORMAP = {
 # -----------------------------
 
 
-def scale_image(img, scale_factor=0.5):
+def scale_image(img, scale_factor=1):
     """Scale image by factor using cv2.resize.
 
     Args:
@@ -53,7 +53,7 @@ def scale_image(img, scale_factor=0.5):
         raise ValueError(f"Unsupported image shape: {img.shape}")
 
 
-def make_rgb_preview(x, scale_factor=0.5):
+def make_rgb_preview(x, scale_factor=1):
     """Convert multispectral tile into normalized RGB preview."""
     import glacier_mapping.utils.logging as log
 
@@ -173,7 +173,7 @@ def _viridis_from_scalar(scalar_01):
     return (rgba[..., :3] * 255).astype(np.uint8)
 
 
-def make_confidence_map(prob, invalid_mask=None, scale_factor=0.5):
+def make_confidence_map(prob, invalid_mask=None, scale_factor=1):
     rgb = _viridis_from_scalar(prob)
     if invalid_mask is not None:
         rgb[invalid_mask] = 0
@@ -236,7 +236,7 @@ def make_confidence_colorbar(width, height=40, font_scale=0.4):
     return colorbar
 
 
-def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None, scale_factor=0.5):
+def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None, scale_factor=1):
     H, W = labels.shape
     overlay = np.zeros((H, W, 3), dtype=np.uint8)
     for cls, col in cmap.items():
@@ -292,7 +292,7 @@ def make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=None):
 
 
 def make_errors_overlay(
-    tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=None, scale_factor=0.5
+    tiff_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=None, scale_factor=1
 ):
     H, W = tiff_rgb.shape[:2]
     overlay = np.zeros((H, W, 3), dtype=np.uint8)
@@ -356,7 +356,7 @@ def make_tp_fp_fn_masks(tp_mask, fp_mask, fn_mask):
     return tp_rgb, fp_rgb, fn_rgb
 
 
-def create_legend_row(labels_dict, width, height=40, scale_factor=0.5):
+def create_legend_row(labels_dict, width, height=40, scale_factor=1):
     """
     Create a vertical legend with color boxes and labels stacked.
 
@@ -829,7 +829,7 @@ def make_redesigned_panel(
     metrics_text=None,
     conf_rgb=None,
     mask=None,
-    scale_factor=0.5,
+    scale_factor=1,
 ):
     """
     Creates a redesigned, optimized visualization panel for model predictions.

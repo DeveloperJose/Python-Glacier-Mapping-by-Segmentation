@@ -16,9 +16,7 @@ training_opts:
   # Test evaluation (on best model only)
   run_test_eval: true # Run test set evaluation on best model
   test_eval_n: 4 # Number per third for visualization. n=4 → 12 total (4+4+4). 0=metrics only
-
-# Visualization scaling
-viz_scale_factor: 1 # Scale factor for visualization panels (0.5=256x256, 1.0=full resolution)
+  viz_scale_factor: 1 # Scale factor for visualization panels (0.5=256x256, 1.0=full resolution)
 
 loader_opts:
   batch_size: 16 # Default batch size (can be overridden by server config or experiment)
