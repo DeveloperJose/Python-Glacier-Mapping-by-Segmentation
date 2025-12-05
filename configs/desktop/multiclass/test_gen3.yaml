@@ -4,16 +4,18 @@
 training_opts:
   dataset_name: bibek_w512_o64_f1_v2
   run_name: multi_test_gen3
-  epochs: 3  # Test mode - quick validation
+  epochs: 3 # Test mode - quick validation
   early_stopping: 3
+  val_viz_every_n_epochs: 1
 
 loader_opts:
-  output_classes: [0, 1, 2]  # All three classes: BG, CleanIce, Debris
+  output_classes: [0, 1, 2] # All three classes: BG, CleanIce, Debris
 
 loss_opts:
-  foreground_classes: [1, 2]  # Critical fix: include both glacier classes for loss
+  foreground_classes: [1, 2] # Critical fix: include both glacier classes for loss
 
 # Inherits all other settings from:
 # - train.yaml (global defaults)
 # - servers.yaml[desktop] (batch_size: 8, epochs: 150 overridden)
 # - tasks/multiclass.yaml (output_classes: [0, 1, 2])
+

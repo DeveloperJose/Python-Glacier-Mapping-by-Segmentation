@@ -677,7 +677,7 @@ def log_visualizations_to_all_loggers(
                         logger.experiment.log_artifact(
                             logger.run_id,
                             str(tile_dir),
-                            artifact_path=f"{viz_type}/{tile_dir.name}",
+                            artifact_path=f"{viz_type}",
                         )
 
             # TensorBoard logging

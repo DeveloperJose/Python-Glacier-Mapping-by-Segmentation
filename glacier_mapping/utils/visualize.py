@@ -228,47 +228,9 @@ def make_overlay(tiff_rgb, labels, cmap, alpha=0.5, mask=None, scale_factor=0.5)
     return scale_image(result, scale_factor)
 
 
-def pad_border(img, pad=4):
-    return cv2.copyMakeBorder(
-        img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[255, 255, 255]
-    )
-
-
-def concat_h(*imgs):
-    # First pad borders
-    imgs = [pad_border(i) for i in imgs]
-
-    # Then match heights by padding with white pixels
-    maxh = max(im.shape[0] for im in imgs)
-    imgs = [
-        np.pad(im, ((0, maxh - im.shape[0]), (0, 0), (0, 0)), constant_values=255)
-        if im.shape[0] != maxh
-        else im
-        for im in imgs
-    ]
-
-    # Match widths by padding with white pixels
-    maxw = max(im.shape[1] for im in imgs)
-    imgs = [
-        np.pad(im, ((0, 0), (0, maxw - im.shape[1]), (0, 0)), constant_values=255)
-        if im.shape[1] != maxw
-        else im
-        for im in imgs
-    ]
-
-    return np.concatenate(imgs, axis=1)
-
-
-def concat_v(*imgs):
-    # Match widths by padding with white pixels
-    maxw = max(im.shape[1] for im in imgs)
-    imgs = [
-        np.pad(im, ((0, 0), (0, maxw - im.shape[1]), (0, 0)), constant_values=255)
-        if im.shape[1] != maxw
-        else im
-        for im in imgs
-    ]
-    return np.concatenate(imgs, axis=0)
+def pad_border(img, pad=4, value=(255, 255, 255)):
+    """Add a border to an image with a specified color."""
+    return cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=value)
 
 
 def title_bar(text, width, height=32, font_scale=0.6):
@@ -281,7 +243,7 @@ def title_bar(text, width, height=32, font_scale=0.6):
 
 def add_title(img, text, font_scale=0.6):
     bar = title_bar(text, img.shape[1], height=32, font_scale=font_scale)
-    return concat_v(bar, img)
+    return _stack_images([bar, img], axis=0)
 
 
 def make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=None):
@@ -579,6 +541,73 @@ def make_error_overlay(shape, error_message):
 # ============================================================
 
 
+def _create_component(img, title, font_scale=0.6, border_value=(255, 255, 255)):
+    """Create a titled image component with a border."""
+    if img.dtype != np.uint8:
+        img = img.astype(np.uint8)
+
+    component = add_title(img, title, font_scale=font_scale)
+    return pad_border(component, value=border_value)
+
+
+def _resize_to_match_height(components):
+    """Resize a list of images to the maximum height."""
+    max_h = max(c.shape[0] for c in components)
+    resized_components = []
+    for c in components:
+        h, w = c.shape[:2]
+        if h != max_h:
+            new_w = int(w * (max_h / h))
+            resized = cv2.resize(c, (new_w, max_h), interpolation=cv2.INTER_AREA)
+            resized_components.append(resized)
+        else:
+            resized_components.append(c)
+    return resized_components
+
+
+def _stack_images(components, axis, spacing=4, bg_color=(255, 255, 255)):
+    """Stack images with spacing and a background color."""
+    if axis == 0:  # Vertical stacking
+        max_w = max(c.shape[1] for c in components)
+        padded_components = []
+        for c in components:
+            h, w = c.shape[:2]
+            if w != max_w:
+                pad_w = max_w - w
+                c = cv2.copyMakeBorder(
+                    c, 0, 0, 0, pad_w, cv2.BORDER_CONSTANT, value=bg_color
+                )
+            padded_components.append(c)
+
+        spaced_components = []
+        for i, c in enumerate(padded_components):
+            spaced_components.append(c)
+            if i < len(padded_components) - 1:
+                spacer = np.full((spacing, c.shape[1], 3), bg_color, dtype=np.uint8)
+                spaced_components.append(spacer)
+        return np.vstack(spaced_components)
+
+    else:  # Horizontal stacking
+        max_h = max(c.shape[0] for c in components)
+        padded_components = []
+        for c in components:
+            h, w = c.shape[:2]
+            if h != max_h:
+                pad_h = max_h - h
+                c = cv2.copyMakeBorder(
+                    c, 0, pad_h, 0, 0, cv2.BORDER_CONSTANT, value=bg_color
+                )
+            padded_components.append(c)
+
+        spaced_components = []
+        for i, c in enumerate(padded_components):
+            spaced_components.append(c)
+            if i < len(padded_components) - 1:
+                spacer = np.full((c.shape[0], spacing, 3), bg_color, dtype=np.uint8)
+                spaced_components.append(spacer)
+        return np.hstack(spaced_components)
+
+
 def make_redesigned_panel(
     context_rgb,
     x_rgb,
@@ -592,141 +621,59 @@ def make_redesigned_panel(
     scale_factor=0.5,
 ):
     """
-    Clean + correct version:
-    - mask applied BEFORE error computation
-    - GT/Pred recalc from masked labels
-    - TP/FP/FN computed correctly
+    Creates a redesigned, optimized visualization panel for model predictions.
+
+    This function follows a staged pipeline:
+    1.  **Single-Pass Scaling**: All inputs are scaled exactly once.
+    2.  **Masking & Error Computation**: Mask is applied, and errors (TP/FP/FN) are computed.
+    3.  **Component Generation**: All visual assets (overlays, error masks, etc.) are created.
+    4.  **Layout Assembly**: Components are arranged into rows with consistent sizing and spacing.
+    5.  **Final Composite**: Rows are stacked, and a header is added.
     """
-
-    # -------------------------------
-    # 1. Scale ALL images first (fixes broadcasting issues)
-    # -------------------------------
-    context_rgb = scale_image(context_rgb, scale_factor)
-    x_rgb = scale_image(x_rgb, scale_factor)
-
-    # -------------------------------
-    # 2. Scale labels and masks
-    # -------------------------------
-    gt = scale_image(gt_labels, scale_factor)
-    pr = scale_image(pr_labels, scale_factor)
-    if mask is not None:
-        mask = scale_image(mask.astype(np.uint8), scale_factor) > 0
-
-    # -------------------------------
-    # 3. Apply mask to scaled labels (Option A fix)
-    # -------------------------------
-    if mask is not None:
-        gt[~mask] = 255
-        pr[~mask] = 255
-
-    # -------------------------------
-    # 4. Compute TP / FP / FN on scaled labels
-    # -------------------------------
-    tp_mask = (gt == 1) & (pr == 1)
-    fp_mask = (gt != 1) & (pr == 1) & (gt != 255)
-    fn_mask = (gt == 1) & (pr != 1) & (gt != 255)
-
-    # -------------------------------
-    # 5. GT/Pred RGB visualizations
-    # -------------------------------
-    gt_rgb = label_to_color(gt, cmap, mask=mask)
-    pr_rgb = label_to_color(pr, cmap, mask=mask)
-
-    # -------------------------------
-    # 6. Scale RGB visualizations
-    # -------------------------------
-    gt_rgb = scale_image(gt_rgb, scale_factor)
-    pr_rgb = scale_image(pr_rgb, scale_factor)
-
-    # -------------------------------
-    # 7. Error visualizations (before scaling)
-    # -------------------------------
-    combined_errors = make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=mask)
-    fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask, mask=mask)
-
-    # -------------------------------
-    # 8. Scale error visualizations
-    # -------------------------------
-    combined_errors = scale_image(combined_errors, scale_factor)
-    fp_rgb = scale_image(fp_rgb, scale_factor)
-    fn_rgb = scale_image(fn_rgb, scale_factor)
-
-    # -------------------------------
-    # 9. Dimension validation before overlay operations
-    # -------------------------------
-    def validate_shapes(arrays, operation_name):
-        """Validate that all arrays have compatible shapes for the operation."""
-        if not arrays:
-            return
-
-        base_shape = arrays[0].shape[:2]  # Compare H, W dimensions
-        for i, arr in enumerate(arrays[1:], 1):
-            if arr.shape[:2] != base_shape:
-                raise ValueError(
-                    f"Shape mismatch in {operation_name}: "
-                    f"array 0 has shape {arrays[0].shape}, "
-                    f"array {i} has shape {arr.shape}. "
-                    f"All arrays must have same H, W dimensions."
-                )
-
-    # Validate key array combinations before overlay operations
-    validate_shapes([x_rgb, gt, pr], "overlay preparation")
-    validate_shapes([x_rgb, tp_mask, fp_mask, fn_mask], "error overlay preparation")
-    if mask is not None:
-        validate_shapes([x_rgb, mask], "mask operations")
-
-    # -------------------------------
-    # 10. Overlay images (all inputs now consistently scaled)
-    # -------------------------------
-    gt_overlay_rgb = make_overlay(
-        x_rgb, gt, cmap, alpha=0.5, mask=mask, scale_factor=1.0
-    )
-    pr_overlay_rgb = make_overlay(
-        x_rgb, pr, cmap, alpha=0.5, mask=mask, scale_factor=1.0
-    )
-
-    # Create errors overlay with consistently scaled inputs
-    errors_overlay = make_errors_overlay(
-        x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=mask, scale_factor=1.0
-    )
-
-    # -------------------------------
-    # 11. Mask context_rgb and x_rgb (after scaling)
-    # -------------------------------
-    if mask is not None:
-        # Ensure mask dimensions match each image before applying
-        if mask.shape[:2] != x_rgb.shape[:2]:
-            raise ValueError(
-                f"Mask shape {mask.shape[:2]} doesn't match x_rgb shape {x_rgb.shape[:2]}"
-            )
-        if mask.shape[:2] != context_rgb.shape[:2]:
-            # Context image might be different size, scale mask to match
-            from skimage.transform import resize
-
-            mask_resized = resize(
-                mask.astype(np.float32),
-                context_rgb.shape[:2],
-                order=0,
-                preserve_range=True,
-            ).astype(bool)
-            context_masked = context_rgb.copy()
-            context_masked[~mask_resized] = COLOR_IGNORE
-        else:
-            context_masked = context_rgb.copy()
-            context_masked[~mask] = COLOR_IGNORE
-
-        x_masked = x_rgb.copy()
-        x_masked[~mask] = COLOR_IGNORE
-    else:
-        context_masked = context_rgb
-        x_masked = x_rgb
+    # --------------------------------------------------------------------------
+    # Stage 1: Single-Pass Scaling
+    # --------------------------------------------------------------------------
+    if scale_factor != 1.0:
+        context_rgb = scale_image(context_rgb, scale_factor)
+        x_rgb = scale_image(x_rgb, scale_factor)
+        gt_labels = scale_image(gt_labels, scale_factor)
+        pr_labels = scale_image(pr_labels, scale_factor)
+        if conf_rgb is not None:
+            conf_rgb = scale_image(conf_rgb, scale_factor)
+        if mask is not None:
+            mask = scale_image(mask.astype(np.uint8), scale_factor) > 0
 
     H, W = x_rgb.shape[:2]
-    empty = np.full((H, W, 3), 255, dtype=np.uint8)
 
-    # -------------------------------
-    # 7. Legends
-    # -------------------------------
+    # --------------------------------------------------------------------------
+    # Stage 2: Mask Application and Error Computation
+    # --------------------------------------------------------------------------
+    if mask is not None:
+        gt_labels[~mask] = 255
+        pr_labels[~mask] = 255
+
+    tp_mask = (gt_labels == 1) & (pr_labels == 1)
+    fp_mask = (gt_labels != 1) & (pr_labels == 1) & (gt_labels != 255)
+    fn_mask = (gt_labels == 1) & (pr_labels != 1)
+
+    # --------------------------------------------------------------------------
+    # Stage 3: Generate Visual Components
+    # --------------------------------------------------------------------------
+    gt_rgb = label_to_color(gt_labels, cmap)
+    pr_rgb = label_to_color(pr_labels, cmap)
+
+    gt_overlay = make_overlay(x_rgb, gt_labels, cmap, scale_factor=1.0)
+    pr_overlay = make_overlay(x_rgb, pr_labels, cmap, scale_factor=1.0)
+
+    errors_overlay = make_errors_overlay(
+        x_rgb, tp_mask, fp_mask, fn_mask, scale_factor=1.0
+    )
+    combined_errors = make_combined_error_mask(tp_mask, fp_mask, fn_mask)
+    fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask)
+
+    # --------------------------------------------------------------------------
+    # Stage 4: Create Legends
+    # --------------------------------------------------------------------------
     from collections import OrderedDict
 
     class_legend_dict = OrderedDict(
@@ -737,7 +684,7 @@ def make_redesigned_panel(
             ("Mask", COLOR_IGNORE.tolist()),
         ]
     )
-    class_legend = add_title(create_legend_row(class_legend_dict, W), "Class Colors")
+    class_legend = create_legend_row(class_legend_dict, width=W)
 
     error_legend_dict = OrderedDict(
         [
@@ -746,124 +693,53 @@ def make_redesigned_panel(
             ("False Negative", COLOR_FN.tolist()),
         ]
     )
-    error_legend = add_title(create_legend_row(error_legend_dict, W), "Error Types")
+    error_legend = create_legend_row(error_legend_dict, width=W)
 
-    # -------------------------------
-    # 9. Scale confidence map if provided
-    # -------------------------------
-    if conf_rgb is not None:
-        conf_rgb = scale_image(conf_rgb, scale_factor)
-
-    # -------------------------------
-    # 10. Row 1: [Satellite] [Tested] [Confidence] [Class Legend]
-    # -------------------------------
-    r1_components = [
-        add_title(context_masked, "Satellite Image (RGB)"),
-        add_title(x_masked, "Tested Image Slice"),
+    # --------------------------------------------------------------------------
+    # Stage 5: Assemble Panel Rows
+    # --------------------------------------------------------------------------
+    # Row 1: Context, Slice, Confidence, and Class Legend
+    row1_components = [
+        _create_component(context_rgb, "Satellite Image (RGB)"),
+        _create_component(x_rgb, "Tested Image Slice"),
     ]
     if conf_rgb is not None:
-        cbar = make_confidence_colorbar(W, height=40, font_scale=0.5)
-        conf_block = concat_v(conf_rgb, cbar)
-        r1_components.append(add_title(conf_block, "Confidence"))
+        cbar = make_confidence_colorbar(conf_rgb.shape[1], height=40, font_scale=0.5)
+        conf_block = np.vstack([conf_rgb, cbar])
+        row1_components.append(_create_component(conf_block, "Confidence"))
     else:
-        r1_components.append(add_title(empty, "No Confidence Data"))
+        empty = np.full((H, W, 3), 255, dtype=np.uint8)
+        row1_components.append(_create_component(empty, "No Confidence Data"))
 
-    # Add class legend to Row 1 (already has width W)
-    r1_components.append(class_legend)
+    row1_components.append(_create_component(class_legend, "Class Colors"))
+    row1 = _stack_images(_resize_to_match_height(row1_components), axis=1)
 
-    # Pad row 1 components
-    maxh = max(im.shape[0] for im in r1_components)
-    r1 = concat_h(
-        *(
-            np.pad(im, ((0, maxh - im.shape[0]), (0, 0), (0, 0)), constant_values=255)
-            if im.shape[0] != maxh
-            else im
-            for im in r1_components
-        )
-    )
-    if x_masked.shape[1] != W:
-        x_masked = np.pad(
-            x_masked, ((0, 0), (0, W - x_masked.shape[1]), (0, 0)), constant_values=255
-        )
-
-    r1_components = [
-        add_title(context_masked, "Satellite Image (RGB)"),
-        add_title(x_masked, "Tested Image Slice"),
+    # Row 2: Overlays and Masks
+    row2_components = [
+        _create_component(gt_overlay, "Ground Truth Overlay"),
+        _create_component(pr_overlay, "Prediction Overlay"),
+        _create_component(gt_rgb, "Ground Truth"),
+        _create_component(pr_rgb, "Prediction"),
     ]
-    if conf_rgb is not None:
-        cbar = make_confidence_colorbar(W, height=40, font_scale=0.5)
-        conf_block = concat_v(conf_rgb, cbar)
-        # Ensure conf_block has width W
-        if conf_block.shape[1] != W:
-            conf_block = np.pad(
-                conf_block,
-                ((0, 0), (0, W - conf_block.shape[1]), (0, 0)),
-                constant_values=255,
-            )
-        r1_components.append(add_title(conf_block, "Confidence"))
-    else:
-        # Ensure empty has width W
-        if empty.shape[1] != W:
-            empty = np.full((H, W, 3), 255, dtype=np.uint8)
-        r1_components.append(add_title(empty, "No Confidence Data"))
+    row2 = _stack_images(_resize_to_match_height(row2_components), axis=1)
 
-    # Add class legend to Row 1 (already has width W)
-    r1_components.append(class_legend)
+    # Row 3: Error Visualizations
+    row3_components = [
+        _create_component(errors_overlay, "Errors Overlay"),
+        _create_component(combined_errors, "Errors (TP+FP+FN)"),
+        _create_component(fp_rgb, "False Positives"),
+        _create_component(fn_rgb, "False Negatives"),
+        _create_component(error_legend, "Error Types"),
+    ]
+    row3 = _stack_images(_resize_to_match_height(row3_components), axis=1)
 
-    # Pad row 1 components
-    maxh = max(im.shape[0] for im in r1_components)
-    r1 = concat_h(
-        *(
-            np.pad(im, ((0, maxh - im.shape[0]), (0, 0), (0, 0)), constant_values=255)
-            if im.shape[0] != maxh
-            else im
-            for im in r1_components
-        )
-    )
+    # --------------------------------------------------------------------------
+    # Stage 6: Final Assembly
+    # --------------------------------------------------------------------------
+    composite = _stack_images([row1, row2, row3], axis=0)
 
-    # -------------------------------
-    # 11. Row 2: [GT Overlay] [Prediction Overlay] [Ground Truth] [Prediction]
-    # -------------------------------
-    r2 = concat_h(
-        add_title(gt_overlay_rgb, "Ground Truth Overlay"),
-        add_title(pr_overlay_rgb, "Prediction Overlay"),
-        add_title(gt_rgb, "Ground Truth"),
-        add_title(pr_rgb, "Prediction"),
-    )
-
-    r2 = concat_h(
-        add_title(gt_overlay_rgb, "Ground Truth Overlay"),
-        add_title(pr_overlay_rgb, "Prediction Overlay"),
-        add_title(gt_rgb, "Ground Truth"),
-        add_title(pr_rgb, "Prediction"),
-    )
-
-    # -------------------------------
-    # 12. Row 3: [Errors Overlay] [Errors] [False Positives] [False Negatives] [Error Legend]
-    # -------------------------------
-    target_class_name = (
-        "Clean Ice" if (class_names and "Clean" in class_names[1]) else "Debris"
-    )
-
-    r3 = concat_h(
-        add_title(errors_overlay, "Errors Overlay (TP+FP+FN)"),
-        add_title(combined_errors, "Errors (TP+FP+FN)"),
-        add_title(
-            fp_rgb, f"False Positives (predicted {target_class_name} but incorrect)"
-        ),
-        add_title(
-            fn_rgb, f"False Negatives (was {target_class_name} but not predicted)"
-        ),
-        error_legend,  # Already has width W
-    )
-
-    # -------------------------------
-    # 13. Composite
-    # -------------------------------
-    composite = concat_v(r1, r2, r3)
-
-    if metrics_text is not None:
+    if metrics_text:
         header = title_bar(metrics_text, composite.shape[1], height=40, font_scale=0.6)
-        composite = concat_v(header, composite)
+        composite = np.vstack([header, composite])
 
     return composite
