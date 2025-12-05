@@ -247,10 +247,27 @@ def concat_h(*imgs):
         for im in imgs
     ]
 
+    # Match widths by padding with white pixels
+    maxw = max(im.shape[1] for im in imgs)
+    imgs = [
+        np.pad(im, ((0, 0), (0, maxw - im.shape[1]), (0, 0)), constant_values=255)
+        if im.shape[1] != maxw
+        else im
+        for im in imgs
+    ]
+
     return np.concatenate(imgs, axis=1)
 
 
 def concat_v(*imgs):
+    # Match widths by padding with white pixels
+    maxw = max(im.shape[1] for im in imgs)
+    imgs = [
+        np.pad(im, ((0, 0), (0, maxw - im.shape[1]), (0, 0)), constant_values=255)
+        if im.shape[1] != maxw
+        else im
+        for im in imgs
+    ]
     return np.concatenate(imgs, axis=0)
 
 
@@ -582,7 +599,13 @@ def make_redesigned_panel(
     """
 
     # -------------------------------
-    # 1. Scale labels and mask first
+    # 1. Scale ALL images first (fixes broadcasting issues)
+    # -------------------------------
+    context_rgb = scale_image(context_rgb, scale_factor)
+    x_rgb = scale_image(x_rgb, scale_factor)
+
+    # -------------------------------
+    # 2. Scale labels and masks
     # -------------------------------
     gt = scale_image(gt_labels, scale_factor)
     pr = scale_image(pr_labels, scale_factor)
@@ -590,27 +613,70 @@ def make_redesigned_panel(
         mask = scale_image(mask.astype(np.uint8), scale_factor) > 0
 
     # -------------------------------
-    # 2. Apply mask to scaled labels (Option A fix)
+    # 3. Apply mask to scaled labels (Option A fix)
     # -------------------------------
     if mask is not None:
         gt[~mask] = 255
         pr[~mask] = 255
 
     # -------------------------------
-    # 3. Compute TP / FP / FN on scaled labels
+    # 4. Compute TP / FP / FN on scaled labels
     # -------------------------------
     tp_mask = (gt == 1) & (pr == 1)
     fp_mask = (gt != 1) & (pr == 1) & (gt != 255)
     fn_mask = (gt == 1) & (pr != 1) & (gt != 255)
 
     # -------------------------------
-    # 3. GT/Pred RGB visualizations
+    # 5. GT/Pred RGB visualizations
     # -------------------------------
     gt_rgb = label_to_color(gt, cmap, mask=mask)
     pr_rgb = label_to_color(pr, cmap, mask=mask)
 
     # -------------------------------
-    # 4. Overlay images
+    # 6. Scale RGB visualizations
+    # -------------------------------
+    gt_rgb = scale_image(gt_rgb, scale_factor)
+    pr_rgb = scale_image(pr_rgb, scale_factor)
+
+    # -------------------------------
+    # 7. Error visualizations (before scaling)
+    # -------------------------------
+    combined_errors = make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=mask)
+    fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask, mask=mask)
+
+    # -------------------------------
+    # 8. Scale error visualizations
+    # -------------------------------
+    combined_errors = scale_image(combined_errors, scale_factor)
+    fp_rgb = scale_image(fp_rgb, scale_factor)
+    fn_rgb = scale_image(fn_rgb, scale_factor)
+
+    # -------------------------------
+    # 9. Dimension validation before overlay operations
+    # -------------------------------
+    def validate_shapes(arrays, operation_name):
+        """Validate that all arrays have compatible shapes for the operation."""
+        if not arrays:
+            return
+
+        base_shape = arrays[0].shape[:2]  # Compare H, W dimensions
+        for i, arr in enumerate(arrays[1:], 1):
+            if arr.shape[:2] != base_shape:
+                raise ValueError(
+                    f"Shape mismatch in {operation_name}: "
+                    f"array 0 has shape {arrays[0].shape}, "
+                    f"array {i} has shape {arr.shape}. "
+                    f"All arrays must have same H, W dimensions."
+                )
+
+    # Validate key array combinations before overlay operations
+    validate_shapes([x_rgb, gt, pr], "overlay preparation")
+    validate_shapes([x_rgb, tp_mask, fp_mask, fn_mask], "error overlay preparation")
+    if mask is not None:
+        validate_shapes([x_rgb, mask], "mask operations")
+
+    # -------------------------------
+    # 10. Overlay images (all inputs now consistently scaled)
     # -------------------------------
     gt_overlay_rgb = make_overlay(
         x_rgb, gt, cmap, alpha=0.5, mask=mask, scale_factor=1.0
@@ -619,39 +685,38 @@ def make_redesigned_panel(
         x_rgb, pr, cmap, alpha=0.5, mask=mask, scale_factor=1.0
     )
 
-    # -------------------------------
-    # 5. Error visualizations
-    # -------------------------------
-    combined_errors = make_combined_error_mask(tp_mask, fp_mask, fn_mask, mask=mask)
+    # Create errors overlay with consistently scaled inputs
     errors_overlay = make_errors_overlay(
         x_rgb, tp_mask, fp_mask, fn_mask, alpha=0.5, mask=mask, scale_factor=1.0
     )
-    fp_rgb, fn_rgb = make_fp_fn_individual_masks(fp_mask, fn_mask, mask=mask)
 
     # -------------------------------
-    # 6. Scale all panels at the end
-    # -------------------------------
-    context_rgb = scale_image(context_rgb, scale_factor)
-    x_rgb = scale_image(x_rgb, scale_factor)
-    gt_rgb = scale_image(gt_rgb, scale_factor)
-    pr_rgb = scale_image(pr_rgb, scale_factor)
-    gt_overlay_rgb = scale_image(gt_overlay_rgb, scale_factor)
-    pr_overlay_rgb = scale_image(pr_overlay_rgb, scale_factor)
-    combined_errors = scale_image(combined_errors, scale_factor)
-    errors_overlay = scale_image(errors_overlay, scale_factor)
-    fp_rgb = scale_image(fp_rgb, scale_factor)
-    fn_rgb = scale_image(fn_rgb, scale_factor)
-
-    # -------------------------------
-    # 8. Mask context_rgb and x_rgb (after scaling)
+    # 11. Mask context_rgb and x_rgb (after scaling)
     # -------------------------------
     if mask is not None:
-        # Scale mask to match panel dimensions
-        mask_scaled = scale_image(mask.astype(np.uint8), scale_factor) > 0
-        context_masked = context_rgb.copy()
+        # Ensure mask dimensions match each image before applying
+        if mask.shape[:2] != x_rgb.shape[:2]:
+            raise ValueError(
+                f"Mask shape {mask.shape[:2]} doesn't match x_rgb shape {x_rgb.shape[:2]}"
+            )
+        if mask.shape[:2] != context_rgb.shape[:2]:
+            # Context image might be different size, scale mask to match
+            from skimage.transform import resize
+
+            mask_resized = resize(
+                mask.astype(np.float32),
+                context_rgb.shape[:2],
+                order=0,
+                preserve_range=True,
+            ).astype(bool)
+            context_masked = context_rgb.copy()
+            context_masked[~mask_resized] = COLOR_IGNORE
+        else:
+            context_masked = context_rgb.copy()
+            context_masked[~mask] = COLOR_IGNORE
+
         x_masked = x_rgb.copy()
-        context_masked[~mask_scaled] = COLOR_IGNORE
-        x_masked[~mask_scaled] = COLOR_IGNORE
+        x_masked[~mask] = COLOR_IGNORE
     else:
         context_masked = context_rgb
         x_masked = x_rgb
@@ -703,7 +768,46 @@ def make_redesigned_panel(
     else:
         r1_components.append(add_title(empty, "No Confidence Data"))
 
-    # Add class legend to Row 1
+    # Add class legend to Row 1 (already has width W)
+    r1_components.append(class_legend)
+
+    # Pad row 1 components
+    maxh = max(im.shape[0] for im in r1_components)
+    r1 = concat_h(
+        *(
+            np.pad(im, ((0, maxh - im.shape[0]), (0, 0), (0, 0)), constant_values=255)
+            if im.shape[0] != maxh
+            else im
+            for im in r1_components
+        )
+    )
+    if x_masked.shape[1] != W:
+        x_masked = np.pad(
+            x_masked, ((0, 0), (0, W - x_masked.shape[1]), (0, 0)), constant_values=255
+        )
+
+    r1_components = [
+        add_title(context_masked, "Satellite Image (RGB)"),
+        add_title(x_masked, "Tested Image Slice"),
+    ]
+    if conf_rgb is not None:
+        cbar = make_confidence_colorbar(W, height=40, font_scale=0.5)
+        conf_block = concat_v(conf_rgb, cbar)
+        # Ensure conf_block has width W
+        if conf_block.shape[1] != W:
+            conf_block = np.pad(
+                conf_block,
+                ((0, 0), (0, W - conf_block.shape[1]), (0, 0)),
+                constant_values=255,
+            )
+        r1_components.append(add_title(conf_block, "Confidence"))
+    else:
+        # Ensure empty has width W
+        if empty.shape[1] != W:
+            empty = np.full((H, W, 3), 255, dtype=np.uint8)
+        r1_components.append(add_title(empty, "No Confidence Data"))
+
+    # Add class legend to Row 1 (already has width W)
     r1_components.append(class_legend)
 
     # Pad row 1 components
@@ -727,6 +831,13 @@ def make_redesigned_panel(
         add_title(pr_rgb, "Prediction"),
     )
 
+    r2 = concat_h(
+        add_title(gt_overlay_rgb, "Ground Truth Overlay"),
+        add_title(pr_overlay_rgb, "Prediction Overlay"),
+        add_title(gt_rgb, "Ground Truth"),
+        add_title(pr_rgb, "Prediction"),
+    )
+
     # -------------------------------
     # 12. Row 3: [Errors Overlay] [Errors] [False Positives] [False Negatives] [Error Legend]
     # -------------------------------
@@ -743,7 +854,7 @@ def make_redesigned_panel(
         add_title(
             fn_rgb, f"False Negatives (was {target_class_name} but not predicted)"
         ),
-        error_legend,
+        error_legend,  # Already has width W
     )
 
     # -------------------------------

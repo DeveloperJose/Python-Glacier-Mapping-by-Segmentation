@@ -319,8 +319,8 @@ def generate_single_visualization(
     if context_rgb is None:
         context_rgb = make_error_overlay(x_full.shape[:2], "Context unavailable")
 
-    # Create RGB visualizations
-    x_rgb = make_rgb_preview(x_full, scale_factor=scale_factor)
+    # Create RGB visualizations (don't pre-scale - let make_redesigned_panel handle scaling)
+    x_rgb = make_rgb_preview(x_full, scale_factor=1.0)
 
     # Calculate confidence map
     ignore = y_true_raw == 255
@@ -380,7 +380,7 @@ def generate_single_visualization(
     # Create confidence map visualization
     from glacier_mapping.utils.visualize import make_confidence_map
 
-    conf_rgb = make_confidence_map(conf, invalid_mask=ignore, scale_factor=scale_factor)
+    conf_rgb = make_confidence_map(conf, invalid_mask=ignore, scale_factor=1.0)
 
     # Create composite visualization
     composite = make_redesigned_panel(
