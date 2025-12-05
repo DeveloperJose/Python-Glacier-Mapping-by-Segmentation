@@ -184,6 +184,7 @@ def generate_sample_visualization():
 
                 # Try to find TIFF in common locations
                 image_dirs = [
+                    Path("/home/devj/local-debian/datasets/HKH_raw/Landsat7_2005/"),
                     Path("/home/devj/local-debian/datasets/HKH/raw_landsat/"),
                     Path("/data/landsat/"),
                     Path("data/raw/"),

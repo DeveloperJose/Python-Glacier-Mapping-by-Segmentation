@@ -13,18 +13,18 @@ from tqdm import tqdm
 from glacier_mapping.model.metrics import IoU, precision, recall, tp_fp_fn
 from glacier_mapping.model.visualize import (
     make_rgb_preview,
-    label_to_color,
     make_overlay,
-    make_tp_fp_fn_masks,
     make_redesigned_panel,
+    make_confidence_map,
     build_binary_cmap,
     build_cmap_from_mask_names,
     calculate_slice_position,
     load_full_tiff_rgb,
     make_context_image,
     make_error_overlay,
-    make_confidence_map,
+    make_tp_fp_fn_masks,
 )
+
 from glacier_mapping.utils import cleanup_gpu_memory
 import glacier_mapping.utils.logging as log
 from glacier_mapping.utils.prediction import (
@@ -371,25 +371,17 @@ class ValidationVisualizationCallback(Callback):
             title_text = f"VAL TIFF {tiff_num:04d}, Slice {slice_num:02d}"
             metrics_text = title_text + " | " + " | ".join(metric_parts)
 
-            # Create GT overlay for new layout
-            gt_overlay_rgb = make_overlay(x_rgb, y_gt_vis, cmap, alpha=0.5)
-
             # Create composite visualization with new layout
             composite = make_redesigned_panel(
                 context_rgb=context_rgb,
                 x_rgb=x_rgb,
-                gt_rgb=label_to_color(y_gt_vis, cmap),
-                pr_rgb=label_to_color(y_pred_vis, cmap),
-                gt_overlay_rgb=gt_overlay_rgb,
-                pr_overlay_rgb=pr_overlay_rgb,
-                tp_mask=tp_mask,
-                fp_mask=fp_mask,
-                fn_mask=fn_mask,
+                gt_labels=y_gt_vis,          # integer labels, masked version
+                pr_labels=y_pred_vis,        # integer labels, masked version
                 cmap=cmap,
                 class_names=class_names,
                 metrics_text=metrics_text,
                 conf_rgb=conf_rgb,
-                mask=~ignore,  # Valid pixels mask (True = valid, False = ignore)
+                mask=~ignore,                # boolean valid mask
             )
 
             # Save to: val_visualizations/tiff_XXXX/slice_YY_epochZZZZ.png
