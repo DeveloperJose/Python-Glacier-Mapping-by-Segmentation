@@ -279,7 +279,7 @@ filter_base_configs() {
         local basename=$(basename "$config" .yaml)
         local is_base=false
 
-        if [[ "$basename" =~ _base$ ]]; then
+        if [[ "$basename" =~ ^base ]]; then
             is_base=true
         fi
 
