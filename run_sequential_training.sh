@@ -31,6 +31,7 @@ TASK_FILTER=""                # Empty = all tasks
 PRIORITY_ORDER="dci,ci,multi" # Default priority: DCI → CI → Multi
 EXCLUDE_BASE=false
 ONLY_BASE=false
+PHYSICS_VELOCITY_PRIORITY=false # Prioritize physics+velocity configs within each task
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,6 +101,8 @@ ${BOLD}FILTERING & PRIORITY OPTIONS:${NC}
                         Example: --tasks dci,ci
     --priority ORDER    Task execution priority (default: dci,ci,multi)
                         Example: --priority ci,dci,multi
+    --physics-velocity-priority
+                        Prioritize physics+velocity configs first within each task
     --exclude-base      Skip all base dataset configs
     --only-base         Run only base dataset configs
 
@@ -125,11 +128,18 @@ ${BOLD}EXAMPLES:${NC}
     # Run DCI only, exclude base
     ./run_sequential_training.sh bilbo --tasks dci --exclude-base
 
+    # Run with physics+velocity priority (PV configs run first in each task)
+    ./run_sequential_training.sh frodo --physics-velocity-priority
+
 ${BOLD}DEFAULT EXECUTION ORDER:${NC}
     1. DCI (Debris-Covered Ice) - phys32 → phys64 variants → phys128 → physfull
     2. CI (Clean Ice) - phys32 → phys64 variants → phys128 → physfull
     3. Multi (Multi-class) - phys32 → phys64 variants → phys128 → physfull
     4. Base datasets - DCI base → CI base → Multi base (at the very end)
+
+${BOLD}WITH PHYSICS+VELOCITY PRIORITY:${NC}
+    Within each task: Physics+Velocity → Physics → Velocity → Base
+    Example DCI order: dci_physics_velocity → dci_physics → dci_velocity → dci_base
 
 ${BOLD}NOTES:${NC}
     - Configs are auto-detected from configs/{SERVER}_*.yaml
@@ -180,6 +190,9 @@ def parse_config(filename):
     # Determine if base
     is_base = (base == "base")
     
+    # Determine if physics+velocity config
+    is_physics_velocity = "physics_velocity" in base
+    
     # Extract sample size from experiment name
     if "phys32" in base:
         sample_size = 32
@@ -206,6 +219,7 @@ def parse_config(filename):
         "filename": filename,
         "task": task,
         "is_base": is_base,
+        "is_physics_velocity": is_physics_velocity,
         "sample_size": sample_size,
         "scale": scale
     }
@@ -217,13 +231,27 @@ parsed = [parse_config(c) for c in configs]
 priority_order = os.environ.get("PRIORITY_ORDER", "dci,ci,multi").split(",")
 task_priority = {task.strip(): i for i, task in enumerate(priority_order)}
 
+# Get physics+velocity priority setting
+physics_velocity_priority = os.environ.get("PHYSICS_VELOCITY_PRIORITY", "false").lower() == "true"
+
 # Sort
-sorted_configs = sorted(parsed, key=lambda x: (
-    task_priority.get(x["task"], 999),
-    1 if x["is_base"] else 0,
-    x["sample_size"],
-    x["scale"]
-))
+if physics_velocity_priority:
+    # With physics+velocity priority: task → physics+velocity first → base last → sample_size → scale
+    sorted_configs = sorted(parsed, key=lambda x: (
+        task_priority.get(x["task"], 999),
+        0 if x["is_physics_velocity"] else 1,  # physics+velocity first
+        1 if x["is_base"] else 0,             # base last
+        x["sample_size"],
+        x["scale"]
+    ))
+else:
+    # Default sorting: task → base last → sample_size → scale
+    sorted_configs = sorted(parsed, key=lambda x: (
+        task_priority.get(x["task"], 999),
+        1 if x["is_base"] else 0,
+        x["sample_size"],
+        x["scale"]
+    ))
 
 # Output sorted filenames
 for item in sorted_configs:
@@ -343,6 +371,10 @@ while [[ $# -gt 0 ]]; do
         ONLY_BASE=true
         shift
         ;;
+    --physics-velocity-priority)
+        PHYSICS_VELOCITY_PRIORITY=true
+        shift
+        ;;
     --help)
         show_usage
         exit 0
@@ -405,6 +437,7 @@ done
 # Export variables for use in Python sorting function
 export SERVER
 export PRIORITY_ORDER
+export PHYSICS_VELOCITY_PRIORITY
 
 ################################################################################
 # Find and Sort Config Files
@@ -488,15 +521,21 @@ for i in "${!CONFIG_FILES[@]}"; do
     config="${CONFIG_FILES[$i]}"
     basename=$(basename "$config" .yaml)
 
-    # Color code by task
-    if [[ "$basename" =~ _dci_ ]] || [[ "$basename" =~ _dci$ ]]; then
+    # Color code by task based on directory path
+    if [[ "$config" =~ /debris_ice/ ]]; then
         task_label="${MAGENTA}[DCI]${NC}"
-    elif [[ "$basename" =~ _ci_ ]] || [[ "$basename" =~ _ci$ ]]; then
+    elif [[ "$config" =~ /clean_ice/ ]]; then
         task_label="${GREEN}[CI]${NC}"
-    elif [[ "$basename" =~ _multi_ ]] || [[ "$basename" =~ _multi$ ]]; then
+    elif [[ "$config" =~ /multiclass/ ]]; then
         task_label="${BLUE}[Multi]${NC}"
     else
         task_label="[???]"
+    fi
+
+    # Add physics+velocity indicator
+    if [[ "$basename" =~ physics_velocity ]]; then
+        pv_label="${CYAN}[PV]${NC}"
+        task_label="$task_label $pv_label"
     fi
 
     log "  $((i + 1)). $task_label $config"

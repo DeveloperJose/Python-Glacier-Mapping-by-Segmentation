@@ -1,5 +1,7 @@
 # Debris-Covered Ice (DCI) binary segmentation task defaults
 loader_opts:
   output_classes: [2]  # 0=BG, 2=Debris (ignore clean ice)
+loss_opts:
+  foreground_classes: [2]  # CRITICAL: Explicit foreground class for binary loss
 metrics_opts:
   threshold: [0.5, 0.5]  # BG, Debris

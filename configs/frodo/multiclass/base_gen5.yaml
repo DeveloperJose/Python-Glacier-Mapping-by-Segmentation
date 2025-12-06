@@ -1,0 +1,9 @@
+# Gen5 Multi-class Baseline - Frodo
+# Uses base dataset - FIXED binary loss
+training_opts:
+  dataset_name: bibek_w512_o64_f1_v2
+  run_name: multi_base_gen5
+
+loader_opts:
+  physics_channels: false
+  velocity_channels: false
