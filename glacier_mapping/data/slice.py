@@ -329,7 +329,10 @@ def get_tiff_np(
         tiff_np = add_index(tiff_np, index1=1, index2=4)
         band_names.append("NDSI")
     if add_hsv:
-        rgb_img = tiff_np[:, :, [4, 3, 1]] / 255
+        rgb_img = tiff_np[:, :, [4, 3, 1]].astype(np.float32, copy=False)
+        finite_rgb = rgb_img[np.isfinite(rgb_img)]
+        rgb_scale = 255.0 if finite_rgb.size and np.nanpercentile(finite_rgb, 99) > 2.0 else 1.0
+        rgb_img = np.clip(rgb_img / rgb_scale, 0.0, 1.0)
         hsv_img = rgb2hsv(rgb_img[:, :, [2, 1, 0]])
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)
         band_names.extend(["H", "S", "V"])

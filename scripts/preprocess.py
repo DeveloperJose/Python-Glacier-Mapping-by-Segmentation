@@ -95,12 +95,15 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     servers_cfg = Dict(yaml.safe_load(Path("configs/servers.yaml").read_text()))
     server = servers_cfg[server_name]
 
-    slice_config.image_dir = server.image_dir
-    slice_config.dem_dir = server.dem_dir
-    slice_config.labels_dir = server.labels_dir
+    if "image_dir" not in slice_config:
+        slice_config.image_dir = server.image_dir
+    if "dem_dir" not in slice_config:
+        slice_config.dem_dir = server.dem_dir
+    if "labels_dir" not in slice_config:
+        slice_config.labels_dir = server.labels_dir
     slice_config.out_dir = f"{server.processed_data_path}/{slice_config.output_name}"
 
-    if hasattr(server, "velocity_dir"):
+    if "velocity_dir" not in slice_config and "velocity_dir" in server:
         slice_config.velocity_dir = server.velocity_dir
 
     return slice_config
