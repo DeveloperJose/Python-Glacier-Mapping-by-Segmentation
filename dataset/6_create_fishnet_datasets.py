@@ -47,14 +47,32 @@ DEFAULT_TEMPLATE_DIR = Path("/home/devj/local-arch/data/HKH_raw/Landsat7_2005")
 DEFAULT_OUTPUT_ROOT = Path("/home/devj/local-arch/data/HKH_raw")
 
 FULL8_BANDS = ["B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7"]
-PROVENANCE_BANDS = ["target_id", "target_year", "target_doy", "target_valid"]
+PROVENANCE_BANDS = [
+    "target_id",
+    "target_year",
+    "target_doy",
+    "target_valid",
+    "pixel_source",
+    "source_year",
+    "source_doy",
+    "donor_kind",
+    "fill_quality",
+    "donor_bitmask",
+]
+PROVENANCE_PIXEL_SOURCE = {
+    "nodata": 0,
+    "target": 1,
+    "nspi_selected": 2,
+    "nspi_weighted_blend": 3,
+}
+DONOR_KIND_CODE = {"none": 0, "lt05": 1, "le07_slc_on": 2, "le07_slc_off": 3}
+DONOR_BITMASK = {"lt05": 1, "le07_slc_on": 2, "le07_slc_off": 4}
 VARIANTS = {
     "raw_target": "HKH_full8_raw_target",
     "nspi_timeseries_weighted": "HKH_full8_nspi_timeseries_weighted",
     "agreement_quality_step3": "HKH_full8_agreement_quality_step3",
     "nspi_multi_score_all3": "HKH_full8_nspi_multi_score_all3",
 }
-KIND_CODE = {"lt05": 1, "le07_slc_on": 2, "le07_slc_off": 3}
 EPS = 1e-6
 NSPI_MIN_SIMILAR = 20
 NSPI_MAX_WINDOW = 8
@@ -522,6 +540,27 @@ def run_nspi_single(
     )
 
 
+def make_base_provenance(
+    valid: np.ndarray, target_meta: dict[str, Any]
+) -> np.ndarray:
+    target_year, target_doy = target_date_parts(target_meta)
+    target_id = int(target_meta["id"])
+    provenance = np.zeros((len(PROVENANCE_BANDS), *valid.shape), dtype=np.uint16)
+    provenance[0, valid] = target_id
+    provenance[1, valid] = target_year
+    provenance[2, valid] = target_doy
+    provenance[3, valid] = 1
+    provenance[4, valid] = PROVENANCE_PIXEL_SOURCE["target"]
+    provenance[5, valid] = target_year
+    provenance[6, valid] = target_doy
+    return provenance
+
+
+def donor_date_parts(donor: DonorInfo) -> tuple[int, int]:
+    dt = datetime.strptime(str(donor.date), "%Y-%m-%d")
+    return int(dt.year), int(dt.strftime("%j"))
+
+
 def build_variant_predictions(
     target_raw: np.ndarray,
     target_norm: np.ndarray,
@@ -529,21 +568,29 @@ def build_variant_predictions(
     fill_mask: np.ndarray,
     donors: list[DonorInfo],
     donor_arrays_norm: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    target_date: str,
+    target_meta: dict[str, Any],
     mins: np.ndarray,
     maxs: np.ndarray,
     donor_gap_coverage: dict[str, float] | None = None,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
+) -> tuple[
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, Any],
+]:
     donor_gap_coverage = donor_gap_coverage or {}
+    target_date = str(target_meta["date"])
     outputs = {"raw_target": target_raw.copy()}
     valids = {"raw_target": base_valid.copy()}
+    provenances = {"raw_target": make_base_provenance(base_valid, target_meta)}
     meta: dict[str, Any] = {"donors": [d.__dict__ | {"path": str(d.path)} for d in donors]}
     if not fill_mask.any() or not donors:
         for v in ("nspi_timeseries_weighted", "agreement_quality_step3", "nspi_multi_score_all3"):
             outputs[v] = target_raw.copy()
             valids[v] = base_valid.copy()
+            provenances[v] = provenances["raw_target"].copy()
         meta["note"] = "no fill mask or no donors; filled variants equal raw target"
-        return outputs, valids, meta
+        return outputs, valids, provenances, meta
 
     single: list[dict[str, Any]] = []
     for d in donors:
@@ -557,6 +604,10 @@ def build_variant_predictions(
                 "quality": q,
                 "valid": valid,
                 "donor_score": d.score,
+                "donor_year": donor_date_parts(d)[0],
+                "donor_doy": donor_date_parts(d)[1],
+                "donor_kind_code": DONOR_KIND_CODE[d.kind],
+                "donor_bitmask": DONOR_BITMASK[d.kind],
             }
         )
     meta["single_fill_pixels"] = {c["donor"].kind: int(c["valid"].sum()) for c in single}
@@ -564,20 +615,40 @@ def build_variant_predictions(
     # score_all3 NSPI cascade: highest Step3 family score first, original multi-donor behavior.
     multi_norm = np.full_like(target_norm, np.nan, dtype=np.float32)
     multi_valid = np.zeros(fill_mask.shape, dtype=bool)
+    multi_kind = np.zeros(fill_mask.shape, dtype=np.uint16)
+    multi_year = np.zeros(fill_mask.shape, dtype=np.uint16)
+    multi_doy = np.zeros(fill_mask.shape, dtype=np.uint16)
+    multi_quality = np.zeros(fill_mask.shape, dtype=np.uint16)
+    multi_bitmask = np.zeros(fill_mask.shape, dtype=np.uint16)
     remaining = fill_mask.copy()
     for c in sorted(single, key=lambda x: x["donor"].score, reverse=True):
         take = remaining & c["valid"]
         for b in range(target_norm.shape[0]):
             multi_norm[b, take] = c["pred_norm"][b, take]
         multi_valid[take] = True
+        multi_kind[take] = c["donor_kind_code"]
+        multi_year[take] = c["donor_year"]
+        multi_doy[take] = c["donor_doy"]
+        multi_quality[take] = c["quality"][take].astype(np.uint16)
+        multi_bitmask[take] = c["donor_bitmask"]
         remaining[take] = False
 
     # agreement_quality_step3: closest to cross-donor median, with quality + Step3 tie-break.
     agree_norm = np.full_like(target_norm, np.nan, dtype=np.float32)
     agree_valid = np.zeros(fill_mask.shape, dtype=bool)
+    agree_kind = np.zeros(fill_mask.shape, dtype=np.uint16)
+    agree_year = np.zeros(fill_mask.shape, dtype=np.uint16)
+    agree_doy = np.zeros(fill_mask.shape, dtype=np.uint16)
+    agree_quality = np.zeros(fill_mask.shape, dtype=np.uint16)
+    agree_bitmask = np.zeros(fill_mask.shape, dtype=np.uint16)
     if len(single) == 1:
         agree_norm = single[0]["pred_norm"].copy()
         agree_valid = single[0]["valid"].copy()
+        agree_kind[agree_valid] = single[0]["donor_kind_code"]
+        agree_year[agree_valid] = single[0]["donor_year"]
+        agree_doy[agree_valid] = single[0]["donor_doy"]
+        agree_quality[agree_valid] = single[0]["quality"][agree_valid].astype(np.uint16)
+        agree_bitmask[agree_valid] = single[0]["donor_bitmask"]
     else:
         stack = np.stack([c["pred_norm"] for c in single], axis=0)
         valid_stack = np.stack([c["valid"] for c in single], axis=0)
@@ -596,10 +667,21 @@ def build_variant_predictions(
                 agree_norm[b, take] = c["pred_norm"][b, take]
             best[take] = score[take]
             agree_valid[take] = True
+            agree_kind[take] = c["donor_kind_code"]
+            agree_year[take] = c["donor_year"]
+            agree_doy[take] = c["donor_doy"]
+            agree_quality[take] = c["quality"][take].astype(np.uint16)
+            agree_bitmask[take] = c["donor_bitmask"]
 
     # Time-series weighted blend: tournament deployable winner after full8 scene-minmax eval.
     weight_sum = np.zeros(fill_mask.shape, dtype=np.float32)
     ts_norm = np.zeros_like(target_norm, dtype=np.float32)
+    ts_year_sum = np.zeros(fill_mask.shape, dtype=np.float32)
+    ts_doy_sum = np.zeros(fill_mask.shape, dtype=np.float32)
+    ts_quality_sum = np.zeros(fill_mask.shape, dtype=np.float32)
+    ts_dominant_weight = np.zeros(fill_mask.shape, dtype=np.float32)
+    ts_kind = np.zeros(fill_mask.shape, dtype=np.uint16)
+    ts_bitmask = np.zeros(fill_mask.shape, dtype=np.uint16)
     for c in single:
         d = c["donor"]
         doy_w = math.exp(-doy_distance_days(target_date, d.date) / 45.0)
@@ -611,6 +693,14 @@ def build_variant_predictions(
         q_w = np.where(q == 1, 1.0, np.where(q == 2, 0.65, np.where(q == 3, 0.35, 0.0))).astype(np.float32)
         w = np.where(c["valid"], base * q_w, 0.0).astype(np.float32)
         weight_sum += w
+        active = w > 0
+        ts_year_sum += np.where(active, float(c["donor_year"]) * w, 0.0)
+        ts_doy_sum += np.where(active, float(c["donor_doy"]) * w, 0.0)
+        ts_quality_sum += np.where(active, c["quality"].astype(np.float32) * w, 0.0)
+        ts_bitmask[active] |= np.uint16(c["donor_bitmask"])
+        dominant = active & (w > ts_dominant_weight)
+        ts_dominant_weight[dominant] = w[dominant]
+        ts_kind[dominant] = c["donor_kind_code"]
         for b in range(target_norm.shape[0]):
             ts_norm[b] += np.where(w > 0, c["pred_norm"][b] * w, 0.0)
     ts_valid = weight_sum > 0
@@ -618,6 +708,35 @@ def build_variant_predictions(
         ts_norm[b] = np.where(ts_valid, ts_norm[b] / np.maximum(weight_sum, EPS), np.nan)
     ts_valid &= np.isfinite(ts_norm).all(axis=0)
 
+    provenance_specs = {
+        "nspi_multi_score_all3": (
+            multi_kind,
+            multi_year,
+            multi_doy,
+            multi_quality,
+            multi_bitmask,
+            PROVENANCE_PIXEL_SOURCE["nspi_selected"],
+        ),
+        "agreement_quality_step3": (
+            agree_kind,
+            agree_year,
+            agree_doy,
+            agree_quality,
+            agree_bitmask,
+            PROVENANCE_PIXEL_SOURCE["nspi_selected"],
+        ),
+        "nspi_timeseries_weighted": (
+            ts_kind,
+            np.rint(ts_year_sum / np.maximum(weight_sum, EPS)).astype(np.uint16),
+            np.rint(ts_doy_sum / np.maximum(weight_sum, EPS)).astype(np.uint16),
+            np.rint(ts_quality_sum / np.maximum(weight_sum, EPS)).astype(np.uint16),
+            ts_bitmask,
+            PROVENANCE_PIXEL_SOURCE["nspi_weighted_blend"],
+        ),
+    }
+
+    target_id = int(target_meta["id"])
+    target_year, target_doy = target_date_parts(target_meta)
     for name, pred_norm, valid_fill in [
         ("nspi_multi_score_all3", multi_norm, multi_valid),
         ("agreement_quality_step3", agree_norm, agree_valid),
@@ -629,9 +748,22 @@ def build_variant_predictions(
             out[b, valid_fill] = pred_raw[b, valid_fill]
         outputs[name] = out
         valids[name] = base_valid | valid_fill
+        provenance = provenances["raw_target"].copy()
+        kind, year, doy, quality, bitmask, source_code = provenance_specs[name]
+        provenance[0, valid_fill] = target_id
+        provenance[1, valid_fill] = target_year
+        provenance[2, valid_fill] = target_doy
+        provenance[3, valid_fill] = 1
+        provenance[4, valid_fill] = source_code
+        provenance[5, valid_fill] = year[valid_fill]
+        provenance[6, valid_fill] = doy[valid_fill]
+        provenance[7, valid_fill] = kind[valid_fill]
+        provenance[8, valid_fill] = quality[valid_fill]
+        provenance[9, valid_fill] = bitmask[valid_fill]
+        provenances[name] = provenance
         meta[f"{name}_fill_pixels"] = int(valid_fill.sum())
 
-    return outputs, valids, meta
+    return outputs, valids, provenances, meta
 
 
 def load_templates(template_dir: Path, tile_indices: list[int] | None, max_tiles: int | None) -> list[TileTemplate]:
@@ -679,42 +811,45 @@ def initialize_outputs(
     templates: list[TileTemplate],
     overwrite: bool,
     write_provenance: bool = True,
+    init_images: bool = True,
+    overwrite_provenance: bool = False,
 ) -> None:
     for variant in variants:
         folder = output_root / VARIANTS[variant]
-        if overwrite and folder.exists():
+        if init_images and overwrite and folder.exists():
             shutil.rmtree(folder)
         folder.mkdir(parents=True, exist_ok=True)
         provenance_folder = folder / "provenance"
         if write_provenance:
             provenance_folder.mkdir(parents=True, exist_ok=True)
         for tile in templates:
-            out_path = folder / f"image{tile.index}.tif"
-            if not out_path.exists() or overwrite:
-                profile = tile.profile.copy()
-                profile.update(
-                    driver="GTiff",
-                    count=8,
-                    dtype="float32",
-                    nodata=0.0,
-                    compress="deflate",
-                    predictor=3,
-                    tiled=True,
-                    blockxsize=256,
-                    blockysize=256,
-                    sparse_ok=True,
-                )
-                with rasterio.open(out_path, "w", **profile) as dst:
-                    # Sparse empty GeoTIFF: unwritten blocks read as nodata=0.
-                    # Avoid writing full zero arrays for 4 variants x 202 tiles.
-                    for i, band in enumerate(FULL8_BANDS, start=1):
-                        dst.set_band_description(i, band)
+            if init_images:
+                out_path = folder / f"image{tile.index}.tif"
+                if not out_path.exists() or overwrite:
+                    profile = tile.profile.copy()
+                    profile.update(
+                        driver="GTiff",
+                        count=8,
+                        dtype="float32",
+                        nodata=0.0,
+                        compress="deflate",
+                        predictor=3,
+                        tiled=True,
+                        blockxsize=256,
+                        blockysize=256,
+                        sparse_ok=True,
+                    )
+                    with rasterio.open(out_path, "w", **profile) as dst:
+                        # Sparse empty GeoTIFF: unwritten blocks read as nodata=0.
+                        # Avoid writing full zero arrays for 4 variants x 202 tiles.
+                        for i, band in enumerate(FULL8_BANDS, start=1):
+                            dst.set_band_description(i, band)
 
             if not write_provenance:
                 continue
 
             provenance_path = provenance_folder / f"image{tile.index}.tif"
-            if provenance_path.exists() and not overwrite:
+            if provenance_path.exists() and not (overwrite or overwrite_provenance):
                 continue
             provenance_profile = tile.profile.copy()
             provenance_profile.update(
@@ -789,31 +924,25 @@ def target_date_parts(target_meta: dict[str, Any]) -> tuple[int, int]:
 def update_one_provenance(
     tile: TileTemplate,
     variant_folder: Path,
-    scene_valid: np.ndarray,
+    scene_provenance: np.ndarray,
     scene_profile: dict[str, Any],
-    target_meta: dict[str, Any],
 ) -> dict[str, Any]:
     provenance_path = variant_folder / "provenance" / f"image{tile.index}.tif"
     if not provenance_path.exists():
         raise FileNotFoundError(f"Missing provenance raster: {provenance_path}")
-
-    target_id = int(target_meta["id"])
-    target_year, target_doy = target_date_parts(target_meta)
-    src_provenance = np.zeros(
-        (len(PROVENANCE_BANDS), scene_valid.shape[0], scene_valid.shape[1]),
-        dtype=np.uint16,
-    )
-    src_provenance[0, scene_valid] = target_id
-    src_provenance[1, scene_valid] = target_year
-    src_provenance[2, scene_valid] = target_doy
-    src_provenance[3, scene_valid] = 1
+    if scene_provenance.shape[0] != len(PROVENANCE_BANDS):
+        raise ValueError(
+            f"Expected {len(PROVENANCE_BANDS)} provenance bands, "
+            f"got {scene_provenance.shape[0]}"
+        )
 
     dst_provenance = np.zeros(
         (len(PROVENANCE_BANDS), tile.height, tile.width), dtype=np.uint16
     )
     dst_mask = np.zeros((tile.height, tile.width), dtype=np.uint8)
+    source_valid = scene_provenance[3] > 0
     reproject(
-        source=src_provenance,
+        source=scene_provenance.astype(np.uint16, copy=False),
         destination=dst_provenance,
         src_transform=scene_profile["transform"],
         src_crs=scene_profile["crs"],
@@ -824,7 +953,7 @@ def update_one_provenance(
         resampling=Resampling.nearest,
     )
     reproject(
-        source=scene_valid.astype(np.uint8),
+        source=source_valid.astype(np.uint8),
         destination=dst_mask,
         src_transform=scene_profile["transform"],
         src_crs=scene_profile["crs"],
@@ -908,10 +1037,16 @@ def write_variant_metadata(output_root: Path, variants: list[str], templates: li
             "provenance_enabled": not bool(getattr(args, "no_provenance", False)),
             "provenance_bands": PROVENANCE_BANDS,
             "provenance_semantics": {
-                "target_id": "ID from dataset/outputs/1_targets.json for the Landsat scene whose pixels last updated this tile pixel",
-                "target_year": "Acquisition year of that target scene; intended temporal key for date-aware velocity products",
-                "target_doy": "Acquisition day-of-year of that target scene",
-                "target_valid": "1 where this variant has a valid generated pixel from that target scene, else 0",
+                "target_id": "ID from dataset/outputs/1_targets.json for the target Landsat scene whose domain produced this pixel",
+                "target_year": "Acquisition year of the target scene; intended temporal key for date-aware velocity products",
+                "target_doy": "Acquisition day-of-year of the target scene",
+                "target_valid": "1 where this variant has a valid generated pixel, else 0",
+                "pixel_source": "0=nodata, 1=original clear target pixel, 2=single selected NSPI donor fill, 3=weighted NSPI donor blend",
+                "source_year": "For target pixels: target year. For selected donor fills: donor year. For weighted blends: rounded weighted-mean donor year.",
+                "source_doy": "For target pixels: target DOY. For selected donor fills: donor DOY. For weighted blends: rounded weighted-mean donor DOY.",
+                "donor_kind": "0=none/target, 1=LT05, 2=LE07 SLC-on, 3=LE07 SLC-off. For weighted blends, dominant donor by weight.",
+                "fill_quality": "NSPI quality code for filled pixels; 0 for original target pixels. Weighted blends store rounded weighted mean quality.",
+                "donor_bitmask": "Bitmask of donor kinds contributing to pixel: LT05=1, LE07 SLC-on=2, LE07 SLC-off=4.",
             },
         }
         (folder / "policy.json").write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
@@ -944,9 +1079,41 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--overwrite-provenance",
+        action="store_true",
+        help="Overwrite provenance rasters without deleting/recreating image GeoTIFFs.",
+    )
+    parser.add_argument(
         "--no-provenance",
         action="store_true",
         help="Do not write per-variant provenance rasters (target_id/year/doy/valid).",
+    )
+    parser.add_argument(
+        "--provenance-only",
+        action="store_true",
+        help=(
+            "Backfill coarse target-date provenance without rewriting image GeoTIFFs. "
+            "Does not reconstruct donor/fill provenance."
+        ),
+    )
+    parser.add_argument(
+        "--exact-provenance-only",
+        action="store_true",
+        help=(
+            "Re-run full generation logic and write exact provenance rasters only; "
+            "do not rewrite existing image GeoTIFFs. This preserves donor/fill provenance."
+        ),
+    )
+    parser.add_argument(
+        "--provenance-valid-mode",
+        choices=("domain", "raw-valid"),
+        default="domain",
+        help=(
+            "Validity mask used by --provenance-only. domain assigns scene date to all "
+            "pixels in the target scene domain (best for later velocity dating of filled "
+            "variants). raw-valid restricts to clear target pixels only. Exact filled-variant "
+            "provenance is written during normal generation, not provenance-only."
+        ),
     )
     args = parser.parse_args()
 
@@ -954,6 +1121,20 @@ def main() -> None:
     unknown = [v for v in variants if v not in VARIANTS]
     if unknown:
         raise ValueError(f"Unknown variants: {unknown}. Choices: {sorted(VARIANTS)}")
+    if (args.provenance_only or args.exact_provenance_only) and args.no_provenance:
+        raise ValueError("Provenance-only modes cannot be combined with --no-provenance")
+    if args.provenance_only and args.exact_provenance_only:
+        raise ValueError("Choose either --provenance-only or --exact-provenance-only")
+    if args.provenance_only and args.overwrite:
+        raise ValueError(
+            "Use --overwrite-provenance with --provenance-only; --overwrite is reserved "
+            "for image-regeneration runs."
+        )
+    if args.exact_provenance_only and args.overwrite:
+        raise ValueError(
+            "Use --overwrite-provenance with --exact-provenance-only; --overwrite is "
+            "reserved for image-regeneration runs."
+        )
     if not FISHNET_GEOJSON.exists():
         raise FileNotFoundError(f"Missing fishnet copy: {FISHNET_GEOJSON}")
 
@@ -977,6 +1158,8 @@ def main() -> None:
         templates,
         args.overwrite,
         write_provenance=not args.no_provenance,
+        init_images=not (args.provenance_only or args.exact_provenance_only),
+        overwrite_provenance=args.overwrite_provenance,
     )
     write_variant_metadata(args.output_root, variants, templates, args)
     print("initialization done", flush=True)
@@ -986,11 +1169,64 @@ def main() -> None:
         target_meta = targets[tid]
         path = target_path(target_meta)
         donor_infos = slate.get(tid, [])
-        print(f"ID {tid:02d}: scan scene minmax {path.name} donors={[d.kind for d in donor_infos]}", flush=True)
-        mins, maxs, donor_gap_coverage, scene_fill_pixels = compute_scene_minmax_stream(path, target_meta, donor_infos)
         with rasterio.open(path) as src:
             scene_profile = src.profile.copy()
         scene_tiles = [tile for tile in templates if scene_intersects_tile(scene_profile, tile)]
+
+        if args.provenance_only:
+            print(
+                f"ID {tid:02d}: provenance-only {path.name} "
+                f"tiles={len(scene_tiles)} mode={args.provenance_valid_mode}",
+                flush=True,
+            )
+            scene_rows: list[dict[str, Any]] = []
+            for tile in scene_tiles:
+                win = tile_window_in_scene(tile, scene_profile, pad=0)
+                if win is None:
+                    continue
+                chunk_profile = scene_profile.copy()
+                chunk_profile.update(
+                    width=int(win.width),
+                    height=int(win.height),
+                    transform=window_transform(win, scene_profile["transform"]),
+                )
+                domain = rasterize_domain_array(
+                    target_meta,
+                    chunk_profile["crs"],
+                    chunk_profile["transform"],
+                    int(chunk_profile["height"]),
+                    int(chunk_profile["width"]),
+                )
+                if args.provenance_valid_mode == "raw-valid":
+                    _target_raw, _data_present, target_clear, _target_gap, _profile = load_full8_window(path, win)
+                    provenance_valid = target_clear & domain
+                else:
+                    provenance_valid = domain
+                provenance = make_base_provenance(provenance_valid, target_meta)
+                for variant in variants:
+                    folder = args.output_root / VARIANTS[variant]
+                    r = update_one_provenance(
+                        tile,
+                        folder,
+                        provenance,
+                        chunk_profile,
+                    )
+                    r.update(
+                        {
+                            "variant": variant,
+                            "target_id": tid,
+                            "scene": target_meta["scene"],
+                            "provenance_only": True,
+                            "provenance_valid_mode": args.provenance_valid_mode,
+                        }
+                    )
+                    scene_rows.append(r)
+            all_rows.extend(scene_rows)
+            print(f"ID {tid:02d}: provenance rows={len(scene_rows)}", flush=True)
+            continue
+
+        print(f"ID {tid:02d}: scan scene minmax {path.name} donors={[d.kind for d in donor_infos]}", flush=True)
+        mins, maxs, donor_gap_coverage, scene_fill_pixels = compute_scene_minmax_stream(path, target_meta, donor_infos)
         print(
             f"ID {tid:02d}: tiles={len(scene_tiles)} fill_pixels={scene_fill_pixels} "
             f"coverage={{{', '.join(f'{k}: {v:.3f}' for k, v in donor_gap_coverage.items())}}} "
@@ -1021,36 +1257,44 @@ def main() -> None:
                 kind: (apply_minmax(arr, mins, maxs), valid, gap)
                 for kind, (arr, valid, gap) in donor_arrays_raw.items()
             }
-            outputs, valids, meta = build_variant_predictions(
+            outputs, valids, provenances, meta = build_variant_predictions(
                 target_raw,
                 target_norm,
                 base_valid,
                 fill_mask,
                 donor_infos,
                 donor_arrays_norm,
-                target_meta["date"],
+                target_meta,
                 mins,
                 maxs,
                 donor_gap_coverage,
             )
             for variant in variants:
                 folder = args.output_root / VARIANTS[variant]
-                r = update_one_tile(tile, folder, outputs[variant], valids[variant], chunk_profile)
+                if args.exact_provenance_only:
+                    r = {
+                        "tile": tile.index,
+                        "updated_pixels": 0,
+                        "image_update_skipped": True,
+                    }
+                else:
+                    r = update_one_tile(
+                        tile, folder, outputs[variant], valids[variant], chunk_profile
+                    )
                 if not args.no_provenance:
                     r.update(
                         update_one_provenance(
                             tile,
                             folder,
-                            valids[variant],
+                            provenances[variant],
                             chunk_profile,
-                            target_meta,
                         )
                     )
                 r.update({"variant": variant, "target_id": tid, "scene": target_meta["scene"]})
                 scene_rows.append(r)
             if len(scene_rows) % max(1, 4 * len(variants)) == 0:
                 print(f"ID {tid:02d}: processed {len(scene_rows) // len(variants)}/{len(scene_tiles)} tiles", flush=True)
-            del target_raw, target_norm, donor_arrays_raw, donor_arrays_norm, outputs, valids
+            del target_raw, target_norm, donor_arrays_raw, donor_arrays_norm, outputs, valids, provenances
         all_rows.extend(scene_rows)
         by_variant = defaultdict(int)
         for r in scene_rows:
