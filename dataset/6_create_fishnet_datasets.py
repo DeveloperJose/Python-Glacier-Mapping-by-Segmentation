@@ -19,12 +19,12 @@ import argparse
 import csv
 import json
 import math
-import os
 import shutil
 import tempfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,7 @@ DEFAULT_TEMPLATE_DIR = Path("/home/devj/local-arch/data/HKH_raw/Landsat7_2005")
 DEFAULT_OUTPUT_ROOT = Path("/home/devj/local-arch/data/HKH_raw")
 
 FULL8_BANDS = ["B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7"]
+PROVENANCE_BANDS = ["target_id", "target_year", "target_doy", "target_valid"]
 VARIANTS = {
     "raw_target": "HKH_full8_raw_target",
     "nspi_timeseries_weighted": "HKH_full8_nspi_timeseries_weighted",
@@ -672,33 +673,64 @@ def scene_intersects_tile(scene_profile: dict[str, Any], tile: TileTemplate) -> 
     return not (tb[2] <= sb.left or tb[0] >= sb.right or tb[3] <= sb.bottom or tb[1] >= sb.top)
 
 
-def initialize_outputs(output_root: Path, variants: list[str], templates: list[TileTemplate], overwrite: bool) -> None:
+def initialize_outputs(
+    output_root: Path,
+    variants: list[str],
+    templates: list[TileTemplate],
+    overwrite: bool,
+    write_provenance: bool = True,
+) -> None:
     for variant in variants:
         folder = output_root / VARIANTS[variant]
         if overwrite and folder.exists():
             shutil.rmtree(folder)
         folder.mkdir(parents=True, exist_ok=True)
+        provenance_folder = folder / "provenance"
+        if write_provenance:
+            provenance_folder.mkdir(parents=True, exist_ok=True)
         for tile in templates:
             out_path = folder / f"image{tile.index}.tif"
-            if out_path.exists() and not overwrite:
+            if not out_path.exists() or overwrite:
+                profile = tile.profile.copy()
+                profile.update(
+                    driver="GTiff",
+                    count=8,
+                    dtype="float32",
+                    nodata=0.0,
+                    compress="deflate",
+                    predictor=3,
+                    tiled=True,
+                    blockxsize=256,
+                    blockysize=256,
+                    sparse_ok=True,
+                )
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    # Sparse empty GeoTIFF: unwritten blocks read as nodata=0.
+                    # Avoid writing full zero arrays for 4 variants x 202 tiles.
+                    for i, band in enumerate(FULL8_BANDS, start=1):
+                        dst.set_band_description(i, band)
+
+            if not write_provenance:
                 continue
-            profile = tile.profile.copy()
-            profile.update(
+
+            provenance_path = provenance_folder / f"image{tile.index}.tif"
+            if provenance_path.exists() and not overwrite:
+                continue
+            provenance_profile = tile.profile.copy()
+            provenance_profile.update(
                 driver="GTiff",
-                count=8,
-                dtype="float32",
-                nodata=0.0,
+                count=len(PROVENANCE_BANDS),
+                dtype="uint16",
+                nodata=0,
                 compress="deflate",
-                predictor=3,
+                predictor=2,
                 tiled=True,
                 blockxsize=256,
                 blockysize=256,
                 sparse_ok=True,
             )
-            with rasterio.open(out_path, "w", **profile) as dst:
-                # Sparse empty GeoTIFF: unwritten blocks read as nodata=0.
-                # Avoid writing full zero arrays for 4 variants x 202 tiles.
-                for i, band in enumerate(FULL8_BANDS, start=1):
+            with rasterio.open(provenance_path, "w", **provenance_profile) as dst:
+                for i, band in enumerate(PROVENANCE_BANDS, start=1):
                     dst.set_band_description(i, band)
 
 
@@ -747,6 +779,75 @@ def update_one_tile(
         dst.write(existing.astype(np.float32, copy=False))
         dst.write_mask((combined_mask.astype(np.uint8) * 255))
     return {"tile": tile.index, "updated_pixels": int(valid.sum())}
+
+
+def target_date_parts(target_meta: dict[str, Any]) -> tuple[int, int]:
+    dt = datetime.strptime(str(target_meta["date"]), "%Y-%m-%d")
+    return int(dt.year), int(dt.strftime("%j"))
+
+
+def update_one_provenance(
+    tile: TileTemplate,
+    variant_folder: Path,
+    scene_valid: np.ndarray,
+    scene_profile: dict[str, Any],
+    target_meta: dict[str, Any],
+) -> dict[str, Any]:
+    provenance_path = variant_folder / "provenance" / f"image{tile.index}.tif"
+    if not provenance_path.exists():
+        raise FileNotFoundError(f"Missing provenance raster: {provenance_path}")
+
+    target_id = int(target_meta["id"])
+    target_year, target_doy = target_date_parts(target_meta)
+    src_provenance = np.zeros(
+        (len(PROVENANCE_BANDS), scene_valid.shape[0], scene_valid.shape[1]),
+        dtype=np.uint16,
+    )
+    src_provenance[0, scene_valid] = target_id
+    src_provenance[1, scene_valid] = target_year
+    src_provenance[2, scene_valid] = target_doy
+    src_provenance[3, scene_valid] = 1
+
+    dst_provenance = np.zeros(
+        (len(PROVENANCE_BANDS), tile.height, tile.width), dtype=np.uint16
+    )
+    dst_mask = np.zeros((tile.height, tile.width), dtype=np.uint8)
+    reproject(
+        source=src_provenance,
+        destination=dst_provenance,
+        src_transform=scene_profile["transform"],
+        src_crs=scene_profile["crs"],
+        dst_transform=tile.transform,
+        dst_crs=tile.crs,
+        src_nodata=0,
+        dst_nodata=0,
+        resampling=Resampling.nearest,
+    )
+    reproject(
+        source=scene_valid.astype(np.uint8),
+        destination=dst_mask,
+        src_transform=scene_profile["transform"],
+        src_crs=scene_profile["crs"],
+        dst_transform=tile.transform,
+        dst_crs=tile.crs,
+        src_nodata=0,
+        dst_nodata=0,
+        resampling=Resampling.nearest,
+    )
+
+    valid = dst_mask > 0
+    if not valid.any():
+        return {"tile": tile.index, "provenance_updated_pixels": 0}
+
+    with rasterio.open(provenance_path, "r+") as dst:
+        existing = dst.read()
+        existing_mask = dst.dataset_mask() > 0
+        existing[:, valid] = dst_provenance[:, valid]
+        combined_mask = existing_mask | valid
+        dst.write(existing.astype(np.uint16, copy=False))
+        dst.write_mask((combined_mask.astype(np.uint8) * 255))
+
+    return {"tile": tile.index, "provenance_updated_pixels": int(valid.sum())}
 
 
 def update_tiles_for_scene(
@@ -804,9 +905,25 @@ def write_variant_metadata(output_root: Path, variants: list[str], templates: li
             "fishnet_features": feature_count,
             "template_dir": str(args.template_dir),
             "tournament_evidence": str(SUMMARY_CSV),
+            "provenance_enabled": not bool(getattr(args, "no_provenance", False)),
+            "provenance_bands": PROVENANCE_BANDS,
+            "provenance_semantics": {
+                "target_id": "ID from dataset/outputs/1_targets.json for the Landsat scene whose pixels last updated this tile pixel",
+                "target_year": "Acquisition year of that target scene; intended temporal key for date-aware velocity products",
+                "target_doy": "Acquisition day-of-year of that target scene",
+                "target_valid": "1 where this variant has a valid generated pixel from that target scene, else 0",
+            },
         }
         (folder / "policy.json").write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
-        rows = [{"image": f"image{t.index}.tif", "tile_index": t.index, "template": str(t.path)} for t in templates]
+        rows = [
+            {
+                "image": f"image{t.index}.tif",
+                "tile_index": t.index,
+                "template": str(t.path),
+                "provenance": str(folder / "provenance" / f"image{t.index}.tif"),
+            }
+            for t in templates
+        ]
         write_csv(folder / "manifest.csv", rows)
 
 
@@ -826,6 +943,11 @@ def main() -> None:
     parser.add_argument("--tile-workers", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--no-provenance",
+        action="store_true",
+        help="Do not write per-variant provenance rasters (target_id/year/doy/valid).",
+    )
     args = parser.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -849,7 +971,13 @@ def main() -> None:
         return
 
     print("initializing sparse output rasters", flush=True)
-    initialize_outputs(args.output_root, variants, templates, args.overwrite)
+    initialize_outputs(
+        args.output_root,
+        variants,
+        templates,
+        args.overwrite,
+        write_provenance=not args.no_provenance,
+    )
     write_variant_metadata(args.output_root, variants, templates, args)
     print("initialization done", flush=True)
 
@@ -908,6 +1036,16 @@ def main() -> None:
             for variant in variants:
                 folder = args.output_root / VARIANTS[variant]
                 r = update_one_tile(tile, folder, outputs[variant], valids[variant], chunk_profile)
+                if not args.no_provenance:
+                    r.update(
+                        update_one_provenance(
+                            tile,
+                            folder,
+                            valids[variant],
+                            chunk_profile,
+                            target_meta,
+                        )
+                    )
                 r.update({"variant": variant, "target_id": tid, "scene": target_meta["scene"]})
                 scene_rows.append(r)
             if len(scene_rows) % max(1, 4 * len(variants)) == 0:
