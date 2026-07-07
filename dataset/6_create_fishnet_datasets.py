@@ -1305,9 +1305,14 @@ def main() -> None:
             flush=True,
         )
 
+    updates_name = (
+        "provenance_updates.csv"
+        if args.provenance_only or args.exact_provenance_only
+        else "generation_updates.csv"
+    )
     for variant in variants:
         rows = [r for r in all_rows if r["variant"] == variant]
-        write_csv(args.output_root / VARIANTS[variant] / "generation_updates.csv", rows)
+        write_csv(args.output_root / VARIANTS[variant] / updates_name, rows)
     print("done", flush=True)
 
 
