@@ -67,12 +67,13 @@ PROVENANCE_PIXEL_SOURCE = {
 }
 DONOR_KIND_CODE = {"none": 0, "lt05": 1, "le07_slc_on": 2, "le07_slc_off": 3}
 DONOR_BITMASK = {"lt05": 1, "le07_slc_on": 2, "le07_slc_off": 4}
-VARIANTS = {
-    "raw_target": "HKH_full8_raw_target",
-    "nspi_timeseries_weighted": "HKH_full8_nspi_timeseries_weighted",
-    "agreement_quality_step3": "HKH_full8_agreement_quality_step3",
-    "nspi_multi_score_all3": "HKH_full8_nspi_multi_score_all3",
+VARIANT_SUFFIXES = {
+    "raw_target": "raw_target",
+    "nspi_timeseries_weighted": "nspi_timeseries_weighted",
+    "agreement_quality_step3": "agreement_quality_step3",
+    "nspi_multi_score_all3": "nspi_multi_score_all3",
 }
+VARIANTS = {key: f"HKH_full8_{suffix}" for key, suffix in VARIANT_SUFFIXES.items()}
 EPS = 1e-6
 NSPI_MIN_SIMILAR = 20
 NSPI_MAX_WINDOW = 8
@@ -301,6 +302,20 @@ def parse_int_list(value: str | None) -> list[int] | None:
 
 def load_targets_meta() -> dict[int, dict[str, Any]]:
     return {int(row["id"]): row for row in read_json(TARGETS_JSON)}
+
+
+def configure_paths(
+    target_dir: Path,
+    donor_dir: Path,
+    variant_folder_prefix: str,
+) -> None:
+    global TARGET_DIR_FULL8, DONOR_DIR_FULL8, VARIANTS
+    TARGET_DIR_FULL8 = target_dir
+    DONOR_DIR_FULL8 = donor_dir
+    VARIANTS = {
+        key: f"{variant_folder_prefix}_{suffix}"
+        for key, suffix in VARIANT_SUFFIXES.items()
+    }
 
 
 def load_slate() -> dict[int, list[DonorInfo]]:
@@ -1033,6 +1048,9 @@ def write_variant_metadata(output_root: Path, variants: list[str], templates: li
             "fishnet_geojson_copy": str(FISHNET_GEOJSON),
             "fishnet_features": feature_count,
             "template_dir": str(args.template_dir),
+            "target_dir": str(TARGET_DIR_FULL8),
+            "donor_dir": str(DONOR_DIR_FULL8),
+            "variant_folder_prefix": str(args.variant_folder_prefix),
             "tournament_evidence": str(SUMMARY_CSV),
             "provenance_enabled": not bool(getattr(args, "no_provenance", False)),
             "provenance_bands": PROVENANCE_BANDS,
@@ -1066,6 +1084,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--template-dir", type=Path, default=DEFAULT_TEMPLATE_DIR)
+    parser.add_argument("--target-dir", type=Path, default=TARGET_DIR_FULL8)
+    parser.add_argument("--donor-dir", type=Path, default=DONOR_DIR_FULL8)
+    parser.add_argument(
+        "--variant-folder-prefix",
+        default="HKH_full8",
+        help="Output folder prefix under output-root, e.g. HKH_full8_c02t1_dn.",
+    )
     parser.add_argument(
         "--variants",
         default="raw_target,nspi_timeseries_weighted,agreement_quality_step3,nspi_multi_score_all3",
@@ -1117,6 +1142,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    configure_paths(args.target_dir, args.donor_dir, args.variant_folder_prefix)
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     unknown = [v for v in variants if v not in VARIANTS]
     if unknown:
@@ -1148,6 +1174,9 @@ def main() -> None:
     print(f"targets={ids}")
     print(f"tiles={len(templates)} indices={[t.index for t in templates[:10]]}{'...' if len(templates) > 10 else ''}")
     print(f"output_root={args.output_root}")
+    print(f"target_dir={TARGET_DIR_FULL8}")
+    print(f"donor_dir={DONOR_DIR_FULL8}")
+    print(f"variant_folders={[VARIANTS[v] for v in variants]}")
     if args.dry_run:
         return
 

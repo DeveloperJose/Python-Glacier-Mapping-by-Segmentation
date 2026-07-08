@@ -25,6 +25,8 @@ GPU=0
 MLFLOW_URI="https://mlflow.josegperez.com/"
 DRY_RUN=false
 PAUSE_SECONDS=60
+NTFY_TOPIC=""
+NTFY_URL="https://ntfy.sh"
 
 # New priority and filtering options
 TASK_FILTER=""                # Empty = all tasks
@@ -81,6 +83,52 @@ format_duration() {
     fi
 }
 
+ntfy_publish_url() {
+    if [[ "$NTFY_TOPIC" =~ ^https?:// ]]; then
+        printf "%s" "$NTFY_TOPIC"
+    else
+        printf "%s/%s" "${NTFY_URL%/}" "$NTFY_TOPIC"
+    fi
+}
+
+get_host_name() {
+    if [ -n "${HOSTNAME:-}" ]; then
+        printf "%s" "$HOSTNAME"
+    elif [ -r /etc/hostname ]; then
+        tr -d '\n' </etc/hostname
+    elif command -v uname >/dev/null 2>&1; then
+        uname -n
+    else
+        printf "unknown"
+    fi
+}
+
+send_ntfy() {
+    local title="$1"
+    local message="$2"
+    local tags="${3:-glacier,training}"
+    local priority="${4:-default}"
+
+    if [ -z "$NTFY_TOPIC" ]; then
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        log_only "ntfy notification skipped: curl not found"
+        return 0
+    fi
+
+    local url
+    url=$(ntfy_publish_url)
+
+    curl -fsS \
+        -H "Title: $title" \
+        -H "Tags: $tags" \
+        -H "Priority: $priority" \
+        -d "$message" \
+        "$url" >/dev/null 2>&1 || log_only "ntfy notification failed: $title"
+}
+
 show_usage() {
     cat <<EOF
 ${BOLD}Sequential Training Script for Glacier Mapping${NC}
@@ -96,6 +144,9 @@ ${BOLD}BASIC OPTIONS:${NC}
     --dry-run           Show what would run without executing
     --pause N           Pause N seconds between runs (default: 60)
     --mlflow-uri URI    MLflow tracking URI (default: https://mlflow.josegperez.com/)
+    --ntfy-topic TOPIC  Optional ntfy topic for start/end notifications
+                        If TOPIC starts with http(s), use it as full publish URL
+    --ntfy-url URL      ntfy server URL for topic names (default: https://ntfy.sh)
 
 ${BOLD}FILTERING & PRIORITY OPTIONS:${NC}
     --tasks TASKS       Comma-separated tasks to run (default: dci,ci,multi)
@@ -132,6 +183,9 @@ ${BOLD}EXAMPLES:${NC}
 
     # Run with physics+velocity priority (PV configs run first in each task)
     ./run_sequential_training.sh frodo --physics-velocity-priority
+
+    # Notify via ntfy at start and end
+    ./run_sequential_training.sh desktop --ntfy-topic my-training-topic
 
 ${BOLD}DEFAULT EXECUTION ORDER:${NC}
     1. DCI (Debris-Covered Ice) - phys32 → phys64 variants → phys128 → physfull
@@ -380,6 +434,14 @@ while [[ $# -gt 0 ]]; do
         MLFLOW_URI="$2"
         shift 2
         ;;
+    --ntfy-topic)
+        NTFY_TOPIC="$2"
+        shift 2
+        ;;
+    --ntfy-url)
+        NTFY_URL="$2"
+        shift 2
+        ;;
     --tasks)
         TASK_FILTER="$2"
         shift 2
@@ -539,6 +601,7 @@ log "  Exclude base:  $EXCLUDE_BASE"
 log "  Only base:     $ONLY_BASE"
 log "  Dry run:       $DRY_RUN"
 log "  Pause:         ${PAUSE_SECONDS}s between runs"
+log "  ntfy topic:    ${NTFY_TOPIC:-disabled}"
 log "  Log file:      $LOG_FILE"
 log ""
 log "${BOLD}Execution order (${#CONFIG_FILES[@]} configs):${NC}"
@@ -587,6 +650,18 @@ if [ "$DRY_RUN" = true ]; then
     done
     exit 0
 fi
+
+HOST_NAME=$(get_host_name)
+
+send_ntfy \
+    "Glacier training started" \
+    "Server: $SERVER
+Host: $HOST_NAME
+Configs: ${#CONFIG_FILES[@]}
+GPU: $GPU
+Log: $LOG_FILE" \
+    "rocket,glacier" \
+    "default"
 
 ################################################################################
 # Signal Handling
@@ -728,6 +803,35 @@ log ""
 
 log "${BOLD}Full log saved to:${NC} $LOG_FILE"
 print_header ""
+
+if [ "$INTERRUPTED" = true ]; then
+    FINAL_STATUS="interrupted"
+    FINAL_TITLE="Glacier training interrupted"
+    FINAL_TAGS="warning,glacier"
+    FINAL_PRIORITY="high"
+elif [ $FAILED_RUNS -gt 0 ]; then
+    FINAL_STATUS="failed"
+    FINAL_TITLE="Glacier training finished with failures"
+    FINAL_TAGS="x,glacier"
+    FINAL_PRIORITY="high"
+else
+    FINAL_STATUS="success"
+    FINAL_TITLE="Glacier training finished"
+    FINAL_TAGS="white_check_mark,glacier"
+    FINAL_PRIORITY="default"
+fi
+
+send_ntfy \
+    "$FINAL_TITLE" \
+    "Status: $FINAL_STATUS
+Server: $SERVER
+Host: $HOST_NAME
+Successful: $SUCCESSFUL_RUNS/$TOTAL_CONFIGS
+Failed: $FAILED_RUNS
+Duration: $OVERALL_DURATION_FMT
+Log: $LOG_FILE" \
+    "$FINAL_TAGS" \
+    "$FINAL_PRIORITY"
 
 ################################################################################
 # Exit with appropriate code

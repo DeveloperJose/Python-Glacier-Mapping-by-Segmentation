@@ -3,7 +3,7 @@
 
 Evidence base:
 - Legacy GEE script exports LANDSAT/LE07/C01/T1_RT and calls .uint8().
-- New full8 relaxed datasets are C02 Level-2 SR/Kelvin floats.
+- New full8 relaxed datasets are C02 Tier-1 TOA float bands (optical TOA reflectance; thermal brightness temperature).
 - Forensics show legacy optical bands have byte-domain clipping/saturation.
 
 This ablation tests whether remaining legacy advantage is mainly radiometric/domain:

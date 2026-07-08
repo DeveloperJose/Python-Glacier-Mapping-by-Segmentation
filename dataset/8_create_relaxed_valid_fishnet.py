@@ -33,17 +33,36 @@ from rasterio.warp import reproject
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = Path("/home/devj/local-arch/data/HKH_raw")
 TEMPLATE_DIR = RAW_ROOT / "Landsat7_2005"
+VARIANT_SUFFIXES = {
+    "raw_target_relaxed_valid": "raw_target",
+    "agreement_quality_step3_relaxed_valid": "agreement_quality_step3",
+    "nspi_timeseries_weighted_relaxed_valid": "nspi_timeseries_weighted",
+}
+SOURCE_PREFIX = "HKH_full8"
+OUTPUT_PREFIX = "HKH_full8"
 SOURCE_VARIANTS = {
-    "raw_target_relaxed_valid": RAW_ROOT / "HKH_full8_raw_target",
-    "agreement_quality_step3_relaxed_valid": RAW_ROOT / "HKH_full8_agreement_quality_step3",
-    "nspi_timeseries_weighted_relaxed_valid": RAW_ROOT / "HKH_full8_nspi_timeseries_weighted",
+    key: RAW_ROOT / f"{SOURCE_PREFIX}_{suffix}"
+    for key, suffix in VARIANT_SUFFIXES.items()
 }
 OUTPUT_VARIANTS = {
-    "raw_target_relaxed_valid": RAW_ROOT / "HKH_full8_raw_target_relaxed_valid",
-    "agreement_quality_step3_relaxed_valid": RAW_ROOT / "HKH_full8_agreement_quality_step3_relaxed_valid",
-    "nspi_timeseries_weighted_relaxed_valid": RAW_ROOT / "HKH_full8_nspi_timeseries_weighted_relaxed_valid",
+    key: RAW_ROOT / f"{OUTPUT_PREFIX}_{suffix}_relaxed_valid"
+    for key, suffix in VARIANT_SUFFIXES.items()
 }
 FULL8_BANDS = ["B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7"]
+
+
+def configure_variants(source_prefix: str, output_prefix: str) -> None:
+    global SOURCE_PREFIX, OUTPUT_PREFIX, SOURCE_VARIANTS, OUTPUT_VARIANTS
+    SOURCE_PREFIX = source_prefix
+    OUTPUT_PREFIX = output_prefix
+    SOURCE_VARIANTS = {
+        key: RAW_ROOT / f"{source_prefix}_{suffix}"
+        for key, suffix in VARIANT_SUFFIXES.items()
+    }
+    OUTPUT_VARIANTS = {
+        key: RAW_ROOT / f"{output_prefix}_{suffix}_relaxed_valid"
+        for key, suffix in VARIANT_SUFFIXES.items()
+    }
 
 
 def load_fishnet6():
@@ -100,6 +119,8 @@ def initialize_outputs(templates, overwrite: bool) -> None:
             "valid_mask_policy": "data_present_or_existing_fill_not_strict_qa_clear",
             "qa_policy": "QA_PIXEL/QA_RADSAT not used as hard output mask",
             "template_dir": str(TEMPLATE_DIR),
+            "source_prefix": SOURCE_PREFIX,
+            "output_prefix": OUTPUT_PREFIX,
         }
         (folder / "policy.json").write_text(json.dumps(policy, indent=2) + "\n")
 
@@ -197,9 +218,14 @@ def preserve_existing_fills(tile) -> dict[str, int]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--source-prefix", default="HKH_full8")
+    parser.add_argument("--output-prefix", default=None)
     parser.add_argument("--max-tiles", type=int, default=None)
     parser.add_argument("--tile-indices", default=None)
     args = parser.parse_args()
+    if args.output_prefix is None:
+        args.output_prefix = args.source_prefix
+    configure_variants(args.source_prefix, args.output_prefix)
 
     fishnet6 = load_fishnet6()
     targets = fishnet6.load_targets_meta()
