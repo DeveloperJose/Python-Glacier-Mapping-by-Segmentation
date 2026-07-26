@@ -204,9 +204,10 @@ def compute_landsat_valid_mask(tiff, landsat_raw: np.ndarray) -> np.ndarray:
 
 def clip_velocity_channels(
     velocity_np: np.ndarray,
+    band_names: list[str],
     max_velocity_m_per_year: float | None = DEFAULT_VELOCITY_CLIP_M_PER_YEAR,
 ) -> np.ndarray:
-    """Clip velocity magnitude and vector components while preserving mask semantics."""
+    """Clip physical velocity values while preserving quality/mask semantics."""
     if max_velocity_m_per_year is None:
         return velocity_np
 
@@ -215,18 +216,28 @@ def clip_velocity_channels(
         return velocity_np
 
     clipped = velocity_np.copy()
-    velocity_mask = clipped[:, :, 3] > 0.5
+    mask_name = "velocity_valid" if "velocity_valid" in band_names else "velocity_mask"
+    mask_idx = band_names.index(mask_name)
+    velocity_mask = clipped[:, :, mask_idx] > 0.5
 
-    clipped[:, :, 0] = np.where(
-        velocity_mask, np.clip(clipped[:, :, 0], 0.0, max_velocity), 0.0
-    )
+    speed_name = "velocity_speed" if "velocity_speed" in band_names else "velocity"
+    if speed_name in band_names:
+        speed_idx = band_names.index(speed_name)
+        clipped[:, :, speed_idx] = np.where(
+            velocity_mask,
+            np.clip(clipped[:, :, speed_idx], 0.0, max_velocity),
+            0.0,
+        )
 
-    vx = clipped[:, :, 1]
-    vy = clipped[:, :, 2]
-    mag_xy = np.sqrt(vx**2 + vy**2)
-    scale = np.minimum(1.0, max_velocity / (mag_xy + 1e-8))
-    clipped[:, :, 1] = np.where(velocity_mask, vx * scale, 0.0)
-    clipped[:, :, 2] = np.where(velocity_mask, vy * scale, 0.0)
+    if "velocity_x" in band_names and "velocity_y" in band_names:
+        vx_idx = band_names.index("velocity_x")
+        vy_idx = band_names.index("velocity_y")
+        vx = clipped[:, :, vx_idx]
+        vy = clipped[:, :, vy_idx]
+        mag_xy = np.sqrt(vx**2 + vy**2)
+        scale = np.minimum(1.0, max_velocity / (mag_xy + 1e-8))
+        clipped[:, :, vx_idx] = np.where(velocity_mask, vx * scale, 0.0)
+        clipped[:, :, vy_idx] = np.where(velocity_mask, vy * scale, 0.0)
 
     return clipped
 
@@ -272,16 +283,44 @@ def get_tiff_np(
         if velocity_fname.exists():
             velocity = read_tiff(velocity_fname)
 
+            descriptions = list(velocity.descriptions)
+            legacy_schema = velocity.count == 4 and not all(descriptions)
+            velocity_band_names = (
+                ["velocity", "velocity_x", "velocity_y", "velocity_mask"]
+                if legacy_schema
+                else [
+                    str(name) if name else f"velocity_band_{idx + 1}"
+                    for idx, name in enumerate(descriptions)
+                ]
+            )
+            mask_name = (
+                "velocity_valid"
+                if "velocity_valid" in velocity_band_names
+                else "velocity_mask"
+            )
+            if mask_name not in velocity_band_names:
+                raise ValueError(
+                    f"Velocity product lacks validity band: {velocity_fname}; "
+                    f"bands={velocity_band_names}"
+                )
+            mask_idx = velocity_band_names.index(mask_name)
+
             if _same_raster_grid(velocity, tiff):
-                velocity_np = np.transpose(velocity.read(), (1, 2, 0)).astype(np.float32)
+                velocity_np = np.transpose(velocity.read(), (1, 2, 0)).astype(
+                    np.float32
+                )
             else:
                 from rasterio.warp import reproject, Resampling
 
-                destination = np.zeros((4, tiff.height, tiff.width), dtype=np.float32)
+                destination = np.zeros(
+                    (velocity.count, tiff.height, tiff.width), dtype=np.float32
+                )
 
-                for band_idx in range(4):
+                for band_idx in range(velocity.count):
                     resampling_method = (
-                        Resampling.nearest if band_idx == 3 else Resampling.bilinear
+                        Resampling.nearest
+                        if band_idx == mask_idx
+                        else Resampling.bilinear
                     )
                     reproject(
                         source=rasterio.band(velocity, band_idx + 1),
@@ -296,20 +335,33 @@ def get_tiff_np(
                 velocity_np = np.transpose(destination, (1, 2, 0)).astype(np.float32)
 
             velocity_np = np.nan_to_num(velocity_np)
-
-            velocity_np[:, :, 3] = np.round(velocity_np[:, :, 3]).clip(0, 1)
-            invalid = velocity_np[:, :, 3] == 0
-            if np.any(invalid):
-                velocity_np[invalid, 0] = 0.0
-                velocity_np[invalid, 1] = 0.0
-                velocity_np[invalid, 2] = 0.0
-            velocity_np = clip_velocity_channels(velocity_np, velocity_clip_m_per_year)
+            velocity_np[:, :, mask_idx] = np.round(velocity_np[:, :, mask_idx]).clip(
+                0, 1
+            )
+            invalid = velocity_np[:, :, mask_idx] == 0
+            value_indices = [
+                idx for idx, name in enumerate(velocity_band_names) if name != mask_name
+            ]
+            for value_idx in value_indices:
+                velocity_np[:, :, value_idx] = np.where(
+                    invalid, 0.0, velocity_np[:, :, value_idx]
+                )
+            velocity_np = clip_velocity_channels(
+                velocity_np, velocity_band_names, velocity_clip_m_per_year
+            )
 
             if verbose:
                 log.debug(f"Loaded velocity data: shape={velocity_np.shape}")
         else:
+            velocity_band_names = [
+                "velocity",
+                "velocity_x",
+                "velocity_y",
+                "velocity_mask",
+            ]
             velocity_np = np.zeros(
-                (tiff_np.shape[0], tiff_np.shape[1], 4), dtype=np.float32
+                (tiff_np.shape[0], tiff_np.shape[1], len(velocity_band_names)),
+                dtype=np.float32,
             )
             if verbose:
                 log.warning(
@@ -317,7 +369,7 @@ def get_tiff_np(
                 )
 
         tiff_np = np.concatenate((tiff_np, velocity_np), axis=2)
-        band_names.extend(["velocity", "velocity_x", "velocity_y", "velocity_mask"])
+        band_names.extend(velocity_band_names)
 
     if add_ndvi:
         tiff_np = add_index(tiff_np, index1=3, index2=2)
@@ -331,7 +383,9 @@ def get_tiff_np(
     if add_hsv:
         rgb_img = tiff_np[:, :, [4, 3, 1]].astype(np.float32, copy=False)
         finite_rgb = rgb_img[np.isfinite(rgb_img)]
-        rgb_scale = 255.0 if finite_rgb.size and np.nanpercentile(finite_rgb, 99) > 2.0 else 1.0
+        rgb_scale = (
+            255.0 if finite_rgb.size and np.nanpercentile(finite_rgb, 99) > 2.0 else 1.0
+        )
         rgb_img = np.clip(rgb_img / rgb_scale, 0.0, 1.0)
         hsv_img = rgb2hsv(rgb_img[:, :, [2, 1, 0]])
         tiff_np = np.concatenate((tiff_np, hsv_img), axis=2)

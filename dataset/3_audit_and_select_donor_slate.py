@@ -17,6 +17,7 @@ we need more candidates.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -127,8 +128,33 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def read_targets() -> dict[int, dict[str, Any]]:
-    return {int(row["id"]): row for row in json.loads(TARGETS_JSON.read_text(encoding="utf-8"))}
+def read_targets(overrides_json: Path | None = None) -> dict[int, dict[str, Any]]:
+    targets = {
+        int(row["id"]): row
+        for row in json.loads(TARGETS_JSON.read_text(encoding="utf-8"))
+    }
+    if overrides_json is not None:
+        for row in json.loads(overrides_json.read_text(encoding="utf-8")):
+            target_id = int(row["id"])
+            if target_id not in targets:
+                raise ValueError(f"Override target id not in base targets: {target_id}")
+            targets[target_id] = row
+    return targets
+
+
+def configure_paths(input_dir: Path, output_dir: Path) -> None:
+    global METRICS_CSV, STEP2_SUMMARY_CSV, OUTPUT_DIR
+    global AUDIT_SUMMARY_JSON, FLAGS_CSV, SCORES_CSV, NARROW_SLATE_CSV
+    global TARGET_SUMMARY_CSV, STORAGE_ESTIMATE_JSON
+    METRICS_CSV = input_dir / "2_donor_metrics.csv"
+    STEP2_SUMMARY_CSV = input_dir / "2_target_summary.csv"
+    OUTPUT_DIR = output_dir
+    AUDIT_SUMMARY_JSON = OUTPUT_DIR / "3_audit_summary.json"
+    FLAGS_CSV = OUTPUT_DIR / "3_metric_flags.csv"
+    SCORES_CSV = OUTPUT_DIR / "3_donor_scores.csv"
+    NARROW_SLATE_CSV = OUTPUT_DIR / "3_donor_slate_narrow.csv"
+    TARGET_SUMMARY_CSV = OUTPUT_DIR / "3_target_slate_summary.csv"
+    STORAGE_ESTIMATE_JSON = OUTPUT_DIR / "3_storage_estimate.json"
 
 
 def f(row: dict[str, Any], key: str, default: float = math.nan) -> float:
@@ -188,10 +214,7 @@ def score_row(row: dict[str, str], target: dict[str, Any]) -> dict[str, Any]:
     qa_balanced = clamp01(f(row, "qa_balanced"))
 
     coverage_score = (
-        0.35 * qa_gap
-        + 0.20 * simple_gap
-        + 0.25 * qa_overlap
-        + 0.20 * simple_overlap
+        0.35 * qa_gap + 0.20 * simple_gap + 0.25 * qa_overlap + 0.20 * simple_overlap
     )
     gap_score = 0.55 * qa_gap + 0.30 * simple_gap + 0.15 * qa_balanced
 
@@ -306,13 +329,19 @@ def select_narrow(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped[(row["target_id"], row["donor_kind"])].append(row)
 
     selected = []
-    for (_target_id, _kind), rows in sorted(grouped.items(), key=lambda item: (int(item[0][0]), item[0][1])):
+    for (_target_id, _kind), rows in sorted(
+        grouped.items(), key=lambda item: (int(item[0][0]), item[0][1])
+    ):
         strict = [row for row in rows if not row["caution"]]
         pool = strict if strict else rows
-        chosen = sorted(pool, key=lambda row: f(row, "family_score"), reverse=True)[:MAX_SELECTED_PER_TARGET_KIND]
+        chosen = sorted(pool, key=lambda row: f(row, "family_score"), reverse=True)[
+            :MAX_SELECTED_PER_TARGET_KIND
+        ]
         for row in chosen:
             row["selected_narrow"] = True
-            row["selection_tier"] = "strict" if row in strict else "relaxed_best_available"
+            row["selection_tier"] = (
+                "strict" if row in strict else "relaxed_best_available"
+            )
             selected.append(row)
     return selected
 
@@ -376,7 +405,9 @@ def build_target_summary(
             "target_pr": targets[target_id]["path_row"],
             "candidate_count": len(target_rows),
             "selected_count": len(selected_rows),
-            "estimated_selected_uncompressed_gib": sum(f(row, "estimated_uncompressed_gib") for row in selected_rows),
+            "estimated_selected_uncompressed_gib": sum(
+                f(row, "estimated_uncompressed_gib") for row in selected_rows
+            ),
             "step2_complete": step2.get("complete", ""),
         }
         for kind in DONOR_KINDS:
@@ -385,9 +416,15 @@ def build_target_summary(
             out[f"{kind}_candidate_count"] = len(kind_rows)
             out[f"{kind}_selected_count"] = len(kind_selected)
             out[f"{kind}_pool_status"] = step2.get(f"{kind}_pool_status", "")
-            out[f"{kind}_best_score"] = max((f(row, "family_score") for row in kind_rows), default=math.nan)
-            out[f"{kind}_selected_date"] = kind_selected[0]["donor_date"] if kind_selected else ""
-            out[f"{kind}_selected_caution"] = kind_selected[0]["caution"] if kind_selected else ""
+            out[f"{kind}_best_score"] = max(
+                (f(row, "family_score") for row in kind_rows), default=math.nan
+            )
+            out[f"{kind}_selected_date"] = (
+                kind_selected[0]["donor_date"] if kind_selected else ""
+            )
+            out[f"{kind}_selected_caution"] = (
+                kind_selected[0]["caution"] if kind_selected else ""
+            )
         rows.append(out)
     return rows
 
@@ -397,7 +434,9 @@ def storage_estimate(
     metrics: list[dict[str, Any]],
     selected: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    all_donor_gib = sum(target_raw_gib(targets[int(row["target_id"])]) for row in metrics)
+    all_donor_gib = sum(
+        target_raw_gib(targets[int(row["target_id"])]) for row in metrics
+    )
     selected_gib = sum(f(row, "estimated_uncompressed_gib") for row in selected)
     target_gib = sum(target_raw_gib(target) for target in targets.values())
     return {
@@ -438,12 +477,20 @@ def audit_summary(
     flags: list[dict[str, Any]],
     step2_summary: list[dict[str, str]],
 ) -> dict[str, Any]:
-    duplicate_keys = [key for key, count in Counter(row["candidate_key"] for row in metrics).items() if count > 1]
+    duplicate_keys = [
+        key
+        for key, count in Counter(row["candidate_key"] for row in metrics).items()
+        if count > 1
+    ]
     selected_by_kind = Counter(row["donor_kind"] for row in selected)
     metrics_by_kind = Counter(row["donor_kind"] for row in metrics)
     selected_cautions = [row for row in selected if row["caution"]]
     weak_pools = {
-        kind: [row["target_id"] for row in step2_summary if row.get(f"{kind}_pool_status") != "ok"]
+        kind: [
+            row["target_id"]
+            for row in step2_summary
+            if row.get(f"{kind}_pool_status") != "ok"
+        ]
         for kind in DONOR_KINDS
     }
     return {
@@ -459,7 +506,13 @@ def audit_summary(
         "flagged_row_count": len(flags),
         "weak_strict_pools": weak_pools,
         "selected_score_quantiles_by_kind": {
-            kind: ratio_quantiles([f(row, "family_score") for row in selected if row["donor_kind"] == kind])
+            kind: ratio_quantiles(
+                [
+                    f(row, "family_score")
+                    for row in selected
+                    if row["donor_kind"] == kind
+                ]
+            )
             for kind in DONOR_KINDS
         },
         "hard_gates": {
@@ -480,13 +533,17 @@ def audit_summary(
     }
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]], preferred_fields: list[str] | None = None) -> None:
+def write_csv(
+    path: Path, rows: list[dict[str, Any]], preferred_fields: list[str] | None = None
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = list(preferred_fields or [])
     for key in sorted({key for row in rows for key in row}):
         if key not in fields:
             fields.append(key)
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=path.parent, delete=False
+    ) as tmp:
         writer = csv.DictWriter(tmp, fieldnames=fields)
         writer.writeheader()
         for row in rows:
@@ -497,7 +554,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]], preferred_fields: list[str
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as tmp:
         json.dump(data, tmp, indent=2)
         tmp.write("\n")
         tmp_path = Path(tmp.name)
@@ -514,10 +573,32 @@ def csv_value(value: Any) -> Any:
     return value
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Audit donor metrics and select slate")
+    parser.add_argument("--input-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--target-overrides-json", type=Path, default=None)
+    parser.add_argument(
+        "--ids",
+        default=None,
+        help="Optional comma-separated target IDs retained in isolated selection.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    targets = read_targets()
-    metrics = read_csv(METRICS_CSV)
-    step2_summary = read_csv(STEP2_SUMMARY_CSV)
+    args = parse_args()
+    configure_paths(args.input_dir, args.output_dir)
+    targets = read_targets(args.target_overrides_json)
+    if args.ids:
+        wanted = {int(value.strip()) for value in args.ids.split(",") if value.strip()}
+        targets = {
+            target_id: row for target_id, row in targets.items() if target_id in wanted
+        }
+    metrics = [row for row in read_csv(METRICS_CSV) if int(row["target_id"]) in targets]
+    step2_summary = [
+        row for row in read_csv(STEP2_SUMMARY_CSV) if int(row["target_id"]) in targets
+    ]
     scored = [score_row(row, targets[int(row["target_id"])]) for row in metrics]
     selected = select_narrow(scored)
     flags = flag_rows(scored)
@@ -525,8 +606,20 @@ def main() -> None:
     storage = storage_estimate(targets, scored, selected)
     audit = audit_summary(targets, scored, selected, flags, step2_summary)
 
-    scored.sort(key=lambda row: (int(row["target_id"]), row["donor_kind"], -f(row, "family_score")))
-    selected.sort(key=lambda row: (int(row["target_id"]), row["donor_kind"], -f(row, "family_score")))
+    scored.sort(
+        key=lambda row: (
+            int(row["target_id"]),
+            row["donor_kind"],
+            -f(row, "family_score"),
+        )
+    )
+    selected.sort(
+        key=lambda row: (
+            int(row["target_id"]),
+            row["donor_kind"],
+            -f(row, "family_score"),
+        )
+    )
 
     write_csv(SCORES_CSV, scored, OUTPUT_SCORE_FIELDS)
     write_csv(NARROW_SLATE_CSV, selected, SLATE_FIELDS)

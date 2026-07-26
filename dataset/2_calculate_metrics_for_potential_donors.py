@@ -132,11 +132,28 @@ def parse_ids(value: str | None) -> set[int]:
     return {int(x.strip()) for x in value.split(",") if x.strip()}
 
 
-def load_targets() -> list[dict[str, Any]]:
+def load_targets(overrides_json: Path | None = None) -> list[dict[str, Any]]:
     if not TARGETS_JSON.exists():
         raise FileNotFoundError(f"Run Step 1 first: {TARGETS_JSON}")
     rows = json.loads(TARGETS_JSON.read_text(encoding="utf-8"))
-    return sorted(rows, key=lambda row: int(row["id"]))
+    targets = {int(row["id"]): row for row in rows}
+    if overrides_json is not None:
+        overrides = json.loads(overrides_json.read_text(encoding="utf-8"))
+        for row in overrides:
+            target_id = int(row["id"])
+            if target_id not in targets:
+                raise ValueError(f"Override target id not in base targets: {target_id}")
+            targets[target_id] = row
+    return sorted(targets.values(), key=lambda row: int(row["id"]))
+
+
+def configure_output_dir(output_dir: Path) -> None:
+    global OUTPUT_DIR, METRICS_JSONL, METRICS_CSV, PROGRESS_JSON, SUMMARY_CSV
+    OUTPUT_DIR = output_dir
+    METRICS_JSONL = OUTPUT_DIR / "2_donor_metrics.jsonl"
+    METRICS_CSV = OUTPUT_DIR / "2_donor_metrics.csv"
+    PROGRESS_JSON = OUTPUT_DIR / "2_donor_metrics_progress.json"
+    SUMMARY_CSV = OUTPUT_DIR / "2_target_summary.csv"
 
 
 def atomic_write_json(path: Path, data: Any) -> None:
@@ -195,7 +212,9 @@ def append_metric_row(row: dict[str, Any]) -> None:
 def rewrite_jsonl_excluding_targets(target_ids: set[int]) -> None:
     if not METRICS_JSONL.exists() or not target_ids:
         return
-    kept = [row for row in iter_metric_rows() if int(row["target_id"]) not in target_ids]
+    kept = [
+        row for row in iter_metric_rows() if int(row["target_id"]) not in target_ids
+    ]
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -252,7 +271,9 @@ def candidate_collection(kind: str, target: dict[str, Any]) -> ee.ImageCollectio
 
     if kind == "lt05":
         start, end = date_window(target["date"], LT05_YEAR_WINDOW)
-        coll = coll.filterDate(start, end).filter(ee.Filter.lte("_doy_diff", LT05_DOY_MAX))
+        coll = coll.filterDate(start, end).filter(
+            ee.Filter.lte("_doy_diff", LT05_DOY_MAX)
+        )
     elif kind == "le07_slc_on":
         coll = coll.filterDate("1999-01-01", LE07_SLC_ON_END_EXCLUSIVE).filter(
             ee.Filter.lte("_doy_diff", LE07_SLC_ON_DOY_MAX)
@@ -295,8 +316,24 @@ def list_candidate_rows(kind: str, target: dict[str, Any]) -> list[dict[str, Any
     return rows
 
 
+def target_metric_collection(target: dict[str, Any]) -> str:
+    """Use TOA consistently for target/donor selection metrics.
+
+    Export product domain may be raw C02/T1 DN, but residual thresholds and donor
+    candidate collections in this script are defined in TOA reflectance units.
+    """
+    sensor = str(target.get("target_sensor", ""))
+    if sensor == "LE07" or str(target["gee_product_id"]).startswith("LE07"):
+        return LE07_COLLECTION
+    if sensor == "LT05" or str(target["gee_product_id"]).startswith("LT05"):
+        return LT05_COLLECTION
+    raise ValueError(f"Cannot infer TOA metric collection for target {target['id']}")
+
+
 def image_by_product(collection: str, product_id: str) -> ee.Image:
-    coll = ee.ImageCollection(collection).filter(ee.Filter.eq("LANDSAT_PRODUCT_ID", product_id))
+    coll = ee.ImageCollection(collection).filter(
+        ee.Filter.eq("LANDSAT_PRODUCT_ID", product_id)
+    )
     return ee.Image(coll.first())
 
 
@@ -309,7 +346,9 @@ def qa_clear_mask(img: ee.Image) -> ee.Image:
     qa_pixel = img.select("QA_PIXEL")
     qa_radsat = img.select("QA_RADSAT")
     bad_pixel_bits = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4)
-    bad_radsat_bits = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 9)
+    bad_radsat_bits = (
+        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 9)
+    )
     qa_clear = qa_pixel.bitwiseAnd(bad_pixel_bits).eq(0)
     unsaturated = qa_radsat.bitwiseAnd(bad_radsat_bits).eq(0)
     return optical.And(qa_clear).And(unsaturated).unmask(0).gt(0)
@@ -358,7 +397,9 @@ def reduce_counts(
         maxPixels=MAX_PIXELS,
         tileScale=TILE_SCALE,
     ).getInfo()
-    return {key: float(stats.get(key) or 0.0) for key in count_img.bandNames().getInfo()}
+    return {
+        key: float(stats.get(key) or 0.0) for key in count_img.bandNames().getInfo()
+    }
 
 
 def normalized_difference(img: ee.Image, a: str, b: str) -> ee.Image:
@@ -378,14 +419,18 @@ def residual_image(target_img: ee.Image, donor_img: ee.Image) -> ee.Image:
         abs_name = f"median_abs_residual_{band}"
         norm_name = f"median_norm_residual_{band}"
         abs_residual = donor_band.subtract(target_band).abs().rename(abs_name)
-        norm_residual = abs_residual.divide(donor_band.add(target_band).abs().add(EPS)).rename(norm_name)
+        norm_residual = abs_residual.divide(
+            donor_band.add(target_band).abs().add(EPS)
+        ).rename(norm_name)
         residuals.extend([abs_residual, norm_residual])
         abs_names.append(abs_name)
         norm_names.append(norm_name)
 
     target_brightness = target_img.select(OPTICAL_BANDS).reduce(ee.Reducer.mean())
     donor_brightness = donor_img.select(OPTICAL_BANDS).reduce(ee.Reducer.mean())
-    residuals.append(donor_brightness.subtract(target_brightness).abs().rename("brightness_residual"))
+    residuals.append(
+        donor_brightness.subtract(target_brightness).abs().rename("brightness_residual")
+    )
 
     target_ndsi = normalized_difference(target_img, "B2", "B5")
     donor_ndsi = normalized_difference(donor_img, "B2", "B5")
@@ -414,9 +459,16 @@ def reduce_spectral(
         maxPixels=MAX_PIXELS,
         tileScale=TILE_SCALE,
     ).getInfo()
-    values = {name: float(stats[name]) if stats.get(name) is not None else math.nan for name in img.bandNames().getInfo()}
-    abs_vals = [values.get(f"median_abs_residual_{band}", math.nan) for band in OPTICAL_BANDS]
-    norm_vals = [values.get(f"median_norm_residual_{band}", math.nan) for band in OPTICAL_BANDS]
+    values = {
+        name: float(stats[name]) if stats.get(name) is not None else math.nan
+        for name in img.bandNames().getInfo()
+    }
+    abs_vals = [
+        values.get(f"median_abs_residual_{band}", math.nan) for band in OPTICAL_BANDS
+    ]
+    norm_vals = [
+        values.get(f"median_norm_residual_{band}", math.nan) for band in OPTICAL_BANDS
+    ]
     values["mean_median_abs_residual"] = mean_ignore_nan(abs_vals)
     values["mean_median_norm_residual"] = mean_ignore_nan(norm_vals)
     return values
@@ -433,9 +485,15 @@ def candidate_key(target_id: int, donor_kind: str, donor_product_id: str) -> str
     return f"{target_id:02d}|{donor_kind}|{donor_product_id}"
 
 
-def calculate_metrics(target: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    target_img = image_by_product(target["target_collection"], target["gee_product_id"])
-    donor_img = image_by_product(candidate["donor_collection"], candidate["donor_product_id"])
+def calculate_metrics(
+    target: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    target_img = image_by_product(
+        target_metric_collection(target), target["gee_product_id"]
+    )
+    donor_img = image_by_product(
+        candidate["donor_collection"], candidate["donor_product_id"]
+    )
     domain = ee.Geometry(target["target_domain_geojson"])
     crs = target["export_crs"]
     transform = [float(x) for x in target["export_crs_transform"]]
@@ -462,16 +520,21 @@ def calculate_metrics(target: dict[str, Any], candidate: dict[str, Any]) -> dict
         "target_product_id": target["gee_product_id"],
         "target_filename": target["filename_target"],
         **candidate,
-        "candidate_key": candidate_key(int(target["id"]), candidate["donor_kind"], candidate["donor_product_id"]),
-        **{key: counts[key] for key in [
-            "target_domain_pixel_count",
-            "target_present_pixel_count",
-            "target_gap_pixel_count",
-            "target_clear_pixel_count",
-            "donor_present_pixel_count",
-            "donor_clear_pixel_count",
-            "spectral_overlap_pixel_count",
-        ]},
+        "candidate_key": candidate_key(
+            int(target["id"]), candidate["donor_kind"], candidate["donor_product_id"]
+        ),
+        **{
+            key: counts[key]
+            for key in [
+                "target_domain_pixel_count",
+                "target_present_pixel_count",
+                "target_gap_pixel_count",
+                "target_clear_pixel_count",
+                "donor_present_pixel_count",
+                "donor_clear_pixel_count",
+                "spectral_overlap_pixel_count",
+            ]
+        },
         "simple_gap_coverage": simple_gap,
         "qa_gap_coverage": qa_gap,
         "simple_overlap_coverage": simple_overlap,
@@ -489,12 +552,18 @@ def calculate_metrics(target: dict[str, Any], candidate: dict[str, Any]) -> dict
 
 def write_metrics_csv(rows: list[dict[str, Any]]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    all_fields = list(dict.fromkeys(CSV_FIELDS + sorted({key for row in rows for key in row})))
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=OUTPUT_DIR, delete=False) as tmp:
+    all_fields = list(
+        dict.fromkeys(CSV_FIELDS + sorted({key for row in rows for key in row}))
+    )
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=OUTPUT_DIR, delete=False
+    ) as tmp:
         writer = csv.DictWriter(tmp, fieldnames=all_fields)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: csv_value(row.get(field, "")) for field in all_fields})
+            writer.writerow(
+                {field: csv_value(row.get(field, "")) for field in all_fields}
+            )
         tmp_path = Path(tmp.name)
     tmp_path.replace(METRICS_CSV)
 
@@ -513,8 +582,12 @@ def pool_status(count: int, complete: bool) -> str:
     return "ok" if count else "weak_empty"
 
 
-def write_summary(targets: list[dict[str, Any]], rows: list[dict[str, Any]], progress: dict[str, Any]) -> None:
-    counts_by_target_kind: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+def write_summary(
+    targets: list[dict[str, Any]], rows: list[dict[str, Any]], progress: dict[str, Any]
+) -> None:
+    counts_by_target_kind: dict[int, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
     for row in rows:
         counts_by_target_kind[int(row["target_id"])][row["donor_kind"]] += 1
 
@@ -531,13 +604,17 @@ def write_summary(targets: list[dict[str, Any]], rows: list[dict[str, Any]], pro
         "le07_slc_off_pool_status",
         "complete",
     ]
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=OUTPUT_DIR, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=OUTPUT_DIR, delete=False
+    ) as tmp:
         writer = csv.DictWriter(tmp, fieldnames=fields)
         writer.writeheader()
         for target in targets:
             target_id = int(target["id"])
             counts = counts_by_target_kind[target_id]
-            complete = bool(progress.get("targets", {}).get(f"{target_id:02d}", {}).get("complete"))
+            complete = bool(
+                progress.get("targets", {}).get(f"{target_id:02d}", {}).get("complete")
+            )
             row = {
                 "target_id": target_id,
                 "target_scene": target["scene"],
@@ -547,8 +624,12 @@ def write_summary(targets: list[dict[str, Any]], rows: list[dict[str, Any]], pro
                 "le07_slc_on_candidate_count": counts.get("le07_slc_on", 0),
                 "le07_slc_off_candidate_count": counts.get("le07_slc_off", 0),
                 "lt05_pool_status": pool_status(counts.get("lt05", 0), complete),
-                "le07_slc_on_pool_status": pool_status(counts.get("le07_slc_on", 0), complete),
-                "le07_slc_off_pool_status": pool_status(counts.get("le07_slc_off", 0), complete),
+                "le07_slc_on_pool_status": pool_status(
+                    counts.get("le07_slc_on", 0), complete
+                ),
+                "le07_slc_off_pool_status": pool_status(
+                    counts.get("le07_slc_off", 0), complete
+                ),
                 "complete": complete,
             }
             writer.writerow(row)
@@ -556,8 +637,8 @@ def write_summary(targets: list[dict[str, Any]], rows: list[dict[str, Any]], pro
     tmp_path.replace(SUMMARY_CSV)
 
 
-def rebuild_aggregate_outputs() -> None:
-    targets = load_targets()
+def rebuild_aggregate_outputs(overrides_json: Path | None = None) -> None:
+    targets = load_targets(overrides_json)
     progress = load_progress()
     rows = iter_metric_rows()
     write_metrics_csv(rows)
@@ -567,28 +648,55 @@ def rebuild_aggregate_outputs() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Calculate donor candidate metrics in GEE")
+    parser = argparse.ArgumentParser(
+        description="Calculate donor candidate metrics in GEE"
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--all", action="store_true", help="Process all targets")
-    group.add_argument("--ids", type=str, help="Comma-separated target IDs, e.g. 04,16,26")
-    parser.add_argument("--force-ids", type=str, help="Comma-separated target IDs to recompute")
-    parser.add_argument("--rebuild-csv", action="store_true", help="Rebuild CSV/summary from JSONL and exit")
-    parser.add_argument("--list", action="store_true", help="List target IDs from Step 1 and exit")
+    group.add_argument(
+        "--ids", type=str, help="Comma-separated target IDs, e.g. 04,16,26"
+    )
+    parser.add_argument(
+        "--force-ids", type=str, help="Comma-separated target IDs to recompute"
+    )
+    parser.add_argument(
+        "--rebuild-csv",
+        action="store_true",
+        help="Rebuild CSV/summary from JSONL and exit",
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="List target IDs from Step 1 and exit"
+    )
+    parser.add_argument(
+        "--target-overrides-json",
+        type=Path,
+        default=None,
+        help="Optional target metadata overrides keyed by id.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="Isolated output directory; avoids overwriting canonical donor evidence.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    targets = load_targets()
+    configure_output_dir(args.output_dir)
+    targets = load_targets(args.target_overrides_json)
     targets_by_id = {int(row["id"]): row for row in targets}
 
     if args.list:
         for target in targets:
-            print(f"{int(target['id']):02d} {target['scene']} {target['gee_product_id']}")
+            print(
+                f"{int(target['id']):02d} {target['scene']} {target['gee_product_id']}"
+            )
         return
 
     if args.rebuild_csv:
-        rebuild_aggregate_outputs()
+        rebuild_aggregate_outputs(args.target_overrides_json)
         return
 
     requested = set(targets_by_id) if args.all else parse_ids(args.ids)
@@ -630,7 +738,9 @@ def main() -> None:
 
         completed_for_target = 0
         for idx, candidate in enumerate(candidates, start=1):
-            key = candidate_key(target_id, candidate["donor_kind"], candidate["donor_product_id"])
+            key = candidate_key(
+                target_id, candidate["donor_kind"], candidate["donor_product_id"]
+            )
             if key in keys:
                 completed_for_target += 1
                 continue
@@ -653,7 +763,7 @@ def main() -> None:
         save_progress(progress)
         print(f"complete {target_key}: {completed_for_target}/{len(candidates)}")
 
-    rebuild_aggregate_outputs()
+    rebuild_aggregate_outputs(args.target_overrides_json)
 
 
 if __name__ == "__main__":

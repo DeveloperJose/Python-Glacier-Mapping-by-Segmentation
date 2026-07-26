@@ -6,10 +6,11 @@
 
 ## Agent Execution Policy
 
-- Agents do **not** have permission to run training scripts.
+- Agents do **not** have permission to run training scripts by default.
+- User may grant explicit, temporary authorization to launch a specified training command or batch. Treat authorization as limited to command(s), scope, and time stated by user; do not start additional training after authorized work completes without new permission.
 - Agents may prepare configs, inspect past outputs, run analysis, run prediction, and run tests unless the user says otherwise.
-- All training runs, including `scripts/train.py` and `run_sequential_training.sh`, are user-executed only.
-- If a task would require new training, the agent must stop at config preparation and tell the user exactly what to run.
+- Without explicit authorization, all training runs, including `scripts/train.py` and `run_sequential_training.sh`, are user-executed only.
+- If training requires new work and no authorization is given, stop at config preparation and state exact command to run.
 
 ### Environment Setup
 ```bash

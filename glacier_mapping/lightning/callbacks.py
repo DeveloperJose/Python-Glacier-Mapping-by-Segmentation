@@ -214,7 +214,17 @@ class TestEvaluationCallback(Callback):
                     best_model_path
                 )
                 module_to_eval.to(pl_module.device)
-                module_to_eval.eval()
+                if getattr(module_to_eval, "aryal_2023_behavior", False):
+                    # Aryal unet_predict.py rebuilds the model with dropout near
+                    # zero and never calls eval(); BatchNorm uses per-slice stats.
+                    import torch
+
+                    for child in module_to_eval.model.modules():
+                        if isinstance(child, (torch.nn.Dropout, torch.nn.Dropout2d)):
+                            child.p = 1e-8
+                    module_to_eval.train()
+                else:
+                    module_to_eval.eval()
                 log.info(
                     f"Loaded best checkpoint for final test eval: {best_model_path}"
                 )
@@ -252,8 +262,7 @@ class TestEvaluationCallback(Callback):
                 prebatched_X = np.load(x_path, mmap_mode="r")
                 prebatched_y = np.load(y_path, mmap_mode="r")
                 test_tiles_all = [
-                    Path(data_dir / f"sample_{i:06d}")
-                    for i in range(len(prebatched_X))
+                    Path(data_dir / f"sample_{i:06d}") for i in range(len(prebatched_X))
                 ]
                 is_prebatched = True
             else:
@@ -305,9 +314,7 @@ class TestEvaluationCallback(Callback):
             else:
                 if x_path not in prediction_cache:
                     x = np.load(x_path)
-                    y_pred, invalid_mask = predict_slice(
-                        pl_module, x, fill_holes=True
-                    )
+                    y_pred, invalid_mask = predict_slice(pl_module, x, fill_holes=True)
                 else:
                     y_pred, invalid_mask = prediction_cache[x_path]
 

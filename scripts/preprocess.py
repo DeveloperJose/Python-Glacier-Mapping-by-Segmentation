@@ -74,6 +74,30 @@ PACKED_RECIPES: dict[str, list[str]] = {
         + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
         + ["velocity", "velocity_mask"]
     ),
+    "comprehensive_v3_landsat_dem_velocity_speed_v2": (
+        CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
+        + ["velocity_speed", "velocity_valid"]
+    ),
+    "comprehensive_v3_landsat_dem_velocity_quality_v2": (
+        CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["velocity_quality_v2"]["names"]
+    ),
+    "c02t1_dn_agreement_ldem_v2_baseline": (
+        CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
+    ),
+    "c02t1_dn_agreement_ldem_v2_speed": (
+        CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
+        + ["velocity_speed", "velocity_valid"]
+    ),
+    "c02t1_dn_agreement_ldem_v2_quality": (
+        CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
+        + CHANNEL_GROUP_DEFINITIONS["velocity_quality_v2"]["names"]
+    ),
     "comprehensive_v3_landsat_dem_flowacc_velmag": (
         CHANNEL_GROUP_DEFINITIONS["landsat"]["names"]
         + CHANNEL_GROUP_DEFINITIONS["dem"]["names"]
@@ -123,9 +147,22 @@ def compute_model_visible_normalization(
     mins = np.full(channel_count, np.inf, dtype=np.float64)
     maxs = np.full(channel_count, -np.inf, dtype=np.float64)
 
-    velocity_value_names = {"velocity", "velocity_x", "velocity_y"}
+    velocity_value_names = {
+        "velocity",
+        "velocity_x",
+        "velocity_y",
+        "velocity_speed",
+        "velocity_count",
+        "velocity_error",
+        "velocity_relative_error",
+    }
+    velocity_mask_name = (
+        "velocity_valid" if "velocity_valid" in band_names else "velocity_mask"
+    )
     velocity_mask_idx = (
-        band_names.index("velocity_mask") if "velocity_mask" in band_names else None
+        band_names.index(velocity_mask_name)
+        if velocity_mask_name in band_names
+        else None
     )
 
     tiff_files = sorted(split_dir.glob("tiff_*.npy"))
@@ -195,12 +232,24 @@ def normalize_slice_for_v3(
     if np.any(no_norm_mask):
         normalized[:, :, no_norm_mask] = data[:, :, no_norm_mask]
 
-    if "velocity_mask" in band_names:
-        velocity_mask_idx = band_names.index("velocity_mask")
+    velocity_mask_name = (
+        "velocity_valid" if "velocity_valid" in band_names else "velocity_mask"
+    )
+    if velocity_mask_name in band_names:
+        velocity_mask_idx = band_names.index(velocity_mask_name)
         velocity_value_indices = [
             idx
             for idx, name in enumerate(band_names)
-            if name in {"velocity", "velocity_x", "velocity_y"}
+            if name
+            in {
+                "velocity",
+                "velocity_x",
+                "velocity_y",
+                "velocity_speed",
+                "velocity_count",
+                "velocity_error",
+                "velocity_relative_error",
+            }
         ]
         if velocity_value_indices:
             missing_velocity = normalized[:, :, velocity_mask_idx] <= 0.5
@@ -370,7 +419,11 @@ def pack_recipe_split(
         "y": target_y_path.name,
         "num_samples": int(n),
         "shape": [int(n), len(channel_indices), int(h), int(w)],
-        "label_shape": [int(source_y.shape[0]), int(source_y.shape[1]), int(source_y.shape[2])],
+        "label_shape": [
+            int(source_y.shape[0]),
+            int(source_y.shape[1]),
+            int(source_y.shape[2]),
+        ],
         "dtype": {"x": str(np.dtype(x_dtype)), "y": str(source_y.dtype)},
         "channels": channel_names,
         "source_channel_indices": channel_indices,

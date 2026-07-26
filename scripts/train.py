@@ -49,8 +49,13 @@ warnings.filterwarnings(
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    if override.get("_replace_", False):
+        return {key: value for key, value in override.items() if key != "_replace_"}
+
     result = base.copy()
     for key, value in override.items():
+        if key == "_replace_":
+            continue
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = deep_merge(result[key], value)
         else:
@@ -662,8 +667,10 @@ def main():
         pin_memory=loader_opts.get("pin_memory", True),
         persistent_workers=loader_opts.get("persistent_workers", None),
         prefetch_factor=loader_opts.get("prefetch_factor", None),
-        seed=seed,
+        seed=int(loader_opts.get("seed", seed)),
         augmentation_seed=augmentation_seed,
+        val_shuffle=bool(loader_opts.get("val_shuffle", False)),
+        shared_loader_generator=bool(loader_opts.get("shared_loader_generator", False)),
     )
 
     log.info("Creating model...")
@@ -863,6 +870,7 @@ def main():
         logger=loggers,
         callbacks=callbacks,
         precision=training_opts.get("precision", "16-mixed"),
+        accumulate_grad_batches=int(training_opts.get("accumulate_grad_batches", 1)),
         log_every_n_steps=training_opts.get("log_every_n_steps", 10),
         val_check_interval=1.0,
         check_val_every_n_epoch=training_opts.get("check_val_every_n_epoch", 1),

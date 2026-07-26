@@ -65,18 +65,31 @@ def parse_ids(value: str | None) -> set[int]:
     return {int(x.strip()) for x in value.split(",") if x.strip()}
 
 
-def load_targets() -> dict[int, dict[str, Any]]:
+def load_targets(overrides_json: Path | None = None) -> dict[int, dict[str, Any]]:
     rows = json.loads(TARGETS_JSON.read_text(encoding="utf-8"))
-    return {int(row["id"]): row for row in rows}
+    targets = {int(row["id"]): row for row in rows}
+    if overrides_json is not None:
+        overrides = json.loads(overrides_json.read_text(encoding="utf-8"))
+        for row in overrides:
+            target_id = int(row["id"])
+            if target_id not in targets:
+                raise ValueError(f"Override target id not in base targets: {target_id}")
+            targets[target_id] = row
+    return targets
 
 
-def load_slate() -> list[dict[str, str]]:
-    with SLATE_CSV.open(newline="", encoding="utf-8") as handle:
+def load_slate(slate_csv: Path = SLATE_CSV) -> list[dict[str, str]]:
+    with slate_csv.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
 
-def domain_manifest_paths(product_domain: str) -> tuple[Path, Path]:
+def domain_manifest_paths(
+    product_domain: str, manifest_tag: str | None = None
+) -> tuple[Path, Path]:
     suffix = PRODUCT_DOMAINS[product_domain]["manifest_suffix"]
+    if manifest_tag:
+        safe_tag = manifest_tag if manifest_tag.startswith("_") else f"_{manifest_tag}"
+        suffix = f"{suffix}{safe_tag}"
     return (
         Path(f"dataset/outputs/4_export_manifest{suffix}.json"),
         Path(f"dataset/outputs/4_export_manifest{suffix}.csv"),
@@ -108,7 +121,13 @@ def standard_image_bands(img: ee.Image, collection: str) -> ee.Image:
 
 
 def simple_valid_mask(img: ee.Image, collection: str) -> ee.Image:
-    return standard_image_bands(img, collection).mask().reduce(ee.Reducer.min()).unmask(0, sameFootprint=False).gt(0)
+    return (
+        standard_image_bands(img, collection)
+        .mask()
+        .reduce(ee.Reducer.min())
+        .unmask(0, sameFootprint=False)
+        .gt(0)
+    )
 
 
 def qa_clear_mask(img: ee.Image, collection: str) -> ee.Image:
@@ -151,7 +170,9 @@ def raw_stack(img: ee.Image, collection: str) -> ee.Image:
 
 
 def image_by_product(collection: str, product_id: str) -> ee.Image:
-    coll = ee.ImageCollection(collection).filter(ee.Filter.eq("LANDSAT_PRODUCT_ID", product_id))
+    coll = ee.ImageCollection(collection).filter(
+        ee.Filter.eq("LANDSAT_PRODUCT_ID", product_id)
+    )
     return ee.Image(coll.first())
 
 
@@ -181,7 +202,12 @@ def export_region(
     )
 
 
-def target_export_row(target: dict[str, Any], folder: str, product_domain: str) -> dict[str, Any]:
+def target_export_row(
+    target: dict[str, Any],
+    folder: str,
+    product_domain: str,
+    local_root: str | None = None,
+) -> dict[str, Any]:
     date = target["date"].replace("-", "")
     name = f"{int(target['id']):02d}_target_{date}"
     return {
@@ -199,12 +225,18 @@ def target_export_row(target: dict[str, Any], folder: str, product_domain: str) 
         "product_domain": product_domain,
         "description": name,
         "drive_folder": folder,
-        "expected_local_path": f"{PRODUCT_DOMAINS[product_domain]['local_root']}/targets/{name}.tif",
+        "expected_local_path": f"{local_root or PRODUCT_DOMAINS[product_domain]['local_root']}/targets/{name}.tif",
         "thermal_mapping": "LE07 real B6_VCID_1/B6_VCID_2",
     }
 
 
-def donor_export_row(target: dict[str, Any], donor: dict[str, str], folder: str, product_domain: str) -> dict[str, Any]:
+def donor_export_row(
+    target: dict[str, Any],
+    donor: dict[str, str],
+    folder: str,
+    product_domain: str,
+    local_root: str | None = None,
+) -> dict[str, Any]:
     date = donor["donor_date"].replace("-", "")
     name = f"{int(target['id']):02d}_donor_{donor['donor_kind']}_{date}"
     return {
@@ -222,7 +254,7 @@ def donor_export_row(target: dict[str, Any], donor: dict[str, str], folder: str,
         "product_domain": product_domain,
         "description": name,
         "drive_folder": folder,
-        "expected_local_path": f"{PRODUCT_DOMAINS[product_domain]['local_root']}/donors/{name}.tif",
+        "expected_local_path": f"{local_root or PRODUCT_DOMAINS[product_domain]['local_root']}/donors/{name}.tif",
         "family_score": donor.get("family_score", ""),
         "caution": donor.get("caution", ""),
         "caution_reasons": donor.get("caution_reasons", ""),
@@ -255,14 +287,18 @@ def queue_export(
 
 def write_manifest(rows: list[dict[str, Any]], json_path: Path, csv_path: Path) -> None:
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=json_path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=json_path.parent, delete=False
+    ) as tmp:
         json.dump(rows, tmp, indent=2)
         tmp.write("\n")
         tmp_path = Path(tmp.name)
     tmp_path.replace(json_path)
 
     fields = sorted({key for row in rows for key in row}) if rows else []
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=csv_path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=csv_path.parent, delete=False
+    ) as tmp:
         writer = csv.DictWriter(tmp, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
@@ -271,10 +307,16 @@ def write_manifest(rows: list[dict[str, Any]], json_path: Path, csv_path: Path) 
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export selected raw targets/donors to Drive")
+    parser = argparse.ArgumentParser(
+        description="Export selected raw targets/donors to Drive"
+    )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--ids", type=str, help="Comma-separated target IDs, e.g. 04,16,26")
-    group.add_argument("--all", action="store_true", help="Export all narrow-slate targets/donors")
+    group.add_argument(
+        "--ids", type=str, help="Comma-separated target IDs, e.g. 04,16,26"
+    )
+    group.add_argument(
+        "--all", action="store_true", help="Export all narrow-slate targets/donors"
+    )
     parser.add_argument("--folder", default=None)
     parser.add_argument(
         "--product-domain",
@@ -283,7 +325,29 @@ def parse_args() -> argparse.Namespace:
         help="GEE product domain to export. c02_t1_dn maps C02 TOA products to C02/T1 raw DN collections.",
     )
     parser.add_argument("--targets-only", action="store_true")
+    parser.add_argument(
+        "--target-overrides-json",
+        type=Path,
+        default=None,
+        help="Optional target metadata overrides keyed by id; used for targeted legacy-date rebuilds.",
+    )
+    parser.add_argument(
+        "--manifest-tag",
+        default=None,
+        help="Optional suffix appended after product-domain suffix, e.g. legacy_dates.",
+    )
+    parser.add_argument(
+        "--local-root",
+        default=None,
+        help="Optional expected local root recorded in manifest, e.g. /data/HKH_raw/HKH_c02t1_dn_legacy_date_raw_scenes.",
+    )
     parser.add_argument("--donors-only", action="store_true")
+    parser.add_argument(
+        "--slate-csv",
+        type=Path,
+        default=SLATE_CSV,
+        help="Selected donor slate; supports isolated targeted experiments.",
+    )
     parser.add_argument(
         "--pilot-tile-index",
         type=int,
@@ -304,10 +368,12 @@ def main() -> None:
     if args.targets_only and args.donors_only:
         raise SystemExit("Use at most one of --targets-only/--donors-only")
 
-    targets = load_targets()
-    manifest_json, manifest_csv = domain_manifest_paths(args.product_domain)
+    targets = load_targets(args.target_overrides_json)
+    manifest_json, manifest_csv = domain_manifest_paths(
+        args.product_domain, args.manifest_tag
+    )
     folder = args.folder or PRODUCT_DOMAINS[args.product_domain]["drive_folder"]
-    slate = load_slate()
+    slate = load_slate(args.slate_csv)
     requested = set(targets) if args.all else parse_ids(args.ids)
     unknown = requested - set(targets)
     if unknown:
@@ -317,11 +383,17 @@ def main() -> None:
     for target_id in sorted(requested):
         target = targets[target_id]
         if not args.donors_only:
-            rows.append(target_export_row(target, folder, args.product_domain))
+            rows.append(
+                target_export_row(target, folder, args.product_domain, args.local_root)
+            )
         if not args.targets_only:
             for donor in slate:
                 if int(donor["target_id"]) == target_id:
-                    rows.append(donor_export_row(target, donor, folder, args.product_domain))
+                    rows.append(
+                        donor_export_row(
+                            target, donor, folder, args.product_domain, args.local_root
+                        )
+                    )
 
     if args.pilot_tile_index is not None:
         suffix = f"_tile{args.pilot_tile_index}"

@@ -30,11 +30,21 @@ CHANNEL_GROUP_DEFINITIONS = {
     },
     "velocity": {
         "names": ["velocity", "velocity_x", "velocity_y", "velocity_mask"],
-        "description": "ITS_LIVE glacier velocity data (magnitude, vx, vy, mask)",
-        "mandatory": [
-            "velocity_mask"
-        ],  # velocity_mask must always be included when any velocity channel is selected
-        "no_normalize": ["velocity_mask"],  # Binary mask - should NOT be normalized
+        "description": "Legacy ITS_LIVE velocity data (magnitude, vx, vy, mask)",
+        "mandatory": ["velocity_mask"],
+        "no_normalize": ["velocity_mask"],
+    },
+    "velocity_quality_v2": {
+        "names": [
+            "velocity_speed",
+            "velocity_count",
+            "velocity_error",
+            "velocity_relative_error",
+            "velocity_valid",
+        ],
+        "description": "Date-aware scalar ITS_LIVE speed and quality features",
+        "mandatory": ["velocity_valid"],
+        "no_normalize": ["velocity_valid"],
     },
     "physics": {
         "names": ["flow_accumulation", "tpi", "roughness", "plan_curvature"],
@@ -43,7 +53,15 @@ CHANNEL_GROUP_DEFINITIONS = {
 }
 
 # Channels requiring logarithmic scaling (0 to +inf -> 0 to 1)
-LOG_CHANNELS = {"velocity", "flow_accumulation", "roughness"}
+LOG_CHANNELS = {
+    "velocity",
+    "velocity_speed",
+    "velocity_count",
+    "velocity_error",
+    "velocity_relative_error",
+    "flow_accumulation",
+    "roughness",
+}
 
 # Channels requiring symmetric logarithmic scaling (-inf to +inf -> -1 to 1)
 SYMLOG_CHANNELS = {"velocity_x", "velocity_y", "tpi", "plan_curvature"}
@@ -160,15 +178,29 @@ class GlacierDataset(Dataset):
             )
 
         self.channel_names = band_names.tolist()
+        velocity_mask_name = (
+            "velocity_valid"
+            if "velocity_valid" in self.channel_names
+            else "velocity_mask"
+        )
         self.velocity_mask_pos = (
-            self.channel_names.index("velocity_mask")
-            if "velocity_mask" in self.channel_names
+            self.channel_names.index(velocity_mask_name)
+            if velocity_mask_name in self.channel_names
             else None
         )
         self.velocity_value_positions = [
             idx
             for idx, name in enumerate(self.channel_names)
-            if name in {"velocity", "velocity_x", "velocity_y"}
+            if name
+            in {
+                "velocity",
+                "velocity_x",
+                "velocity_y",
+                "velocity_speed",
+                "velocity_count",
+                "velocity_error",
+                "velocity_relative_error",
+            }
         ]
 
     def _lazy_open(self):
@@ -227,22 +259,27 @@ class ChwGeometricAugmentations:
         self.v_flip_prob = float(aug_opts.get("v_flip_prob", 0.0))
         self.rotate90_prob = float(aug_opts.get("rotate90_prob", 0.0))
         self.transpose_prob = float(aug_opts.get("transpose_prob", 0.0))
+        self.legacy_torch_rng = bool(aug_opts.get("legacy_torch_rng", False))
         self.seed = seed
+
+    def _draw(self) -> float:
+        if self.legacy_torch_rng:
+            return float(torch.rand(1).item())
+        return float(np.random.random())
 
     def __call__(
         self, image: np.ndarray, label_int: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        if np.random.random() < self.h_flip_prob:
+        if self._draw() < self.h_flip_prob:
             image, label_int = apply_chw_geometric_transform(image, label_int, "h_flip")
-        if np.random.random() < self.v_flip_prob:
+        if self._draw() < self.v_flip_prob:
             image, label_int = apply_chw_geometric_transform(image, label_int, "v_flip")
-        if np.random.random() < self.rotate90_prob:
+        if self._draw() < self.rotate90_prob:
             image, label_int = apply_chw_geometric_transform(
                 image, label_int, "rotate90"
             )
-        if np.random.random() < self.transpose_prob:
+        if self._draw() < self.transpose_prob:
             image, label_int = apply_chw_geometric_transform(
                 image, label_int, "transpose"
             )
         return image, label_int
-

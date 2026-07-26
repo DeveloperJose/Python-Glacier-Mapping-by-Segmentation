@@ -156,7 +156,11 @@ def _nspi_single_fill(
                                 dv = donor[b, yy, xx]
                                 dp = donor[b, y, x]
                                 tv = target[b, yy, xx]
-                                if not np.isfinite(dv) or not np.isfinite(dp) or not np.isfinite(tv):
+                                if (
+                                    not np.isfinite(dv)
+                                    or not np.isfinite(dp)
+                                    or not np.isfinite(tv)
+                                ):
                                     good = False
                                     break
                                 d = dv - dp
@@ -300,18 +304,28 @@ def parse_int_list(value: str | None) -> list[int] | None:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
-def load_targets_meta() -> dict[int, dict[str, Any]]:
-    return {int(row["id"]): row for row in read_json(TARGETS_JSON)}
+def load_targets_meta(overrides_json: Path | None = None) -> dict[int, dict[str, Any]]:
+    targets = {int(row["id"]): row for row in read_json(TARGETS_JSON)}
+    if overrides_json is not None:
+        overrides = read_json(overrides_json)
+        for row in overrides:
+            target_id = int(row["id"])
+            if target_id not in targets:
+                raise ValueError(f"Override target id not in base targets: {target_id}")
+            targets[target_id] = row
+    return targets
 
 
 def configure_paths(
     target_dir: Path,
     donor_dir: Path,
     variant_folder_prefix: str,
+    slate_csv: Path = SLATE_CSV,
 ) -> None:
-    global TARGET_DIR_FULL8, DONOR_DIR_FULL8, VARIANTS
+    global TARGET_DIR_FULL8, DONOR_DIR_FULL8, VARIANTS, SLATE_CSV
     TARGET_DIR_FULL8 = target_dir
     DONOR_DIR_FULL8 = donor_dir
+    SLATE_CSV = slate_csv
     VARIANTS = {
         key: f"{variant_folder_prefix}_{suffix}"
         for key, suffix in VARIANT_SUFFIXES.items()
@@ -343,12 +357,16 @@ def target_path(target: dict[str, Any]) -> Path:
     return TARGET_DIR_FULL8 / target.get("target_filename", target["filename_target"])
 
 
-def load_full8_stack(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+def load_full8_stack(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     with rasterio.open(path) as src:
         arr = src.read().astype(np.float32)
         profile = src.profile.copy()
     if arr.shape[0] < 13:
-        raise ValueError(f"{path} has {arr.shape[0]} bands; expected full8 13-band raw stack")
+        raise ValueError(
+            f"{path} has {arr.shape[0]} bands; expected full8 13-band raw stack"
+        )
     image = arr[:8]
     data_present = arr[10] > 0.5
     clear_valid = arr[11] > 0.5
@@ -393,8 +411,12 @@ def expand_window(win: Window, pad: int, width: int, height: int) -> Window:
     return Window(col, row, max(0, col2 - col), max(0, row2 - row))
 
 
-def tile_window_in_scene(tile: TileTemplate, scene_profile: dict[str, Any], pad: int = NSPI_MAX_WINDOW) -> Window | None:
-    bounds = transform_bounds(tile.crs, scene_profile["crs"], *tile.bounds, densify_pts=21)
+def tile_window_in_scene(
+    tile: TileTemplate, scene_profile: dict[str, Any], pad: int = NSPI_MAX_WINDOW
+) -> Window | None:
+    bounds = transform_bounds(
+        tile.crs, scene_profile["crs"], *tile.bounds, densify_pts=21
+    )
     with rasterio.io.MemoryFile() as mem:
         profile = {
             "driver": "GTiff",
@@ -407,15 +429,21 @@ def tile_window_in_scene(tile: TileTemplate, scene_profile: dict[str, Any], pad:
         }
         with mem.open(**profile) as ds:
             win = from_bounds(*bounds, transform=ds.transform)
-    win = expand_window(win, pad, int(scene_profile["width"]), int(scene_profile["height"]))
+    win = expand_window(
+        win, pad, int(scene_profile["width"]), int(scene_profile["height"])
+    )
     if win.width <= 0 or win.height <= 0:
         return None
     return win
 
 
-def load_full8_window(path: Path, win: Window) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+def load_full8_window(
+    path: Path, win: Window
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     with rasterio.open(path) as src:
-        arr = src.read(indexes=list(range(1, 9)) + [11, 12, 13], window=win).astype(np.float32)
+        arr = src.read(indexes=list(range(1, 9)) + [11, 12, 13], window=win).astype(
+            np.float32
+        )
         profile = src.profile.copy()
         profile.update(
             width=int(win.width),
@@ -447,11 +475,19 @@ def compute_scene_minmax_stream(
             donor_datasets.append((d, rasterio.open(d.path)))
         try:
             for _idx, win in target_ds.block_windows(1):
-                t_img = target_ds.read(indexes=list(range(1, 9)), window=win).astype(np.float32)
+                t_img = target_ds.read(indexes=list(range(1, 9)), window=win).astype(
+                    np.float32
+                )
                 t_clear = target_ds.read(12, window=win).astype(np.float32) > 0.5
                 t_gap = target_ds.read(13, window=win).astype(np.float32) > 0.5
                 transform = window_transform(win, target_ds.transform)
-                domain = rasterize_domain_array(target_meta, target_ds.crs, transform, int(win.height), int(win.width))
+                domain = rasterize_domain_array(
+                    target_meta,
+                    target_ds.crs,
+                    transform,
+                    int(win.height),
+                    int(win.width),
+                )
                 t_mask = t_clear & domain & np.isfinite(t_img).all(axis=0)
                 gap = t_gap & domain
                 gap_total += int(gap.sum())
@@ -461,7 +497,9 @@ def compute_scene_minmax_stream(
                         mins[b] = min(mins[b], float(np.nanmin(vals)))
                         maxs[b] = max(maxs[b], float(np.nanmax(vals)))
                 for d, ds in donor_datasets:
-                    d_img = ds.read(indexes=list(range(1, 9)), window=win).astype(np.float32)
+                    d_img = ds.read(indexes=list(range(1, 9)), window=win).astype(
+                        np.float32
+                    )
                     d_clear = ds.read(12, window=win).astype(np.float32) > 0.5
                     d_mask = d_clear & domain & np.isfinite(d_img).all(axis=0)
                     donor_gap_clear[d.kind] += int((gap & d_mask).sum())
@@ -477,7 +515,10 @@ def compute_scene_minmax_stream(
         if not np.isfinite(mins[b]) or not np.isfinite(maxs[b]) or maxs[b] <= mins[b]:
             mins[b] = 0.0
             maxs[b] = 1.0
-    coverage = {kind: float(count / max(gap_total, 1)) for kind, count in donor_gap_clear.items()}
+    coverage = {
+        kind: float(count / max(gap_total, 1))
+        for kind, count in donor_gap_clear.items()
+    }
     return mins, maxs, coverage, gap_total
 
 
@@ -506,14 +547,18 @@ def compute_scene_minmax(
 
 def apply_minmax(arr: np.ndarray, mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
     denom = np.maximum(maxs - mins, EPS).astype(np.float32)
-    return np.clip((arr - mins[:, None, None]) / denom[:, None, None], 0.0, 1.0).astype(np.float32)
+    return np.clip((arr - mins[:, None, None]) / denom[:, None, None], 0.0, 1.0).astype(
+        np.float32
+    )
 
 
 def invert_minmax(arr: np.ndarray, mins: np.ndarray, maxs: np.ndarray) -> np.ndarray:
     return (arr * (maxs - mins)[:, None, None] + mins[:, None, None]).astype(np.float32)
 
 
-def compute_similarity_threshold(donor: np.ndarray, donor_valid: np.ndarray, num_class: int) -> float:
+def compute_similarity_threshold(
+    donor: np.ndarray, donor_valid: np.ndarray, num_class: int
+) -> float:
     vals = donor[:, donor_valid]
     if vals.size == 0:
         return 0.05
@@ -555,9 +600,7 @@ def run_nspi_single(
     )
 
 
-def make_base_provenance(
-    valid: np.ndarray, target_meta: dict[str, Any]
-) -> np.ndarray:
+def make_base_provenance(valid: np.ndarray, target_meta: dict[str, Any]) -> np.ndarray:
     target_year, target_doy = target_date_parts(target_meta)
     target_id = int(target_meta["id"])
     provenance = np.zeros((len(PROVENANCE_BANDS), *valid.shape), dtype=np.uint16)
@@ -598,9 +641,15 @@ def build_variant_predictions(
     outputs = {"raw_target": target_raw.copy()}
     valids = {"raw_target": base_valid.copy()}
     provenances = {"raw_target": make_base_provenance(base_valid, target_meta)}
-    meta: dict[str, Any] = {"donors": [d.__dict__ | {"path": str(d.path)} for d in donors]}
+    meta: dict[str, Any] = {
+        "donors": [d.__dict__ | {"path": str(d.path)} for d in donors]
+    }
     if not fill_mask.any() or not donors:
-        for v in ("nspi_timeseries_weighted", "agreement_quality_step3", "nspi_multi_score_all3"):
+        for v in (
+            "nspi_timeseries_weighted",
+            "agreement_quality_step3",
+            "nspi_multi_score_all3",
+        ):
             outputs[v] = target_raw.copy()
             valids[v] = base_valid.copy()
             provenances[v] = provenances["raw_target"].copy()
@@ -610,8 +659,14 @@ def build_variant_predictions(
     single: list[dict[str, Any]] = []
     for d in donors:
         donor_norm, donor_valid, _donor_gap = donor_arrays_norm[d.kind]
-        pred_norm, q = run_nspi_single(target_norm, donor_norm, base_valid, donor_valid, fill_mask)
-        valid = fill_mask & np.isin(q, np.array([1, 2, 3], dtype=np.uint8)) & np.isfinite(pred_norm).all(axis=0)
+        pred_norm, q = run_nspi_single(
+            target_norm, donor_norm, base_valid, donor_valid, fill_mask
+        )
+        valid = (
+            fill_mask
+            & np.isin(q, np.array([1, 2, 3], dtype=np.uint8))
+            & np.isfinite(pred_norm).all(axis=0)
+        )
         single.append(
             {
                 "donor": d,
@@ -625,7 +680,9 @@ def build_variant_predictions(
                 "donor_bitmask": DONOR_BITMASK[d.kind],
             }
         )
-    meta["single_fill_pixels"] = {c["donor"].kind: int(c["valid"].sum()) for c in single}
+    meta["single_fill_pixels"] = {
+        c["donor"].kind: int(c["valid"].sum()) for c in single
+    }
 
     # score_all3 NSPI cascade: highest Step3 family score first, original multi-donor behavior.
     multi_norm = np.full_like(target_norm, np.nan, dtype=np.float32)
@@ -673,7 +730,9 @@ def build_variant_predictions(
         best = np.full(fill_mask.shape, np.inf, dtype=np.float32)
         for c in single:
             with np.errstate(all="ignore"):
-                dist = np.sqrt(np.nanmean((c["pred_norm"] - median_pred) ** 2, axis=0)).astype(np.float32)
+                dist = np.sqrt(
+                    np.nanmean((c["pred_norm"] - median_pred) ** 2, axis=0)
+                ).astype(np.float32)
             q = c["quality"]
             q_penalty = np.clip(q.astype(np.float32), 1, 5) * 0.002
             score = dist + q_penalty - 0.001 * float(c["donor_score"])
@@ -702,10 +761,16 @@ def build_variant_predictions(
         doy_w = math.exp(-doy_distance_days(target_date, d.date) / 45.0)
         date_w = math.exp(-date_distance_days(target_date, d.date) / 3650.0)
         score_w = 0.5 + max(0.0, float(d.score))
-        cover_w = 0.25 + float(donor_gap_coverage.get(d.kind, c["valid"].sum() / max(int(fill_mask.sum()), 1)))
+        cover_w = 0.25 + float(
+            donor_gap_coverage.get(
+                d.kind, c["valid"].sum() / max(int(fill_mask.sum()), 1)
+            )
+        )
         base = float(doy_w * date_w * score_w * cover_w)
         q = c["quality"]
-        q_w = np.where(q == 1, 1.0, np.where(q == 2, 0.65, np.where(q == 3, 0.35, 0.0))).astype(np.float32)
+        q_w = np.where(
+            q == 1, 1.0, np.where(q == 2, 0.65, np.where(q == 3, 0.35, 0.0))
+        ).astype(np.float32)
         w = np.where(c["valid"], base * q_w, 0.0).astype(np.float32)
         weight_sum += w
         active = w > 0
@@ -720,7 +785,9 @@ def build_variant_predictions(
             ts_norm[b] += np.where(w > 0, c["pred_norm"][b] * w, 0.0)
     ts_valid = weight_sum > 0
     for b in range(target_norm.shape[0]):
-        ts_norm[b] = np.where(ts_valid, ts_norm[b] / np.maximum(weight_sum, EPS), np.nan)
+        ts_norm[b] = np.where(
+            ts_valid, ts_norm[b] / np.maximum(weight_sum, EPS), np.nan
+        )
     ts_valid &= np.isfinite(ts_norm).all(axis=0)
 
     provenance_specs = {
@@ -781,8 +848,12 @@ def build_variant_predictions(
     return outputs, valids, provenances, meta
 
 
-def load_templates(template_dir: Path, tile_indices: list[int] | None, max_tiles: int | None) -> list[TileTemplate]:
-    paths = sorted(template_dir.glob("image*.tif"), key=lambda p: int(p.stem.replace("image", "")))
+def load_templates(
+    template_dir: Path, tile_indices: list[int] | None, max_tiles: int | None
+) -> list[TileTemplate]:
+    paths = sorted(
+        template_dir.glob("image*.tif"), key=lambda p: int(p.stem.replace("image", ""))
+    )
     if not paths:
         raise FileNotFoundError(f"No image*.tif templates found in {template_dir}")
     want = set(tile_indices) if tile_indices is not None else None
@@ -813,11 +884,15 @@ def scene_intersects_tile(scene_profile: dict[str, Any], tile: TileTemplate) -> 
     sb = rasterio.coords.BoundingBox(
         left=scene_profile["transform"].c,
         top=scene_profile["transform"].f,
-        right=scene_profile["transform"].c + scene_profile["transform"].a * scene_profile["width"],
-        bottom=scene_profile["transform"].f + scene_profile["transform"].e * scene_profile["height"],
+        right=scene_profile["transform"].c
+        + scene_profile["transform"].a * scene_profile["width"],
+        bottom=scene_profile["transform"].f
+        + scene_profile["transform"].e * scene_profile["height"],
     )
     tb = transform_bounds(tile.crs, scene_profile["crs"], *tile.bounds, densify_pts=21)
-    return not (tb[2] <= sb.left or tb[0] >= sb.right or tb[3] <= sb.bottom or tb[1] >= sb.top)
+    return not (
+        tb[2] <= sb.left or tb[0] >= sb.right or tb[3] <= sb.bottom or tb[1] >= sb.top
+    )
 
 
 def initialize_outputs(
@@ -894,7 +969,9 @@ def update_one_tile(
     out_path = variant_folder / f"image{tile.index}.tif"
     dst_data = np.zeros((8, tile.height, tile.width), dtype=np.float32)
     dst_mask = np.zeros((tile.height, tile.width), dtype=np.uint8)
-    src_data = np.where(scene_valid[None, :, :], scene_arr, 0.0).astype(np.float32, copy=False)
+    src_data = np.where(scene_valid[None, :, :], scene_arr, 0.0).astype(
+        np.float32, copy=False
+    )
     reproject(
         source=src_data,
         destination=dst_data,
@@ -1009,12 +1086,24 @@ def update_tiles_for_scene(
         folder = output_root / VARIANTS[variant]
         if tile_workers <= 1 or len(tiles) <= 1:
             for tile in tiles:
-                r = update_one_tile(tile, folder, outputs[variant], valids[variant], scene_profile)
+                r = update_one_tile(
+                    tile, folder, outputs[variant], valids[variant], scene_profile
+                )
                 r.update({"variant": variant})
                 rows.append(r)
         else:
             with ThreadPoolExecutor(max_workers=tile_workers) as ex:
-                futs = [ex.submit(update_one_tile, tile, folder, outputs[variant], valids[variant], scene_profile) for tile in tiles]
+                futs = [
+                    ex.submit(
+                        update_one_tile,
+                        tile,
+                        folder,
+                        outputs[variant],
+                        valids[variant],
+                        scene_profile,
+                    )
+                    for tile in tiles
+                ]
                 for fut in as_completed(futs):
                     r = fut.result()
                     r.update({"variant": variant})
@@ -1025,7 +1114,9 @@ def update_tiles_for_scene(
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = sorted({k for r in rows for k in r})
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", dir=path.parent, delete=False
+    ) as tmp:
         writer = csv.DictWriter(tmp, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
@@ -1033,7 +1124,12 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp_path.replace(path)
 
 
-def write_variant_metadata(output_root: Path, variants: list[str], templates: list[TileTemplate], args: argparse.Namespace) -> None:
+def write_variant_metadata(
+    output_root: Path,
+    variants: list[str],
+    templates: list[TileTemplate],
+    args: argparse.Namespace,
+) -> None:
     fish = read_json(FISHNET_GEOJSON)
     feature_count = len(fish.get("features", []))
     for variant in variants:
@@ -1067,7 +1163,9 @@ def write_variant_metadata(output_root: Path, variants: list[str], templates: li
                 "donor_bitmask": "Bitmask of donor kinds contributing to pixel: LT05=1, LE07 SLC-on=2, LE07 SLC-off=4.",
             },
         }
-        (folder / "policy.json").write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+        (folder / "policy.json").write_text(
+            json.dumps(policy, indent=2) + "\n", encoding="utf-8"
+        )
         rows = [
             {
                 "image": f"image{t.index}.tif",
@@ -1087,6 +1185,18 @@ def main() -> None:
     parser.add_argument("--target-dir", type=Path, default=TARGET_DIR_FULL8)
     parser.add_argument("--donor-dir", type=Path, default=DONOR_DIR_FULL8)
     parser.add_argument(
+        "--slate-csv",
+        type=Path,
+        default=SLATE_CSV,
+        help="Selected donor slate; supports isolated targeted experiments.",
+    )
+    parser.add_argument(
+        "--target-overrides-json",
+        type=Path,
+        default=None,
+        help="Optional target metadata overrides keyed by id for targeted legacy-date rebuilds.",
+    )
+    parser.add_argument(
         "--variant-folder-prefix",
         default="HKH_full8",
         help="Output folder prefix under output-root, e.g. HKH_full8_c02t1_dn.",
@@ -1096,8 +1206,14 @@ def main() -> None:
         default="raw_target,nspi_timeseries_weighted,agreement_quality_step3,nspi_multi_score_all3",
         help="Comma-separated variant keys",
     )
-    parser.add_argument("--ids", default=None, help="Comma-separated target IDs; default all")
-    parser.add_argument("--tile-indices", default=None, help="Comma-separated fishnet tile indices; default all")
+    parser.add_argument(
+        "--ids", default=None, help="Comma-separated target IDs; default all"
+    )
+    parser.add_argument(
+        "--tile-indices",
+        default=None,
+        help="Comma-separated fishnet tile indices; default all",
+    )
     parser.add_argument("--max-tiles", type=int, default=None)
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--tile-workers", type=int, default=1)
@@ -1142,13 +1258,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    configure_paths(args.target_dir, args.donor_dir, args.variant_folder_prefix)
+    configure_paths(
+        args.target_dir,
+        args.donor_dir,
+        args.variant_folder_prefix,
+        args.slate_csv,
+    )
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     unknown = [v for v in variants if v not in VARIANTS]
     if unknown:
         raise ValueError(f"Unknown variants: {unknown}. Choices: {sorted(VARIANTS)}")
     if (args.provenance_only or args.exact_provenance_only) and args.no_provenance:
-        raise ValueError("Provenance-only modes cannot be combined with --no-provenance")
+        raise ValueError(
+            "Provenance-only modes cannot be combined with --no-provenance"
+        )
     if args.provenance_only and args.exact_provenance_only:
         raise ValueError("Choose either --provenance-only or --exact-provenance-only")
     if args.provenance_only and args.overwrite:
@@ -1164,15 +1287,19 @@ def main() -> None:
     if not FISHNET_GEOJSON.exists():
         raise FileNotFoundError(f"Missing fishnet copy: {FISHNET_GEOJSON}")
 
-    targets = load_targets_meta()
+    targets = load_targets_meta(args.target_overrides_json)
     slate = load_slate()
     ids = parse_int_list(args.ids) or sorted(targets)
     if args.max_scenes is not None:
         ids = ids[: args.max_scenes]
-    templates = load_templates(args.template_dir, parse_int_list(args.tile_indices), args.max_tiles)
+    templates = load_templates(
+        args.template_dir, parse_int_list(args.tile_indices), args.max_tiles
+    )
     print(f"variants={variants}")
     print(f"targets={ids}")
-    print(f"tiles={len(templates)} indices={[t.index for t in templates[:10]]}{'...' if len(templates) > 10 else ''}")
+    print(
+        f"tiles={len(templates)} indices={[t.index for t in templates[:10]]}{'...' if len(templates) > 10 else ''}"
+    )
     print(f"output_root={args.output_root}")
     print(f"target_dir={TARGET_DIR_FULL8}")
     print(f"donor_dir={DONOR_DIR_FULL8}")
@@ -1200,7 +1327,9 @@ def main() -> None:
         donor_infos = slate.get(tid, [])
         with rasterio.open(path) as src:
             scene_profile = src.profile.copy()
-        scene_tiles = [tile for tile in templates if scene_intersects_tile(scene_profile, tile)]
+        scene_tiles = [
+            tile for tile in templates if scene_intersects_tile(scene_profile, tile)
+        ]
 
         if args.provenance_only:
             print(
@@ -1227,7 +1356,9 @@ def main() -> None:
                     int(chunk_profile["width"]),
                 )
                 if args.provenance_valid_mode == "raw-valid":
-                    _target_raw, _data_present, target_clear, _target_gap, _profile = load_full8_window(path, win)
+                    _target_raw, _data_present, target_clear, _target_gap, _profile = (
+                        load_full8_window(path, win)
+                    )
                     provenance_valid = target_clear & domain
                 else:
                     provenance_valid = domain
@@ -1254,8 +1385,13 @@ def main() -> None:
             print(f"ID {tid:02d}: provenance rows={len(scene_rows)}", flush=True)
             continue
 
-        print(f"ID {tid:02d}: scan scene minmax {path.name} donors={[d.kind for d in donor_infos]}", flush=True)
-        mins, maxs, donor_gap_coverage, scene_fill_pixels = compute_scene_minmax_stream(path, target_meta, donor_infos)
+        print(
+            f"ID {tid:02d}: scan scene minmax {path.name} donors={[d.kind for d in donor_infos]}",
+            flush=True,
+        )
+        mins, maxs, donor_gap_coverage, scene_fill_pixels = compute_scene_minmax_stream(
+            path, target_meta, donor_infos
+        )
         print(
             f"ID {tid:02d}: tiles={len(scene_tiles)} fill_pixels={scene_fill_pixels} "
             f"coverage={{{', '.join(f'{k}: {v:.3f}' for k, v in donor_gap_coverage.items())}}} "
@@ -1267,7 +1403,9 @@ def main() -> None:
             win = tile_window_in_scene(tile, scene_profile, pad=NSPI_MAX_WINDOW)
             if win is None:
                 continue
-            target_raw, _data_present, target_clear, target_gap, chunk_profile = load_full8_window(path, win)
+            target_raw, _data_present, target_clear, target_gap, chunk_profile = (
+                load_full8_window(path, win)
+            )
             domain = rasterize_domain_array(
                 target_meta,
                 chunk_profile["crs"],
@@ -1279,7 +1417,9 @@ def main() -> None:
             fill_mask = target_gap & domain
             donor_arrays_raw: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
             for d in donor_infos:
-                d_raw, _d_data, d_clear, d_gap, _d_profile = load_full8_window(d.path, win)
+                d_raw, _d_data, d_clear, d_gap, _d_profile = load_full8_window(
+                    d.path, win
+                )
                 donor_arrays_raw[d.kind] = (d_raw, d_clear & domain, d_gap)
             target_norm = apply_minmax(target_raw, mins, maxs)
             donor_arrays_norm = {
@@ -1319,11 +1459,28 @@ def main() -> None:
                             chunk_profile,
                         )
                     )
-                r.update({"variant": variant, "target_id": tid, "scene": target_meta["scene"]})
+                r.update(
+                    {
+                        "variant": variant,
+                        "target_id": tid,
+                        "scene": target_meta["scene"],
+                    }
+                )
                 scene_rows.append(r)
             if len(scene_rows) % max(1, 4 * len(variants)) == 0:
-                print(f"ID {tid:02d}: processed {len(scene_rows) // len(variants)}/{len(scene_tiles)} tiles", flush=True)
-            del target_raw, target_norm, donor_arrays_raw, donor_arrays_norm, outputs, valids, provenances
+                print(
+                    f"ID {tid:02d}: processed {len(scene_rows) // len(variants)}/{len(scene_tiles)} tiles",
+                    flush=True,
+                )
+            del (
+                target_raw,
+                target_norm,
+                donor_arrays_raw,
+                donor_arrays_norm,
+                outputs,
+                valids,
+                provenances,
+            )
         all_rows.extend(scene_rows)
         by_variant = defaultdict(int)
         for r in scene_rows:

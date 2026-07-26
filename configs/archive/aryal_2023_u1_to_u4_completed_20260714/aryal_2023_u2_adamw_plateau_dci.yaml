@@ -1,0 +1,66 @@
+training_opts:
+  dataset_name: aryal_2023_landsat8_reproduction
+  seed: 41
+  augmentation_seed: 42
+  deterministic: true
+  precision: 32-true
+  epochs: 251
+  accumulate_grad_batches: 2
+  early_stopping: null
+  num_sanity_val_steps: 0
+  val_viz_n: 0
+  test_eval_n: 0
+  run_test_eval: true
+  mlflow_experiment_name: sota_replication
+  mlflow_artifacts_enabled: false
+  run_name: aryal_2023_u2_adamw_plateau_dci
+loader_opts:
+  batch_size: 4
+  num_workers: 8
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 2
+  seed: 42
+  val_shuffle: true
+  shared_loader_generator: true
+  normalize: mean-std
+  robust_scaling: false
+  augmentations:
+    h_flip_prob: 0.15
+    v_flip_prob: 0.15
+    rotate90_prob: 0.0
+    transpose_prob: 0.15
+    legacy_torch_rng: true
+  output_classes:
+  - 2
+model_opts:
+  framework: custom
+  args:
+    net_depth: 4
+    dropout: 0.1
+    spatial: true
+    first_channel_output: 32
+loss_opts:
+  name: custom
+  behavior: modern
+  binary_non_target_policy: ignore
+  label_smoothing: 0.0
+  class_weights:
+  - 0
+  - 1
+  use_velocity_loss: false
+optim_opts:
+  name: AdamW
+  args:
+    _replace_: true
+    lr: 0.0003
+    weight_decay: 5.0e-05
+    fused: true
+scheduler_opts:
+  name: ReduceLROnPlateau
+  args:
+    _replace_: true
+    mode: min
+    patience: 15
+    factor: 0.1
+    min_lr: 1.0e-09

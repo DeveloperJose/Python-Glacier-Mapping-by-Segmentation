@@ -38,6 +38,8 @@ class GlacierDataModule(pl.LightningDataModule):
         prefetch_factor: Optional[int] = None,
         seed: int = 42,
         augmentation_seed: Optional[int] = None,
+        val_shuffle: bool = False,
+        shared_loader_generator: bool = False,
     ):
         super().__init__()
         self.processed_dir = pathlib.Path(processed_dir)
@@ -60,6 +62,12 @@ class GlacierDataModule(pl.LightningDataModule):
         self.augmentation_seed = (
             augmentation_seed if augmentation_seed is not None else seed
         )
+        self.val_shuffle = val_shuffle
+        self.shared_loader_generator = shared_loader_generator
+        self._shared_generator = None
+        if self.shared_loader_generator:
+            self._shared_generator = torch.Generator()
+            self._shared_generator.manual_seed(self.seed)
 
         if augmentations is not None:
             self.train_transform = self.create_augmentations(augmentations)
@@ -75,6 +83,8 @@ class GlacierDataModule(pl.LightningDataModule):
         random.seed(worker_seed)
 
     def _generator(self) -> torch.Generator:
+        if self._shared_generator is not None:
+            return self._shared_generator
         generator = torch.Generator()
         generator.manual_seed(self.seed)
         return generator
@@ -120,7 +130,7 @@ class GlacierDataModule(pl.LightningDataModule):
         return self._dataloader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
-        return self._dataloader(self.val_dataset, shuffle=False)
+        return self._dataloader(self.val_dataset, shuffle=self.val_shuffle)
 
     def _worker_opts(self) -> dict:
         if self.num_workers <= 0:

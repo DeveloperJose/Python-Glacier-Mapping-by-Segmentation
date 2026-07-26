@@ -115,6 +115,7 @@ def predict_from_probs(probs, module, threshold=None, *, fill_holes=True):
 
     return np.argmax(probs, axis=2).astype(np.uint8)
 
+
 def predict_whole(module, whole_arr, window_size, threshold=None):
     """Predict on a whole image using sliding windows, stitching results."""
     y_pred = np.zeros((whole_arr.shape[0], whole_arr.shape[1]), dtype=np.uint8)
@@ -263,8 +264,14 @@ def load_lightning_module(
     else:
         module = GlacierSegmentationModule.load_from_checkpoint(checkpoint_path)
 
-    module.eval()
     module.to(device)
+    if getattr(module, "aryal_2023_behavior", False):
+        for child in module.model.modules():
+            if isinstance(child, (torch.nn.Dropout, torch.nn.Dropout2d)):
+                child.p = 1e-8
+        module.train()
+    else:
+        module.eval()
     return module
 
 
@@ -280,12 +287,16 @@ def _iter_split_samples(
     data_dir = Path(module.processed_dir) / split
     tiles = sorted(data_dir.glob("tiff*"))
     if tiles:
+
         def iter_tiles() -> Iterator[tuple[str, np.ndarray, np.ndarray, bool]]:
             for tile in tiles:
                 y_path = tile.with_name(tile.name.replace("tiff", "mask"))
-                yield tile.name, np.load(tile, mmap_mode="r"), np.load(
-                    y_path, mmap_mode="r"
-                ).astype(np.uint8), False
+                yield (
+                    tile.name,
+                    np.load(tile, mmap_mode="r"),
+                    np.load(y_path, mmap_mode="r").astype(np.uint8),
+                    False,
+                )
 
         return iter_tiles(), len(tiles)
 
@@ -511,8 +522,12 @@ def _run_full_split_prediction(
                 if frame_ci is None or frame_dci is None:
                     raise RuntimeError("Both CI and DCI frames are required")
 
-                prob_ci = get_probabilities(frame_ci, x_full)
-                prob_dci = get_probabilities(frame_dci, x_full)
+                prob_ci = get_probabilities(
+                    frame_ci, x_full, preprocessed_chw=preprocessed_chw
+                )
+                prob_dci = get_probabilities(
+                    frame_dci, x_full, preprocessed_chw=preprocessed_chw
+                )
                 merged, probs = merge_ci_debris(
                     prob_ci, prob_dci, ci_threshold, dci_threshold
                 )

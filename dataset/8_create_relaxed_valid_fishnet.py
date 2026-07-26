@@ -49,6 +49,7 @@ OUTPUT_VARIANTS = {
     for key, suffix in VARIANT_SUFFIXES.items()
 }
 FULL8_BANDS = ["B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7"]
+CURRENT_VARIANT_KEYS = list(VARIANT_SUFFIXES)
 
 
 def configure_variants(source_prefix: str, output_prefix: str) -> None:
@@ -85,8 +86,9 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def initialize_outputs(templates, overwrite: bool) -> None:
-    for key, folder in OUTPUT_VARIANTS.items():
+def initialize_outputs(templates, overwrite: bool, variant_keys: list[str]) -> None:
+    for key in variant_keys:
+        folder = OUTPUT_VARIANTS[key]
         if overwrite and folder.exists():
             shutil.rmtree(folder)
         folder.mkdir(parents=True, exist_ok=True)
@@ -183,7 +185,8 @@ def write_target_data_present_to_tile(fishnet6, tile, target_meta, target_path: 
     take = dst_mask > 0
     if not take.any():
         return 0
-    for folder in OUTPUT_VARIANTS.values():
+    for key in CURRENT_VARIANT_KEYS:
+        folder = OUTPUT_VARIANTS[key]
         out_path = folder / f"image{tile.index}.tif"
         with rasterio.open(out_path, "r+") as dst:
             existing = dst.read()
@@ -197,7 +200,8 @@ def write_target_data_present_to_tile(fishnet6, tile, target_meta, target_path: 
 
 def preserve_existing_fills(tile) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for key, out_folder in OUTPUT_VARIANTS.items():
+    for key in CURRENT_VARIANT_KEYS:
+        out_folder = OUTPUT_VARIANTS[key]
         src_path = SOURCE_VARIANTS[key] / f"image{tile.index}.tif"
         out_path = out_folder / f"image{tile.index}.tif"
         with rasterio.open(src_path) as src, rasterio.open(out_path, "r+") as dst:
@@ -220,21 +224,44 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--source-prefix", default="HKH_full8")
     parser.add_argument("--output-prefix", default=None)
+    parser.add_argument("--target-dir", type=Path, default=None)
+    parser.add_argument(
+        "--target-overrides-json",
+        type=Path,
+        default=None,
+        help="Optional target metadata overrides keyed by id for targeted legacy-date rebuilds.",
+    )
+    parser.add_argument(
+        "--variants",
+        default="raw_target_relaxed_valid,agreement_quality_step3_relaxed_valid,nspi_timeseries_weighted_relaxed_valid",
+        help="Comma-separated relaxed-valid variant keys to build.",
+    )
     parser.add_argument("--max-tiles", type=int, default=None)
     parser.add_argument("--tile-indices", default=None)
     args = parser.parse_args()
     if args.output_prefix is None:
         args.output_prefix = args.source_prefix
     configure_variants(args.source_prefix, args.output_prefix)
+    global CURRENT_VARIANT_KEYS
+    CURRENT_VARIANT_KEYS = [v.strip() for v in args.variants.split(",") if v.strip()]
+    unknown = [v for v in CURRENT_VARIANT_KEYS if v not in VARIANT_SUFFIXES]
+    if unknown:
+        raise ValueError(f"Unknown variants: {unknown}. Choices: {sorted(VARIANT_SUFFIXES)}")
 
     fishnet6 = load_fishnet6()
-    targets = fishnet6.load_targets_meta()
+    if args.target_dir is not None:
+        fishnet6.configure_paths(
+            args.target_dir,
+            getattr(fishnet6, "DONOR_DIR_FULL8"),
+            args.source_prefix,
+        )
+    targets = fishnet6.load_targets_meta(args.target_overrides_json)
     ids = sorted(targets)
     tile_indices = None
     if args.tile_indices:
         tile_indices = [int(x) for x in args.tile_indices.split(",") if x.strip()]
     templates = fishnet6.load_templates(TEMPLATE_DIR, tile_indices, args.max_tiles)
-    initialize_outputs(templates, args.overwrite)
+    initialize_outputs(templates, args.overwrite, CURRENT_VARIANT_KEYS)
 
     rows: list[dict[str, object]] = []
     for tid in ids:
@@ -262,7 +289,8 @@ def main() -> None:
         row.update({f"{k}_existing_fill_pixels_preserved": v for k, v in counts.items()})
         fill_rows.append(row)
 
-    for folder in OUTPUT_VARIANTS.values():
+    for key in CURRENT_VARIANT_KEYS:
+        folder = OUTPUT_VARIANTS[key]
         write_csv(folder / "target_data_present_updates.csv", rows)
         write_csv(folder / "existing_fill_preservation.csv", fill_rows)
         manifest_rows = [

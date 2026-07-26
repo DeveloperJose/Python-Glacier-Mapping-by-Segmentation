@@ -1,0 +1,14 @@
+# Aryal 2022 thesis / 2023 paper preprocessing reproduction.
+# Generate with:
+# uv run python dataset/create_aryal_2023_dataset.py --server desktop
+output_name: "aryal_2023_landsat8_reproduction"
+
+window_size: [512, 512]
+overlap: 64
+filter: 0.1
+test: 0.2
+val: 0.1
+split_seed: 42
+raw_cell_count: 202
+publication_cell_count: 201
+upstream_commit: "378c053194285e5166526cb1ba981ef82a938fde"

@@ -42,6 +42,12 @@ DATASETS = {
     "raw": DATA_ROOT / "comprehensive_v3_hkh_full8_raw_target_relaxed_valid",
     "c01dn": DATA_ROOT / "comprehensive_v3_hkh_full8_agreement_quality_step3_relaxed_valid_c01dn_matched",
     "hybrid": DATA_ROOT / "comprehensive_v3_legacy_x_agreement_relaxed_labels",
+    "c02t1_dn_agreement": DATA_ROOT / "comprehensive_v3_hkh_full8_c02t1_dn_agreement_quality_step3_relaxed_valid",
+    "c02t1_dn_raw": DATA_ROOT / "comprehensive_v3_hkh_full8_c02t1_dn_raw_target_relaxed_valid",
+    "c02t1_dn_legacy_dates_agreement": DATA_ROOT
+    / "comprehensive_v3_hkh_full8_c02t1_dn_legacy_dates_agreement_quality_step3_relaxed_valid",
+    "c02t1_dn_legacy_dates_raw": DATA_ROOT
+    / "comprehensive_v3_hkh_full8_c02t1_dn_legacy_dates_raw_target_relaxed_valid",
 }
 
 RUN_PATTERNS = {
@@ -53,6 +59,14 @@ RUN_PATTERNS = {
     "raw": ["hkh_full8_raw_target_relaxed_valid_*_allch_bs8_seed4[234]_desktop_20260706_*"],
     "c01dn": ["hkh_full8_agreement_quality_step3_relaxed_valid_c01dn_matched_*_allch_bs8_seed4[234]_desktop_20260707_*"],
     "hybrid": ["legacy_x_agreement_relaxed_labels_*_allch_bs8_seed4[234]_desktop_20260707_*"],
+    "c02t1_dn_agreement": ["hkh_full8_c02t1_dn_agreement_quality_step3_relaxed_valid_*_allch_bs8_seed4[234]_desktop_2026070[89]_*"],
+    "c02t1_dn_raw": ["hkh_full8_c02t1_dn_raw_target_relaxed_valid_*_allch_bs8_seed4[234]_desktop_20260709_*"],
+    "c02t1_dn_legacy_dates_agreement": [
+        "hkh_full8_c02t1_dn_legacy_dates_agreement_quality_step3_relaxed_valid_*_allch_bs8_seed4[234]_desktop_2026071[01]_*"
+    ],
+    "c02t1_dn_legacy_dates_raw": [
+        "hkh_full8_c02t1_dn_legacy_dates_raw_target_relaxed_valid_*_allch_bs8_seed4[234]_desktop_2026071[01]_*"
+    ],
 }
 
 POLICIES = ["common_valid", "legacy_valid", "relaxed_valid"]
@@ -276,10 +290,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--variants", default="legacy,agreement,raw,c01dn,hybrid")
+    parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--tasks", default="dci,ci")
     parser.add_argument("--seeds", default="42,43,44")
     args = parser.parse_args()
 
+    global OUT_DIR
+    if args.out_dir is not None:
+        OUT_DIR = args.out_dir
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     tasks = {v.strip() for v in args.tasks.split(",") if v.strip()}

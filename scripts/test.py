@@ -627,9 +627,8 @@ class GlacierTaskTestSuite:
             if len(output_classes) == 1:
                 target_class = output_classes[0]
                 target_percentage = (
-                    ((y_int == target_class) & valid_pixels).float().mean().item()
-                    * 100
-                )
+                    (y_int == target_class) & valid_pixels
+                ).float().mean().item() * 100
                 expected_percentage = raw_data_info["class_percentages"][target_class]
                 print(
                     f"  ✓ Binary: target class {target_class} = {target_percentage:.1f}% "
@@ -638,8 +637,8 @@ class GlacierTaskTestSuite:
             else:
                 for cls in output_classes:
                     cls_percentage = (
-                        ((y_int == cls) & valid_pixels).float().mean().item() * 100
-                    )
+                        (y_int == cls) & valid_pixels
+                    ).float().mean().item() * 100
                     expected_percentage = raw_data_info["class_percentages"][cls]
                     print(
                         f"  ✓ Class {cls}: {cls_percentage:.1f}% "
@@ -1318,7 +1317,9 @@ class TestVelocityLossMath(unittest.TestCase):
         guarded_velocity_loss = guarded_base * 0.2
 
         torch.testing.assert_close(new_velocity_loss, guarded_velocity_loss)
-        new_gradient = torch.autograd.grad(new_velocity_loss, logits, retain_graph=True)[0]
+        new_gradient = torch.autograd.grad(
+            new_velocity_loss, logits, retain_graph=True
+        )[0]
         old_gradient = torch.autograd.grad(guarded_velocity_loss, logits)[0]
         torch.testing.assert_close(new_gradient, old_gradient)
 
@@ -1481,9 +1482,7 @@ def dice_loss_broadcast(
 
     numerator = 2 * weighted_prod.sum(dim=(0, 2, 3)) + smooth
     denominator = (
-        weighted_pred.sum(dim=(0, 2, 3))
-        + weighted_target.sum(dim=(0, 2, 3))
-        + smooth
+        weighted_pred.sum(dim=(0, 2, 3)) + weighted_target.sum(dim=(0, 2, 3)) + smooth
     )
     dice_per_class = 1 - numerator / denominator
 
@@ -1496,6 +1495,54 @@ class TestDiceParity(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def test_aryal_custom_loss_matches_pinned_upstream(self):
+        import importlib.util
+
+        upstream_path = Path(
+            "old_code/Aryal007_glacier_mapping_upstream/segmentation/model/losses.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "aryal_upstream_losses", upstream_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        upstream = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(upstream)
+
+        logits = torch.randn(2, 2, 16, 16, device=self.device, requires_grad=True)
+        labels = torch.randint(0, 3, (2, 16, 16), device=self.device)
+        labels[0, 0, 0] = 255
+        target = torch.stack((labels == 0, labels == 1), dim=1).float()
+
+        expected_dice, expected_boundary = upstream.customloss(
+            act=torch.nn.Softmax(dim=1), outchannels=2, masked=True
+        ).to(self.device)(logits, target)
+        actual_dice, actual_boundary, _ = customloss(
+            output_classes=[1],
+            behavior="aryal_2023",
+            binary_non_target_policy="ignore",
+            class_weights=[0, 1],
+        ).to(self.device)(logits, labels)
+
+        torch.testing.assert_close(actual_dice, expected_dice.sum())
+        torch.testing.assert_close(actual_boundary, expected_boundary)
+
+    def test_aryal_binary_non_target_pixels_are_ignored(self):
+        labels = torch.tensor([[[0, 1, 2, 255]]], device=self.device)
+        target = make_onehot(
+            labels,
+            2,
+            [1],
+            self.device,
+            binary_non_target_policy="ignore",
+        )
+        expected = torch.tensor(
+            [[[[1, 0, 0, 0]], [[0, 1, 0, 0]]]],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        torch.testing.assert_close(target, expected)
 
     def test_binary_dice_loss_value_parity(self):
         pred = torch.randn(4, 2, 32, 32, device=self.device, requires_grad=True)
@@ -1576,9 +1623,7 @@ class TestClassWeights(unittest.TestCase):
         pred_logits = torch.randn(batch_size, 2, height, width)
         target_int = torch.ones(batch_size, height, width).long()
         loss_fn = customloss(class_weights=[0, 1], output_classes=[1])
-        dice_loss, boundary_loss, velocity_loss = loss_fn(
-            pred_logits, target_int
-        )
+        dice_loss, boundary_loss, velocity_loss = loss_fn(pred_logits, target_int)
         self.assertTrue(torch.isfinite(dice_loss))
         self.assertGreaterEqual(dice_loss.item(), 0.0)
         self.assertEqual(velocity_loss.item(), 0.0)
@@ -1588,9 +1633,7 @@ class TestClassWeights(unittest.TestCase):
         pred_logits = torch.randn(batch_size, 3, height, width)
         target_int = torch.ones(batch_size, height, width).long()
         loss_fn = customloss(class_weights=[0, 1, 1], output_classes=[0, 1, 2])
-        dice_loss, boundary_loss, velocity_loss = loss_fn(
-            pred_logits, target_int
-        )
+        dice_loss, boundary_loss, velocity_loss = loss_fn(pred_logits, target_int)
         self.assertTrue(torch.isfinite(dice_loss))
         self.assertGreaterEqual(dice_loss.item(), 0.0)
         self.assertEqual(velocity_loss.item(), 0.0)
@@ -1608,9 +1651,7 @@ class TestClassWeights(unittest.TestCase):
         pred_logits = torch.randn(batch_size, 2, height, width)
         target_int = torch.ones(batch_size, height, width).long()
         loss_fn = customloss(output_classes=[1])
-        dice_loss, boundary_loss, velocity_loss = loss_fn(
-            pred_logits, target_int
-        )
+        dice_loss, boundary_loss, velocity_loss = loss_fn(pred_logits, target_int)
         self.assertTrue(torch.isfinite(dice_loss))
         self.assertGreaterEqual(dice_loss.item(), 0.0)
         self.assertEqual(velocity_loss.item(), 0.0)

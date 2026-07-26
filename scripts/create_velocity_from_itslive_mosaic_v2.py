@@ -7,10 +7,15 @@ choose the temporal velocity window for each output pixel, then writes a compact
 quality-aware velocity stack aligned to the selected image variant.
 
 Default product bands:
-  1. v_target_pm1_m_per_year   Quality-weighted speed for provenance year ±1
-  2. count_sum_pm1             Sum of ITS_LIVE annual observation counts used
-  3. v_error_weighted_pm1      Quality-weighted annual v_error
-  4. velocity_valid            1 where at least one annual velocity passed filters
+  1. velocity_speed          Inverse-variance/temporal-weighted annual speed
+  2. velocity_count          Sum of annual ITS_LIVE observation counts used
+  3. velocity_error          Weighted annual speed uncertainty
+  4. velocity_relative_error velocity_error / max(velocity_speed, 1 m/yr)
+  5. velocity_valid          1 where at least one annual velocity passed filters
+
+All learned value bands are scalars. Directional vx/vy are deliberately excluded:
+existing geometric augmentation does not transform vector components when images
+are flipped or rotated, so using them would silently corrupt direction semantics.
 
 The product is meant for later ML ablation, not direct training execution.
 """
@@ -73,9 +78,10 @@ PROVENANCE_BAND_INDEX = {
 }
 
 OUTPUT_BANDS = [
-    "v_pm_window_m_per_year",
-    "count_sum_pm_window",
-    "v_error_weighted_pm_window",
+    "velocity_speed",
+    "velocity_count",
+    "velocity_error",
+    "velocity_relative_error",
     "velocity_valid",
 ]
 
@@ -115,11 +121,15 @@ def sort_image_paths(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=lambda p: int(p.stem.replace("image", "")))
 
 
-def output_dir_for_variant(output_root: Path, variant: str, date_mode: str, window: int) -> Path:
+def output_dir_for_variant(
+    output_root: Path, variant: str, date_mode: str, window: int
+) -> Path:
     return output_root / f"Velocity_v2_{variant}_{date_mode}_pm{window}yr"
 
 
-def is_valid_velocity_file(path: Path, threshold: float = DEFAULT_SKIP_THRESHOLD) -> bool:
+def is_valid_velocity_file(
+    path: Path, threshold: float = DEFAULT_SKIP_THRESHOLD
+) -> bool:
     if not path.exists():
         return False
     try:
@@ -156,7 +166,10 @@ def read_provenance_years(
         if date_mode == "target"
         else PROVENANCE_BAND_INDEX["source_year"]
     )
-    with rasterio.open(image_path) as image_src, rasterio.open(provenance_path) as prov_src:
+    with (
+        rasterio.open(image_path) as image_src,
+        rasterio.open(provenance_path) as prov_src,
+    ):
         validate_same_grid(image_src, prov_src)
         years = prov_src.read(year_band).astype(np.int16)
         valid = prov_src.read(PROVENANCE_BAND_INDEX["target_valid"]) > 0
@@ -181,7 +194,9 @@ def read_provenance_years(
     return years, valid, stats
 
 
-def bounds_in_datacube_crs(landsat_bounds: Any, landsat_epsg: int, datacube_epsg: int) -> tuple[float, float, float, float]:
+def bounds_in_datacube_crs(
+    landsat_bounds: Any, landsat_epsg: int, datacube_epsg: int
+) -> tuple[float, float, float, float]:
     if datacube_epsg == landsat_epsg:
         return (
             landsat_bounds.left,
@@ -260,9 +275,12 @@ def merge_year_grid(
     if filters.max_error is not None:
         valid &= error <= filters.max_error
 
+    # Annual ITS_LIVE composites are already generated from error-weighted fits.
+    # Multiplying inverse variance by count again would double-weight observation
+    # support. Count is retained as a validity filter and explicit output feature.
     quality_weight = np.where(
         valid,
-        count / np.square(np.maximum(error, filters.err_floor)),
+        1.0 / np.square(np.maximum(error, filters.err_floor)),
         0.0,
     ).astype(np.float32)
 
@@ -386,9 +404,12 @@ def compose_from_year_grids(
     v_out = np.zeros(shape, dtype=np.float32)
     count_out = np.zeros(shape, dtype=np.float32)
     error_out = np.zeros(shape, dtype=np.float32)
+    relative_error_out = np.zeros(shape, dtype=np.float32)
     valid_out = np.zeros(shape, dtype=np.float32)
 
-    unique_years = sorted(int(y) for y in np.unique(provenance_years[provenance_valid]) if y > 0)
+    unique_years = sorted(
+        int(y) for y in np.unique(provenance_years[provenance_valid]) if y > 0
+    )
     per_year_stats: dict[str, Any] = {}
     for base_year in unique_years:
         pixel_mask = provenance_valid & (provenance_years == base_year)
@@ -401,7 +422,9 @@ def compose_from_year_grids(
         count_sum = np.zeros(shape, dtype=np.float32)
         used_years: list[int] = []
 
-        for year in range(base_year - options.window_years, base_year + options.window_years + 1):
+        for year in range(
+            base_year - options.window_years, base_year + options.window_years + 1
+        ):
             grid = year_grids.get(year)
             if grid is None:
                 continue
@@ -415,7 +438,9 @@ def compose_from_year_grids(
             used_years.append(year)
             weight_sum[candidate_valid] += w[candidate_valid]
             v_weighted[candidate_valid] += grid.v[candidate_valid] * w[candidate_valid]
-            error_weighted[candidate_valid] += grid.error[candidate_valid] * w[candidate_valid]
+            error_weighted[candidate_valid] += (
+                grid.error[candidate_valid] * w[candidate_valid]
+            )
             count_sum[candidate_valid] += grid.count[candidate_valid]
 
         assigned = pixel_mask & (weight_sum > 0)
@@ -423,6 +448,9 @@ def compose_from_year_grids(
             v_out[assigned] = v_weighted[assigned] / weight_sum[assigned]
             error_out[assigned] = error_weighted[assigned] / weight_sum[assigned]
             count_out[assigned] = count_sum[assigned]
+            relative_error_out[assigned] = error_out[assigned] / np.maximum(
+                v_out[assigned], 1.0
+            )
             valid_out[assigned] = 1.0
 
         per_year_stats[str(base_year)] = {
@@ -431,12 +459,16 @@ def compose_from_year_grids(
             "used_velocity_years": used_years,
         }
 
-    stack = np.stack([v_out, count_out, error_out, valid_out]).astype(np.float32)
+    stack = np.stack(
+        [v_out, count_out, error_out, relative_error_out, valid_out]
+    ).astype(np.float32)
     stats = {
         "per_provenance_year": per_year_stats,
         "valid_velocity_pixels": int(valid_out.sum()),
         "total_provenance_pixels": int(provenance_valid.sum()),
-        "velocity_coverage_percent": float(valid_out.sum() / max(provenance_valid.sum(), 1) * 100.0),
+        "velocity_coverage_percent": float(
+            valid_out.sum() / max(provenance_valid.sum(), 1) * 100.0
+        ),
     }
     valid_values = v_out[valid_out > 0.5]
     if valid_values.size:
@@ -452,7 +484,9 @@ def compose_from_year_grids(
     return stack, stats
 
 
-def process_single_image(args: tuple[int, Path, Path, Path, list[dict[str, Any]], ProcessingOptions]) -> dict[str, Any]:
+def process_single_image(
+    args: tuple[int, Path, Path, Path, list[dict[str, Any]], ProcessingOptions],
+) -> dict[str, Any]:
     image_idx, image_path, provenance_dir, output_dir, catalog, options = args
     output_path = output_dir / image_path.name
     stats_path = output_dir / f"{image_path.stem}_stats.json"
@@ -495,9 +529,9 @@ def process_single_image(args: tuple[int, Path, Path, Path, list[dict[str, Any]]
             landsat_crs,
             options,
         )
-        if not year_grids:
-            raise ValueError("No usable annual velocity grids extracted")
-
+        # A tile can legitimately have no annual observations near its provenance
+        # years. Preserve it as an explicit all-invalid product instead of leaving
+        # a missing file that preprocessing could confuse with an I/O failure.
         output_data, compose_stats = compose_from_year_grids(
             years, provenance_valid, year_grids, options
         )
@@ -562,7 +596,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate date-aware velocity products from ITS_LIVE mosaics and HKH provenance"
     )
-    parser.add_argument("--server", default="desktop", help="Server name from configs/servers.yaml")
+    parser.add_argument(
+        "--server", default="desktop", help="Server name from configs/servers.yaml"
+    )
     parser.add_argument(
         "--variant",
         choices=sorted(VARIANT_DIRS),
@@ -582,8 +618,12 @@ def main() -> None:
     parser.add_argument("--no-max-error", action="store_true")
     parser.add_argument("--max-speed", type=float, default=1000.0)
     parser.add_argument("--err-floor", type=float, default=1.0)
-    parser.add_argument("--resampling", choices=("nearest", "bilinear"), default="nearest")
-    parser.add_argument("--tile-indices", default=None, help="Comma-separated tile indices")
+    parser.add_argument(
+        "--resampling", choices=("nearest", "bilinear"), default="nearest"
+    )
+    parser.add_argument(
+        "--tile-indices", default=None, help="Comma-separated tile indices"
+    )
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--skip-existing", action="store_true")
@@ -605,7 +645,11 @@ def main() -> None:
     if not args.provenance_dir.exists():
         raise FileNotFoundError(f"Missing provenance directory: {args.provenance_dir}")
 
-    logger.info("Server config loaded for %s; raw velocity_dir=%s", args.server, server_config.get("velocity_dir"))
+    logger.info(
+        "Server config loaded for %s; raw velocity_dir=%s",
+        args.server,
+        server_config.get("velocity_dir"),
+    )
     logger.info("Image dir: %s", args.image_dir)
     logger.info("Provenance dir: %s", args.provenance_dir)
     logger.info("Output dir: %s", args.output_dir)
@@ -632,7 +676,9 @@ def main() -> None:
         logger.info("No images to process")
         return
 
-    resampling = Resampling.nearest if args.resampling == "nearest" else Resampling.bilinear
+    resampling = (
+        Resampling.nearest if args.resampling == "nearest" else Resampling.bilinear
+    )
     options = ProcessingOptions(
         window_years=int(args.window_years),
         year_weight_tau=float(args.year_weight_tau),

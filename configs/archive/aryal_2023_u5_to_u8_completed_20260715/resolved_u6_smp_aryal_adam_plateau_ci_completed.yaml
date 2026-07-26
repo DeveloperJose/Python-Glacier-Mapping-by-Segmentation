@@ -1,0 +1,90 @@
+training_opts:
+  dataset_name: aryal_2023_landsat8_reproduction
+  run_name: aryal_2023_u6_smp_aryal_adam_plateau_ci
+  mlflow_experiment_name: sota_replication
+  mlflow_artifacts_enabled: false
+  diagnostic_log_on_step: false
+  progress_bar: false
+  seed: 41
+  augmentation_seed: 42
+  deterministic: true
+  epochs: 251
+  fine_tune: false
+  find_lr: false
+  early_stopping: null
+  early_stopping_min_delta: 0.001
+  val_viz_n: 0
+  val_viz_every_n_epochs: 0
+  val_viz_selection: iou
+  run_test_eval: true
+  test_eval_n: 0
+  viz_scale_factor: 1
+  precision: 32-true
+  accumulate_grad_batches: 2
+  num_sanity_val_steps: 0
+loader_opts:
+  batch_size: 4
+  persistent_workers: false
+  prefetch_factor: 2
+  output_classes:
+  - 1
+  normalize: mean-std
+  robust_scaling: false
+  class_names:
+  - BG
+  - CleanIce
+  - Debris
+  augmentations:
+    h_flip_prob: 0.15
+    v_flip_prob: 0.15
+    rotate90_prob: 0.0
+    transpose_prob: 0.15
+    legacy_torch_rng: true
+  num_workers: 8
+  pin_memory: false
+  seed: 42
+  val_shuffle: true
+  shared_loader_generator: true
+  processed_dir: /home/devj/local-arch/data/HKH/aryal_2023_landsat8_reproduction/
+metrics_opts:
+  metrics:
+  - IoU
+  - precision
+  - recall
+  threshold:
+  - 0.5
+  - 0.5
+loss_opts:
+  name: custom
+  label_smoothing: 0.0
+  class_weights:
+  - 0
+  - 1
+  use_velocity_loss: false
+  velocity_high_speed_threshold: 3.16
+  velocity_loss_weight: 0.05
+  velocity_loss_warmup_epochs: 10
+  velocity_loss_ramp_epochs: 10
+  velocity_loss_clip: null
+  target_class_ids:
+  - 1
+  behavior: aryal_2023
+  binary_non_target_policy: ignore
+model_opts:
+  framework: smp
+  name: Unet
+  channels_last: false
+  args:
+    encoder_name: resnet18
+    encoder_weights: null
+optim_opts:
+  name: Adam
+  args:
+    lr: 0.0003
+scheduler_opts:
+  name: ReduceLROnPlateau
+  args:
+    mode: min
+    patience: 15
+    factor: 0.1
+    min_lr: 1.0e-09

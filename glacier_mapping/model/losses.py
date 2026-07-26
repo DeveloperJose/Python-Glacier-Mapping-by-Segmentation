@@ -9,23 +9,30 @@ def make_onehot(
     num_classes: int,
     output_classes: List[int],
     device: torch.device,
+    binary_non_target_policy: str = "background",
 ) -> torch.Tensor:
     valid = y_int != 255
     if len(output_classes) == 1:
         binary_class = int(output_classes[0])
+        if binary_non_target_policy == "background":
+            background = (y_int != binary_class) & valid
+        elif binary_non_target_policy == "ignore":
+            background = (y_int == 0) & valid
+        else:
+            raise ValueError(
+                "binary_non_target_policy must be 'background' or 'ignore', got "
+                f"{binary_non_target_policy!r}"
+            )
         target = torch.stack(
             (
-                (y_int != binary_class) & valid,
+                background,
                 (y_int == binary_class) & valid,
             ),
             dim=1,
         )
     else:
         target = torch.stack(
-            [
-                (y_int == int(class_idx)) & valid
-                for class_idx in output_classes
-            ],
+            [(y_int == int(class_idx)) & valid for class_idx in output_classes],
             dim=1,
         )
     if target.shape[1] != num_classes:
@@ -51,6 +58,8 @@ class customloss(nn.Module):
         velocity_loss_warmup_epochs: int = 10,
         velocity_loss_ramp_epochs: int = 10,
         output_classes: Optional[List[int]] = None,
+        behavior: str = "modern",
+        binary_non_target_policy: str = "background",
     ):
         super().__init__()
         self.act = act
@@ -73,6 +82,12 @@ class customloss(nn.Module):
         if output_classes is None:
             output_classes = [0, 1, 2]
         self.output_classes = output_classes
+        self.behavior = behavior
+        self.binary_non_target_policy = binary_non_target_policy
+        if self.behavior not in {"modern", "aryal_2023"}:
+            raise ValueError(f"Unsupported loss behavior: {self.behavior!r}")
+        if self.behavior == "aryal_2023" and class_weights not in (None, [0, 1]):
+            raise ValueError("Aryal loss requires foreground-only class weights [0, 1]")
 
         self.last_velocity_loss: Optional[torch.Tensor] = None
         self.last_velocity_base: Optional[torch.Tensor] = None
@@ -100,7 +115,13 @@ class customloss(nn.Module):
         y_int = target_int.long()
         ignore_mask = y_int != 255
         ignore_mask_exp = ignore_mask.unsqueeze(1).float().to(pred.device)
-        target = make_onehot(y_int, c, self.output_classes, pred.device).detach()
+        target = make_onehot(
+            y_int,
+            c,
+            self.output_classes,
+            pred.device,
+            binary_non_target_policy=self.binary_non_target_policy,
+        ).detach()
 
         if c <= 1:
             raise ValueError(
@@ -115,6 +136,9 @@ class customloss(nn.Module):
             pred_prob = self.act(pred)
             target_prob = target
             C_eff = c
+
+        if self.behavior == "aryal_2023":
+            return self._forward_aryal_2023(pred_prob, target)
 
         pred_prob = pred_prob * ignore_mask_exp
         if self.label_smoothing > 0 and C_eff > 1:
@@ -140,7 +164,11 @@ class customloss(nn.Module):
         weighted_prod = pred_prob * target_prob * ignore_mask_exp
 
         numerator = 2 * weighted_prod.sum(dim=(0, 2, 3)) + self.smooth
-        denominator = weighted_pred.sum(dim=(0, 2, 3)) + weighted_target.sum(dim=(0, 2, 3)) + self.smooth
+        denominator = (
+            weighted_pred.sum(dim=(0, 2, 3))
+            + weighted_target.sum(dim=(0, 2, 3))
+            + self.smooth
+        )
         dice_per_class = 1 - numerator / denominator
 
         if weights_tensor is not None:
@@ -208,6 +236,45 @@ class customloss(nn.Module):
             self.last_velocity_valid = True
 
         return [dice_loss_scalar, boundary_loss, velocity_loss]
+
+    def _forward_aryal_2023(
+        self, pred_prob: torch.Tensor, target: torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Exact custom-loss arithmetic from Aryal public commit 378c053."""
+        n, channels, _, _ = pred_prob.shape
+        valid = torch.sum(target, dim=1) == 1
+
+        gt_b = F.max_pool2d(1 - target, self.theta0, 1, (self.theta0 - 1) // 2) - (
+            1 - target
+        )
+        pred_b = F.max_pool2d(1 - pred_prob, self.theta0, 1, (self.theta0 - 1) // 2) - (
+            1 - pred_prob
+        )
+        gt_b_ext = F.max_pool2d(gt_b, self.theta, 1, (self.theta - 1) // 2)
+        pred_b_ext = F.max_pool2d(pred_b, self.theta, 1, (self.theta - 1) // 2)
+
+        gt_b = gt_b.view(n, channels, -1)
+        pred_b = pred_b.view(n, channels, -1)
+        gt_b_ext = gt_b_ext.view(n, channels, -1)
+        pred_b_ext = pred_b_ext.view(n, channels, -1)
+        boundary_precision = (pred_b * gt_b_ext).sum(dim=2) / (pred_b.sum(dim=2) + 1e-7)
+        boundary_recall = (pred_b_ext * gt_b).sum(dim=2) / (gt_b.sum(dim=2) + 1e-7)
+        boundary_f1 = (
+            2
+            * boundary_precision
+            * boundary_recall
+            / (boundary_precision + boundary_recall + 1e-7)
+        )
+        boundary_loss = torch.mean(1 - boundary_f1)
+
+        pred_hwc = pred_prob.permute(0, 2, 3, 1)
+        target_hwc = target.permute(0, 2, 3, 1)
+        dice_per_class = 1 - (
+            2.0 * (pred_hwc * target_hwc)[valid].sum(dim=0) + self.smooth
+        ) / (pred_hwc[valid].sum(dim=0) + target_hwc[valid].sum(dim=0) + self.smooth)
+        foreground_weights = pred_prob.new_tensor([0.0, 1.0])
+        dice_loss = (dice_per_class * foreground_weights).sum()
+        return [dice_loss, boundary_loss, pred_prob.new_zeros(())]
 
     def _compute_velocity_weight(self, current_epoch: Optional[int]) -> float:
         if current_epoch is None:

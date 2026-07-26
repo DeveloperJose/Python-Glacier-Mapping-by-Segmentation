@@ -56,7 +56,8 @@ class GlacierSegmentationModule(pl.LightningModule):
         self.class_names = class_names
         self.output_classes = (
             loader_opts.get("output_classes", output_classes)
-            if loader_opts else output_classes
+            if loader_opts
+            else output_classes
         )
 
         self.landsat_channels = landsat_channels
@@ -112,6 +113,8 @@ class GlacierSegmentationModule(pl.LightningModule):
             "theta0",
             "theta",
             "class_weights",
+            "behavior",
+            "binary_non_target_policy",
             "velocity_high_speed_threshold",
             "velocity_loss_weight",
             "velocity_loss_warmup_epochs",
@@ -121,6 +124,8 @@ class GlacierSegmentationModule(pl.LightningModule):
 
         loss_args["output_classes"] = self.output_classes
         self.loss_fn = customloss(**loss_args)
+        self.loss_behavior = str(loss_opts.get("behavior", "modern"))
+        self.aryal_2023_behavior = self.loss_behavior == "aryal_2023"
 
         sigma_init = float(model_opts.get("sigma_init", 0.5))
         sigma_floor = float(model_opts.get("sigma_floor", 0.0))
@@ -143,12 +148,16 @@ class GlacierSegmentationModule(pl.LightningModule):
             model_opts.get("learnable_sigma_boundary", True)
         )
 
-        self.raw_log_var_dice = self._make_log_var(
-            "dice", sigma_dice_init, self.learnable_sigma_dice
-        )
-        self.raw_log_var_boundary = self._make_log_var(
-            "boundary", sigma_boundary_init, self.learnable_sigma_boundary
-        )
+        if self.aryal_2023_behavior:
+            self.sigma_dice = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+            self.sigma_boundary = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        else:
+            self.raw_log_var_dice = self._make_log_var(
+                "dice", sigma_dice_init, self.learnable_sigma_dice
+            )
+            self.raw_log_var_boundary = self._make_log_var(
+                "boundary", sigma_boundary_init, self.learnable_sigma_boundary
+            )
 
         self.velocity_idx = None
         self.velocity_mask_idx = None
@@ -513,6 +522,14 @@ class GlacierSegmentationModule(pl.LightningModule):
                 on_epoch=True,
             )
 
+        if self.aryal_2023_behavior:
+            total_loss = (
+                losses[0] / (2 * torch.square(self.sigma_dice))
+                + losses[1] / (2 * torch.square(self.sigma_boundary))
+                + torch.abs(torch.log(self.sigma_dice * self.sigma_boundary))
+            )
+            return total_loss.abs()
+
         weighted_components = [
             ("dice", losses[0], self.raw_log_var_dice),
             ("boundary", losses[1], self.raw_log_var_boundary),
@@ -581,14 +598,22 @@ class GlacierSegmentationModule(pl.LightningModule):
             {"params": self.model.parameters(), **optimizer_args},
         ]
         log_var_optimizer_args = {**optimizer_args, "weight_decay": 0.0}
-        if isinstance(self.raw_log_var_dice, nn.Parameter):
-            param_groups.append(
-                {"params": [self.raw_log_var_dice], **log_var_optimizer_args}
+        if self.aryal_2023_behavior:
+            param_groups.extend(
+                [
+                    {"params": [self.sigma_dice], **log_var_optimizer_args},
+                    {"params": [self.sigma_boundary], **log_var_optimizer_args},
+                ]
             )
-        if isinstance(self.raw_log_var_boundary, nn.Parameter):
-            param_groups.append(
-                {"params": [self.raw_log_var_boundary], **log_var_optimizer_args}
-            )
+        else:
+            if isinstance(self.raw_log_var_dice, nn.Parameter):
+                param_groups.append(
+                    {"params": [self.raw_log_var_dice], **log_var_optimizer_args}
+                )
+            if isinstance(self.raw_log_var_boundary, nn.Parameter):
+                param_groups.append(
+                    {"params": [self.raw_log_var_boundary], **log_var_optimizer_args}
+                )
 
         kw = {**optimizer_args}
         if fused is True:
@@ -658,7 +683,30 @@ class GlacierSegmentationModule(pl.LightningModule):
             metric_obj: Any = metric_obj
             metric_obj.reset()
 
+    def on_validation_model_eval(self) -> None:
+        if self.aryal_2023_behavior:
+            # Aryal Framework never switches the model to eval mode. Validation
+            # therefore uses batch statistics and active spatial dropout.
+            self.model.train()
+        else:
+            super().on_validation_model_eval()
+
+    def _aryal_second_validation_forward_pass(self) -> None:
+        """Preserve upstream's accidental second pass over val as "test"."""
+        if not self.aryal_2023_behavior or self.trainer.sanity_checking:
+            return
+        loader = self.trainer.val_dataloaders
+        if isinstance(loader, (list, tuple)):
+            loader = loader[0]
+        self.model.train()
+        with torch.no_grad():
+            for x, _target in loader:
+                if x.dtype != torch.float32:
+                    x = x.float()
+                self(x.to(self.device))
+
     def on_validation_epoch_end(self):
+        self._aryal_second_validation_forward_pass()
         for metric_name, metric_obj in self.val_metrics.items():
             metric_obj: Any = metric_obj
             metric_obj.reset()
