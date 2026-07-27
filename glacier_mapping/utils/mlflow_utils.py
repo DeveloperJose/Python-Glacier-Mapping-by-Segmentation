@@ -12,13 +12,25 @@ All functions are module-level (converted from MLflowManager static methods).
 import warnings
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Optional
 
-import mlflow
-
-from glacier_mapping.utils.config import load_server_config  # noqa: F401 — re-exported for scripts/train.py
+from glacier_mapping.utils.config import (  # noqa: F401 — re-exported for scripts/train.py
+    load_server_config,
+)
 
 MLFLOW_ARTIFACT_UPLOAD_ENABLED = False
+
+
+def _require_mlflow() -> ModuleType:
+    """Import MLflow only when tracking is explicitly used."""
+    try:
+        import mlflow
+    except ImportError as exc:
+        raise RuntimeError(
+            'MLflow is optional; install it with `uv pip install -e ".[tracking]"`.'
+        ) from exc
+    return mlflow
 
 
 def categorize_experiment(config: dict) -> str:
@@ -65,9 +77,7 @@ def extract_mlflow_params(config: dict, server_config: dict) -> dict:
             "full_eval_every": training_opts.get("full_eval_every"),
             "num_viz_samples": training_opts.get("num_viz_samples"),
             "mlflow_experiment_name": training_opts.get("mlflow_experiment_name"),
-            "mlflow_artifacts_enabled": training_opts.get(
-                "mlflow_artifacts_enabled"
-            ),
+            "mlflow_artifacts_enabled": training_opts.get("mlflow_artifacts_enabled"),
             "experiment_prefix": training_opts.get("experiment_prefix"),
             "seed": training_opts.get("seed"),
             "deterministic": training_opts.get("deterministic"),
@@ -242,6 +252,7 @@ def setup_mlflow_logger(
 ):
     """Setup MLflow logger with connection testing."""
     try:
+        mlflow = _require_mlflow()
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
 
@@ -279,6 +290,7 @@ def attempt_connection_with_retry(
         return False, last_attempt_epoch, failed_attempts
 
     try:
+        mlflow = _require_mlflow()
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
 
@@ -297,6 +309,7 @@ def attempt_connection_with_retry(
 def log_params_safe(params: dict, logger_name: str = "MLflow"):
     """Log parameters with error handling."""
     try:
+        mlflow = _require_mlflow()
         mlflow.log_params(params)
     except Exception as e:
         warnings.warn(f"Failed to log parameters to {logger_name}: {e}")
@@ -307,6 +320,7 @@ def log_metrics_safe(
 ):
     """Log metrics with error handling."""
     try:
+        mlflow = _require_mlflow()
         mlflow.log_metrics(metrics, step=step)
     except Exception as e:
         warnings.warn(f"Failed to log metrics to {logger_name}: {e}")
@@ -319,6 +333,7 @@ def log_artifact_safe(
 ):
     """Log artifact with error handling."""
     try:
+        mlflow = _require_mlflow()
         mlflow.log_artifact(local_path, artifact_path=artifact_path)
     except Exception as e:
         warnings.warn(f"Failed to log artifact to {logger_name}: {e}")

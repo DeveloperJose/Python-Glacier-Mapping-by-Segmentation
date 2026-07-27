@@ -1,7 +1,7 @@
 [project]
 name = "glacier_mapping"
 version = "0.1.0"
-description = ""
+description = "Reproducible HKH glacier segmentation pipeline"
 requires-python = ">=3.10"
 
 dependencies = [
@@ -13,18 +13,11 @@ dependencies = [
   "pyyaml",
   "rasterio",
   "scikit-image",
-  "scikit-learn",
-  "seaborn",
   "tensorboard",
   "torch",
-  "torchvision",
   "tqdm",
-  "elasticdeform",
-  "earthaccess",
   "pyproj",
-  "netcdf4",
   "xarray",
-  "rioxarray",
   "earthengine-api",
   "zarr",
   "s3fs",
@@ -32,18 +25,14 @@ dependencies = [
   "opencv-python",
   "matplotlib>=3.10.7",
   "pytorch-lightning>=2.0.0",
-  "mlflow>=2.0.0",
-  "hydra-core>=1.3.0",
   "torchmetrics>=1.0.0",
   "psutil>=7.1.3",
-  "ray[data,serve,server,train,tune]>=2.52.1",
   "albumentations>=1.3.0",
-  "bibtexparser>=1.4.3",
-  "requests>=2.32.5",
 ]
 
 [project.optional-dependencies]
 dev = ["ruff", "ipykernel"]
+tracking = ["mlflow>=2.0.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -56,5 +45,4 @@ packages = ["glacier_mapping"]
 dev = [
     "pyright>=1.1.407",
     "ruff>=0.14.6",
-    "tensorboard>=2.20.0",
 ]

@@ -2,6 +2,9 @@
 .python-version
 .vscode
 output/
+/configs/servers.local.yaml
+/data/
+sequential_training_*.log
 
 # PyTorch Lightning default directories (all output should be in output/ instead)
 checkpoints/

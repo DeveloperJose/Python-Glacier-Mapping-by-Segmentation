@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate full preprocessing datasets for configs under configs/datasets.
 # Usage:
-#   uv run bash run_all_preprocess.sh desktop
-#   uv run bash run_all_preprocess.sh desktop 'comprehensive_v3_hkh_full8_*.yaml'
+#   uv run bash run_all_preprocess.sh local
+#   uv run bash run_all_preprocess.sh local 'c02_*.yaml'
 # Extra args after the optional glob are passed to scripts/preprocess.py.
 
 set -euo pipefail
@@ -37,6 +37,10 @@ if [[ ${#configs[@]} -eq 0 ]]; then
 fi
 
 for config in "${configs[@]}"; do
+  if [[ "$(basename "${config}")" == "aryal_2023.yaml" ]]; then
+    echo ">>> Skipping ${config}; use dataset/create_aryal_2023_dataset.py"
+    continue
+  fi
   echo ">>> Regenerating ${config} for server ${SERVER}"
   uv run python scripts/preprocess.py --server "${SERVER}" --config "${config}" --regenerate-full "$@"
 done

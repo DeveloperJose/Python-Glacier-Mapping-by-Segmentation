@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import yaml
 
 import torch
 
@@ -17,6 +16,7 @@ from glacier_mapping.model.evaluation import (
     resolve_prediction_device,
 )
 from glacier_mapping.utils.gpu import cleanup_gpu_memory
+from glacier_mapping.utils.config import load_servers_config
 
 
 def clean_run_name(run_name: str) -> str:
@@ -156,7 +156,7 @@ def run_prediction_on_models(
 
 def main_prediction_logic(args) -> dict:
     try:
-        servers_config = yaml.safe_load(Path("configs/servers.yaml").read_text())
+        servers_config = load_servers_config()
 
         if hasattr(args, "server") and args.server:
             current_server = args.server

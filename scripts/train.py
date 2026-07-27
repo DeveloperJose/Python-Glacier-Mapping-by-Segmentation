@@ -36,6 +36,7 @@ from glacier_mapping.lightning.callbacks import (
 )
 import glacier_mapping.utils.mlflow_utils as mlflow_utils
 from glacier_mapping.utils.error_handler import setup_error_handler
+from glacier_mapping.utils.config import load_server_config, load_servers_config
 import glacier_mapping.utils.logging as log
 
 MLFLOW_AVAILABLE = True
@@ -90,8 +91,7 @@ def load_config(config_path: str, server: str) -> Dict[str, Any]:
 
     servers_yaml_path = pathlib.Path("configs/servers.yaml")
     if servers_yaml_path.exists():
-        with open(servers_yaml_path) as f:
-            servers = yaml.safe_load(f)
+        servers = load_servers_config(str(servers_yaml_path))
 
         if server in servers:
             server_config = servers[server]
@@ -443,8 +443,9 @@ def main():
     parser.add_argument(
         "--mlflow-enabled",
         type=str,
-        default="true",
-        help="Enable MLflow logging (true/false)",
+        choices=("true", "false"),
+        default=None,
+        help="Enable MLflow logging (default: training_opts.mlflow_enabled=false)",
     )
     parser.add_argument(
         "--mlflow-artifacts-enabled",
@@ -458,8 +459,8 @@ def main():
     parser.add_argument(
         "--tracking-uri",
         type=str,
-        default="https://mlflow.josegperez.com/",
-        help="MLflow tracking URI",
+        default=os.environ.get("MLFLOW_TRACKING_URI"),
+        help="MLflow tracking URI (or set MLFLOW_TRACKING_URI)",
     )
     parser.add_argument(
         "--experiment-name",
@@ -493,16 +494,7 @@ def main():
     config = load_config(str(config_path), args.server)
 
     servers_yaml_path = pathlib.Path("configs") / "servers.yaml"
-    if MLFLOW_AVAILABLE:
-        server_config = mlflow_utils.load_server_config(
-            args.server, str(servers_yaml_path)
-        )
-    else:
-        with open(servers_yaml_path, "r") as f:
-            servers = yaml.safe_load(f)
-        if args.server not in servers:
-            raise ValueError(f"Server '{args.server}' not found in {servers_yaml_path}")
-        server_config = servers[args.server]
+    server_config = load_server_config(args.server, str(servers_yaml_path))
 
     training_opts = config.get("training_opts", {})
     loader_opts = config.get("loader_opts", {})
@@ -516,7 +508,15 @@ def main():
         "batch_size_finder_opts", training_opts.get("batch_size_finder", {})
     )
 
-    mlflow_enabled = args.mlflow_enabled.lower() == "true"
+    if args.mlflow_enabled is None:
+        mlflow_enabled = bool(training_opts.get("mlflow_enabled", False))
+    else:
+        mlflow_enabled = args.mlflow_enabled == "true"
+    if mlflow_enabled and not args.tracking_uri:
+        raise ValueError(
+            "MLflow was enabled but no tracking URI was provided. Use "
+            "--tracking-uri or set MLFLOW_TRACKING_URI."
+        )
     if args.mlflow_artifacts_enabled is not None:
         mlflow_artifacts_enabled = args.mlflow_artifacts_enabled.lower() == "true"
     else:

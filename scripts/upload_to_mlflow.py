@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from glacier_mapping.utils.config import load_server_config
+
 
 try:
     from mlflow.store.artifact.artifact_repository_registry import (
@@ -373,22 +375,11 @@ def upload_single_run(
     """
     print(f"Processing run: {run_dir.name}")
 
-    # Load server configuration
-    import yaml
-
-    servers_yaml_path = Path("configs/servers.yaml")
-    if not servers_yaml_path.exists():
-        print(f"Error: servers.yaml not found at {servers_yaml_path}")
+    try:
+        server_config = load_server_config(server_name)
+    except (FileNotFoundError, ValueError) as error:
+        print(f"Error: {error}")
         return False
-
-    with open(servers_yaml_path, "r") as f:
-        servers = yaml.safe_load(f)
-
-    if server_name not in servers:
-        print(f"Error: Server '{server_name}' not found in servers.yaml")
-        return False
-
-    server_config = servers[server_name]
     print(f"Using server config: {server_name}")
     print(f"  Image directory: {server_config.get('image_dir')}")
 
@@ -687,8 +678,8 @@ def main():
     parser.add_argument(
         "--tracking-uri",
         type=str,
-        default="https://mlflow.josegperez.com/",
-        help="MLflow tracking URI",
+        default=os.environ.get("MLFLOW_TRACKING_URI"),
+        help="MLflow tracking URI (or set MLFLOW_TRACKING_URI)",
     )
     parser.add_argument(
         "--experiment-type",
@@ -733,6 +724,9 @@ def main():
 
     if not MLFLOW_AVAILABLE:
         print("Error: MLflow utilities not available. Cannot proceed.")
+        return 1
+    if not args.tracking_uri:
+        print("Error: provide --tracking-uri or set MLFLOW_TRACKING_URI before upload")
         return 1
 
     if args.batch:

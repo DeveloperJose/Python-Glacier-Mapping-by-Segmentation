@@ -5,8 +5,8 @@
 training_opts:
   dataset_name: "comprehensive_v3_landsat_dem" # Packed dataset recipe (override in experiment configs)
   run_name: "" # Optional run identifier (appended to dataset_name)
-  mlflow_experiment_name: "sota_replication" # Put all publication reruns in one MLflow experiment
-  mlflow_artifacts_enabled: false # Keep MLflow scalar metrics on, but skip artifact uploads during training
+  mlflow_enabled: false # Opt in with --mlflow-enabled true and an explicit tracking URI
+  mlflow_artifacts_enabled: false # Artifact uploads are a separate opt-in
   diagnostic_log_on_step: false # Step-level component diagnostics are for debugging/profiling only
   progress_bar: false # Disabled for throughput; profilers provide timing evidence
   # experiment_prefix: "reproducibility" # Legacy fallback when mlflow_experiment_name is unset

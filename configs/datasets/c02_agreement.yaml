@@ -1,0 +1,19 @@
+# Comprehensive v3 using C02/T1 raw-DN rebuilt HKH full8 agreement_quality_step3 relaxed-valid fishnet GeoTIFFs.
+output_name: "comprehensive_v3_hkh_full8_c02t1_dn_agreement_quality_step3_relaxed_valid"
+image_subdir: "HKH_full8_c02t1_dn_agreement_quality_step3_relaxed_valid"
+
+window_size: [512, 512]
+overlap: 64
+filter: 0.1
+test: 0.2
+val: 0.1
+
+add_velocity: true
+velocity_clip_m_per_year: 1000.0
+add_ndvi: true
+add_ndwi: true
+add_ndsi: true
+add_hsv: true
+physics_res: 8
+physics_scale: 1.0
+save_skipped_visualizations: false

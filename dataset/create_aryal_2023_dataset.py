@@ -18,10 +18,10 @@ import numpy as np
 import pandas as pd
 import pyogrio
 import rasterio
-import yaml
 from tqdm import tqdm
 
 from glacier_mapping.data.slice import get_mask
+from glacier_mapping.utils.config import load_server_config
 
 WINDOW_SIZE = 512
 OVERLAP = 64
@@ -246,14 +246,13 @@ def pack_split(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server", default="desktop")
+    parser.add_argument("--server", default="local")
     parser.add_argument("--output-name", default="aryal_2023_landsat8_reproduction")
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path(
-            "/home/devj/local-arch/data/HKH_raw/labels/HKH_CIDC_5basins_all.shp"
-        ),
+        default=None,
+        help="ICIMOD label shapefile (default: <server.labels_dir>/HKH_CIDC_5basins_all.shp)",
     )
     parser.add_argument(
         "--max-images-per-split",
@@ -263,10 +262,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    servers = yaml.safe_load(Path("configs/servers.yaml").read_text())
-    server = servers[args.server]
+    server = load_server_config(args.server)
     image_dir = Path(server["image_dir"])
     dem_dir = Path(server["dem_dir"])
+    labels_path = args.labels or Path(server["labels_dir"]) / "HKH_CIDC_5basins_all.shp"
     output_dir = Path(server["processed_data_path"]) / args.output_name
     if output_dir.exists():
         raise FileExistsError(
@@ -280,7 +279,7 @@ def main() -> None:
     if missing_dems:
         raise FileNotFoundError(f"Missing DEM pairs: {missing_dems}")
 
-    labels = pyogrio.read_dataframe(args.labels, on_invalid="fix")
+    labels = pyogrio.read_dataframe(labels_path, on_invalid="fix")
     if len(labels) != 30096:
         raise ValueError(f"Expected 30096 Aryal label features, found {len(labels)}")
     classes = sorted(labels["Glaciers"].unique().tolist())

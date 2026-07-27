@@ -16,11 +16,12 @@ Features:
 - Automatic cleanup of temporary files
 
 Usage:
-    uv run python scripts/test_all_tasks.py [--server desktop] [--subset-size 5] [--epochs 2]
+    uv run python scripts/test.py [--server local] [--subset-size 5] [--epochs 2]
 """
 
 import argparse
 import copy
+import os
 import sys
 import tempfile
 import traceback
@@ -76,7 +77,7 @@ TEST_DATASET_NAME = "comprehensive_v3"
 class GlacierTaskTestSuite:
     """Comprehensive test suite for glacier mapping tasks."""
 
-    def __init__(self, server: str = "desktop", subset_size: int = 5, epochs: int = 2):
+    def __init__(self, server: str = "local", subset_size: int = 5, epochs: int = 2):
         self.server = server
         self.subset_size = subset_size
         self.epochs = epochs
@@ -331,7 +332,7 @@ class GlacierTaskTestSuite:
 
         # Check for debris ice config (velocity loss)
         debris_velocity_config_path = Path(
-            "configs/desktop/debris_ice/velocity_loss_experiment.yaml"
+            "configs/local/debris_ice/velocity_loss_experiment.yaml"
         )
         if debris_velocity_config_path.exists():
             existing_configs["debris_ice_velocity"] = str(debris_velocity_config_path)
@@ -352,7 +353,7 @@ class GlacierTaskTestSuite:
 
         # Check for debris ice config (class weighting)
         debris_weighted_config_path = Path(
-            "configs/desktop/debris_ice/class_weighting_experiment.yaml"
+            "configs/local/debris_ice/class_weighting_experiment.yaml"
         )
         if debris_weighted_config_path.exists():
             existing_configs["debris_ice_weighted"] = str(debris_weighted_config_path)
@@ -1198,6 +1199,30 @@ class GlacierTaskTestSuite:
 class TestVelocityLossMath(unittest.TestCase):
     """Test velocity loss mathematical correctness and Kendall formulation."""
 
+    def setUp(self):
+        self.metadata_dir = tempfile.TemporaryDirectory()
+        metadata = {
+            "band_names": [
+                "B1",
+                "B2",
+                "B3",
+                "B4",
+                "B5",
+                "B6_VCID1",
+                "B6_VCID2",
+                "B7",
+                "velocity",
+                "velocity_x",
+                "velocity_y",
+                "velocity_mask",
+            ]
+        }
+        metadata_path = Path(self.metadata_dir.name) / "band_metadata.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    def tearDown(self):
+        self.metadata_dir.cleanup()
+
     def test_velocity_loss_basic_functionality(self):
         batch_size, height, width = 2, 32, 32
         pred_logits = torch.randn(batch_size, 2, height, width)
@@ -1224,7 +1249,7 @@ class TestVelocityLossMath(unittest.TestCase):
             "optim_opts": {},
             "metrics_opts": {},
             "loader_opts": {
-                "processed_dir": "demo_data",
+                "processed_dir": self.metadata_dir.name,
                 "velocity_channels": True,
                 "output_classes": [1],
                 "class_names": ["background", "foreground"],
@@ -1250,7 +1275,7 @@ class TestVelocityLossMath(unittest.TestCase):
             optim_opts={},
             metrics_opts={},
             loader_opts={
-                "processed_dir": "demo_data",
+                "processed_dir": self.metadata_dir.name,
                 "velocity_channels": True,
                 "output_classes": [1],
                 "class_names": ["background", "foreground"],
@@ -1351,7 +1376,7 @@ class TestVelocityLossMath(unittest.TestCase):
             optim_opts={},
             metrics_opts={},
             loader_opts={
-                "processed_dir": "demo_data",
+                "processed_dir": self.metadata_dir.name,
                 "velocity_channels": True,
                 "output_classes": [1],
                 "class_names": ["bg", "fg"],
@@ -1396,9 +1421,10 @@ class TestSliceFunctions(unittest.TestCase):
 
 class TestChwAugmentations(unittest.TestCase):
     def _real_high_valid_slices(self, limit: int = 2):
-        root = Path(
-            "/home/devj/local-arch/data/HKH/gen_robust_comprehensive_dci_clean_v2/train"
-        )
+        configured = os.environ.get("GLACIER_TEST_DATA_DIR")
+        if not configured:
+            self.skipTest("GLACIER_TEST_DATA_DIR is not configured")
+        root = Path(configured)
         if not root.exists():
             self.skipTest(f"Local reference dataset not found: {root}")
 
@@ -1499,9 +1525,16 @@ class TestDiceParity(unittest.TestCase):
     def test_aryal_custom_loss_matches_pinned_upstream(self):
         import importlib.util
 
-        upstream_path = Path(
-            "old_code/Aryal007_glacier_mapping_upstream/segmentation/model/losses.py"
+        configured = os.environ.get("ARYAL_UPSTREAM_DIR")
+        upstream_root = (
+            Path(configured)
+            if configured
+            else Path(__file__).resolve().parents[2]
+            / "glacier-mapping-aryal-upstream-archive"
         )
+        upstream_path = upstream_root / "segmentation/model/losses.py"
+        if not upstream_path.exists():
+            self.skipTest("Set ARYAL_UPSTREAM_DIR to run upstream loss parity")
         spec = importlib.util.spec_from_file_location(
             "aryal_upstream_losses", upstream_path
         )
@@ -1899,9 +1932,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Comprehensive glacier mapping test suite"
     )
-    parser.add_argument(
-        "--server", default="desktop", help="Server configuration to use"
-    )
+    parser.add_argument("--server", default="local", help="Server configuration to use")
     parser.add_argument(
         "--subset-size", type=int, default=5, help="Number of files to test per split"
     )

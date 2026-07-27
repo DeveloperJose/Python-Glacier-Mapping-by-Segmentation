@@ -25,6 +25,7 @@ from glacier_mapping.data.data import (
     get_no_normalize_channel_names,
     load_band_names,
 )
+from glacier_mapping.utils.config import load_server_config
 
 import matplotlib
 
@@ -113,14 +114,18 @@ PACKED_RECIPES: dict[str, list[str]] = {
 }
 
 
-def load_config_with_server_paths(config_path, server_name="desktop"):
+def load_config_with_server_paths(config_path, server_name="local"):
     slice_config = Dict(yaml.safe_load(open(config_path)))
 
-    servers_cfg = Dict(yaml.safe_load(Path("configs/servers.yaml").read_text()))
-    server = servers_cfg[server_name]
+    server = Dict(load_server_config(server_name))
 
     if "image_dir" not in slice_config:
-        slice_config.image_dir = server.image_dir
+        if "image_subdir" in slice_config and "raw_data_path" in server:
+            slice_config.image_dir = str(
+                Path(server.raw_data_path) / slice_config.image_subdir
+            )
+        else:
+            slice_config.image_dir = server.image_dir
     if "dem_dir" not in slice_config:
         slice_config.dem_dir = server.dem_dir
     if "labels_dir" not in slice_config:
@@ -128,7 +133,12 @@ def load_config_with_server_paths(config_path, server_name="desktop"):
     slice_config.out_dir = f"{server.processed_data_path}/{slice_config.output_name}"
 
     if "velocity_dir" not in slice_config and "velocity_dir" in server:
-        slice_config.velocity_dir = server.velocity_dir
+        if "velocity_subdir" in slice_config and "raw_data_path" in server:
+            slice_config.velocity_dir = str(
+                Path(server.raw_data_path) / slice_config.velocity_subdir
+            )
+        else:
+            slice_config.velocity_dir = server.velocity_dir
 
     return slice_config
 
@@ -548,7 +558,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="./configs/datasets/comprehensive_v3.yaml",
+        default="./configs/datasets/dissertation.yaml",
         help="Path to preprocessing config file",
     )
     parser.add_argument(
@@ -601,8 +611,8 @@ if __name__ == "__main__":
 
     if not args.regenerate_full:
         source_dataset = args.source_dataset or conf.output_name
-        servers_cfg = Dict(yaml.safe_load(Path("configs/servers.yaml").read_text()))
-        output_root = Path(servers_cfg[args.server].processed_data_path)
+        server = Dict(load_server_config(args.server))
+        output_root = Path(server.processed_data_path)
         source_dir = output_root / source_dataset
         recipe_names = (
             list(PACKED_RECIPES.keys())

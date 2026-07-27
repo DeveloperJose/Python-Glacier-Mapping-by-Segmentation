@@ -1,846 +1,146 @@
-#!/bin/bash
-################################################################################
-# Sequential Training Script for Glacier Mapping
-#
-# Usage: ./run_sequential_training.sh SERVER [OPTIONS]
-#
-# This script runs all config files for a specified server sequentially,
-# continuing on failure and logging results to both console and summary file.
-################################################################################
-
+#!/usr/bin/env bash
 set -o pipefail
 
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m' # No Color
-BOLD='\033[1m'
-
-# Default values
-GPU=0
-MLFLOW_URI="https://mlflow.josegperez.com/"
-DRY_RUN=false
-PAUSE_SECONDS=60
-NTFY_TOPIC=""
-NTFY_URL="https://ntfy.sh"
-
-# New priority and filtering options
-TASK_FILTER=""                # Empty = all tasks
-PRIORITY_ORDER="dci,ci,multi" # Default priority: DCI → CI → Multi
-EXCLUDE_BASE=false
-ONLY_BASE=false
-PHYSICS_VELOCITY_PRIORITY=false # Prioritize physics+velocity configs within each task
-GPU_FILTER=""                   # Filter by GPU designation (e.g., "gpu0", "gpu1")
-
-# Script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
-################################################################################
-# Helper Functions
-################################################################################
-
-print_header() {
-    echo -e "${CYAN}============================================================${NC}"
-    echo -e "${BOLD}$1${NC}"
-    echo -e "${CYAN}============================================================${NC}"
+usage() {
+    printf '%s\n' \
+        "Usage: $0 SERVER [options]" \
+        "" \
+        "Options:" \
+        "  --gpu N              GPU index (default: 0)" \
+        "  --tasks LIST         clean_ice,debris_ice,multiclass (default: all)" \
+        "  --pause SECONDS      Delay between runs (default: 0)" \
+        "  --dry-run            Print commands without training" \
+        "  --mlflow-uri URI     Enable MLflow and use this tracking URI" \
+        "  --ntfy-topic TOPIC   Enable ntfy notifications" \
+        "  --ntfy-url URL       ntfy server base URL" \
+        "  -h, --help           Show this help" \
+        "" \
+        "MLFLOW_TRACKING_URI, NTFY_TOPIC, and NTFY_URL may also be set in the environment."
 }
 
-print_subheader() {
-    echo -e "${BLUE}------------------------------------------------------------${NC}"
-    echo -e "${BOLD}$1${NC}"
-    echo -e "${BLUE}------------------------------------------------------------${NC}"
-}
-
-print_success() {
-    echo -e "${GREEN}✓ $1${NC}"
-}
-
-print_error() {
-    echo -e "${RED}✗ $1${NC}"
-}
-
-print_info() {
-    echo -e "${YELLOW}→ $1${NC}"
-}
-
-format_duration() {
-    local duration=$1
-    local hours=$((duration / 3600))
-    local minutes=$(((duration % 3600) / 60))
-    local seconds=$((duration % 60))
-
-    if [ $hours -gt 0 ]; then
-        printf "%dh %02dm %02ds" $hours $minutes $seconds
-    elif [ $minutes -gt 0 ]; then
-        printf "%dm %02ds" $minutes $seconds
-    else
-        printf "%ds" $seconds
-    fi
-}
-
-ntfy_publish_url() {
-    if [[ "$NTFY_TOPIC" =~ ^https?:// ]]; then
-        printf "%s" "$NTFY_TOPIC"
-    else
-        printf "%s/%s" "${NTFY_URL%/}" "$NTFY_TOPIC"
-    fi
-}
-
-get_host_name() {
-    if [ -n "${HOSTNAME:-}" ]; then
-        printf "%s" "$HOSTNAME"
-    elif [ -r /etc/hostname ]; then
-        tr -d '\n' </etc/hostname
-    elif command -v uname >/dev/null 2>&1; then
-        uname -n
-    else
-        printf "unknown"
-    fi
-}
-
-send_ntfy() {
-    local title="$1"
-    local message="$2"
-    local tags="${3:-glacier,training}"
-    local priority="${4:-default}"
-
-    if [ -z "$NTFY_TOPIC" ]; then
-        return 0
-    fi
-
-    if ! command -v curl >/dev/null 2>&1; then
-        log_only "ntfy notification skipped: curl not found"
-        return 0
-    fi
-
-    local url
-    url=$(ntfy_publish_url)
-
-    curl -fsS \
-        -H "Title: $title" \
-        -H "Tags: $tags" \
-        -H "Priority: $priority" \
-        -d "$message" \
-        "$url" >/dev/null 2>&1 || log_only "ntfy notification failed: $title"
-}
-
-show_usage() {
-    cat <<EOF
-${BOLD}Sequential Training Script for Glacier Mapping${NC}
-
-${BOLD}USAGE:${NC}
-    ./run_sequential_training.sh SERVER [OPTIONS]
-
-${BOLD}ARGUMENTS:${NC}
-    SERVER              Server name from configs/servers.yaml
-
-${BOLD}BASIC OPTIONS:${NC}
-    --gpu N             GPU device number (default: 0)
-    --dry-run           Show what would run without executing
-    --pause N           Pause N seconds between runs (default: 60)
-    --mlflow-uri URI    MLflow tracking URI (default: https://mlflow.josegperez.com/)
-    --ntfy-topic TOPIC  Optional ntfy topic for start/end notifications
-                        If TOPIC starts with http(s), use it as full publish URL
-    --ntfy-url URL      ntfy server URL for topic names (default: https://ntfy.sh)
-
-${BOLD}FILTERING & PRIORITY OPTIONS:${NC}
-    --tasks TASKS       Comma-separated tasks to run (default: dci,ci,multi)
-                        Example: --tasks dci,ci
-    --priority ORDER    Task execution priority (default: dci,ci,multi)
-                        Example: --priority ci,dci,multi
-    --physics-velocity-priority
-                         Prioritize physics+velocity configs first within each task
-    --exclude-base      Skip all base dataset configs
-    --only-base         Run only base dataset configs
-    --gpu-filter GPU    Filter configs by GPU designation (e.g., gpu0, gpu1)
-
-${BOLD}EXAMPLES:${NC}
-    # Run all configs in priority order (DCI → CI → Multi, base last)
-    ./run_sequential_training.sh bilbo
-
-    # Run only DCI and CI tasks
-    ./run_sequential_training.sh bilbo --tasks dci,ci
-
-    # Run all configs except base datasets
-    ./run_sequential_training.sh bilbo --exclude-base
-
-    # Run only base datasets (for baseline comparison)
-    ./run_sequential_training.sh bilbo --only-base
-
-    # Preview execution order
-    ./run_sequential_training.sh bilbo --dry-run
-
-    # Custom priority order (CI first)
-    ./run_sequential_training.sh bilbo --priority ci,dci,multi
-
-    # Run DCI only, exclude base
-    ./run_sequential_training.sh bilbo --tasks dci --exclude-base
-
-    # Run with physics+velocity priority (PV configs run first in each task)
-    ./run_sequential_training.sh frodo --physics-velocity-priority
-
-    # Notify via ntfy at start and end
-    ./run_sequential_training.sh desktop --ntfy-topic my-training-topic
-
-${BOLD}DEFAULT EXECUTION ORDER:${NC}
-    1. DCI (Debris-Covered Ice) - phys32 → phys64 variants → phys128 → physfull
-    2. CI (Clean Ice) - phys32 → phys64 variants → phys128 → physfull
-    3. Multi (Multi-class) - phys32 → phys64 variants → phys128 → physfull
-    4. Base datasets - DCI base → CI base → Multi base (at the very end)
-
-${BOLD}WITH PHYSICS+VELOCITY PRIORITY:${NC}
-    Within each task: Physics+Velocity → Physics → Velocity → Base
-    Example DCI order: dci_physics_velocity → dci_physics → dci_velocity → dci_base
-
-${BOLD}NOTES:${NC}
-    - Configs are auto-detected from configs/{SERVER}_*.yaml
-    - Script continues on failure (failed runs are logged)
-    - Logs are saved to sequential_training_summary_{TIMESTAMP}.log
-    - Base datasets run last by default (can be changed with --only-base)
-    - Within each task, configs are sorted by sample size (ascending)
-
-EOF
-}
-
-################################################################################
-# Config Sorting and Filtering Functions
-################################################################################
-
-sort_configs_by_priority() {
-    # Sort configs using Python for complex multi-key sorting
-    # Pass configs as arguments
-
-    python3 -c '
-import sys
-import os
-
-# Get configs from arguments
-configs = sys.argv[1:]
-
-def parse_config(filename):
-    """Extract task, dataset, sample_size, scale from filename."""
-    # New structure: configs/{server}/{task}/{experiment}.yaml
-    parts = filename.split("/")
-    base = os.path.basename(filename).replace(".yaml", "")
-    
-    # Extract task from path (e.g., "configs/frodo/clean_ice/base.yaml")
-    if len(parts) >= 3:
-        task_folder = parts[2]  # clean_ice, debris_ice, multiclass
-        # Map to old naming convention
-        if task_folder == "clean_ice":
-            task = "ci"
-        elif task_folder == "debris_ice":
-            task = "dci"
-        elif task_folder == "multiclass":
-            task = "multi"
-        else:
-            task = "unknown"
-    else:
-        task = "unknown"
-    
-    # Determine if base
-    is_base = (base == "base")
-    
-    # Determine if physics+velocity config
-    is_physics_velocity = "physics_velocity" in base
-    
-    # Extract sample size from experiment name
-    if "phys32" in base:
-        sample_size = 32
-    elif "phys64" in base:
-        sample_size = 64
-    elif "phys128" in base:
-        sample_size = 128
-    elif "physfull" in base:
-        sample_size = 999
-    else:
-        sample_size = 0
-    
-    # Extract scale (for secondary sort within same sample size)
-    if "s05" in base:
-        scale = 0.5
-    elif "s075" in base:
-        scale = 0.75
-    elif "s1" in base:
-        scale = 1.0
-    else:
-        scale = 1.0
-    
-    return {
-        "filename": filename,
-        "task": task,
-        "is_base": is_base,
-        "is_physics_velocity": is_physics_velocity,
-        "sample_size": sample_size,
-        "scale": scale
-    }
-
-# Parse all configs
-parsed = [parse_config(c) for c in configs]
-
-# Define task priority from PRIORITY_ORDER environment variable
-priority_order = os.environ.get("PRIORITY_ORDER", "dci,ci,multi").split(",")
-task_priority = {task.strip(): i for i, task in enumerate(priority_order)}
-
-# Get physics+velocity priority setting
-physics_velocity_priority = os.environ.get("PHYSICS_VELOCITY_PRIORITY", "false").lower() == "true"
-
-# Sort
-if physics_velocity_priority:
-    # With physics+velocity priority: task → physics+velocity first → base last → sample_size → scale
-    sorted_configs = sorted(parsed, key=lambda x: (
-        task_priority.get(x["task"], 999),
-        0 if x["is_physics_velocity"] else 1,  # physics+velocity first
-        1 if x["is_base"] else 0,             # base last
-        x["sample_size"],
-        x["scale"]
-    ))
-else:
-    # Default sorting: task → base last → sample_size → scale
-    sorted_configs = sorted(parsed, key=lambda x: (
-        task_priority.get(x["task"], 999),
-        1 if x["is_base"] else 0,
-        x["sample_size"],
-        x["scale"]
-    ))
-
-# Output sorted filenames
-for item in sorted_configs:
-    print(item["filename"])
-' "$@"
-}
-
-filter_configs_by_tasks() {
-    # Filter configs by task type
-    # Arguments: task_filter (comma-separated), config files (space-separated)
-
-    local task_filter="$1"
-    shift
-    local configs=("$@")
-
-    if [ -z "$task_filter" ]; then
-        # No filter, return all
-        printf '%s\n' "${configs[@]}"
-        return
-    fi
-
-    # Convert comma-separated tasks to array
-    IFS=',' read -ra tasks <<<"$task_filter"
-
-    # Filter configs (new structure: configs/{server}/{task}/{experiment}.yaml)
-    for config in "${configs[@]}"; do
-        for task in "${tasks[@]}"; do
-            task=$(echo "$task" | xargs) # Trim whitespace
-            # Map task abbreviation to folder name
-            if [[ "$task" == "ci" && "$config" =~ /clean_ice/ ]]; then
-                echo "$config"
-                break
-            elif [[ "$task" == "dci" && "$config" =~ /debris_ice/ ]]; then
-                echo "$config"
-                break
-            elif [[ "$task" == "multi" && "$config" =~ /multiclass/ ]]; then
-                echo "$config"
-                break
-            fi
-        done
-    done
-}
-
-filter_base_configs() {
-    # Filter configs based on base/non-base
-    # Arguments: mode (exclude|only), config files (space-separated)
-
-    local mode="$1"
-    shift
-    local configs=("$@")
-
-    for config in "${configs[@]}"; do
-        local basename=$(basename "$config" .yaml)
-        local is_base=false
-
-        if [[ "$basename" =~ ^base ]]; then
-            is_base=true
-        fi
-
-        if [ "$mode" = "exclude" ] && [ "$is_base" = false ]; then
-            echo "$config"
-        elif [ "$mode" = "only" ] && [ "$is_base" = true ]; then
-            echo "$config"
-        fi
-    done
-}
-
-filter_gpu_configs() {
-    # Filter configs by GPU designation
-    # Arguments: gpu_filter (e.g., "gpu0", "gpu1"), config files (space-separated)
-
-    local gpu_filter="$1"
-    shift
-    local configs=("$@")
-
-    if [ -z "$gpu_filter" ]; then
-        # No filter, return all
-        printf '%s\n' "${configs[@]}"
-        return
-    fi
-
-    for config in "${configs[@]}"; do
-        local basename=$(basename "$config" .yaml)
-        # Check if config contains the GPU designation
-        if [[ "$basename" =~ ${gpu_filter} ]]; then
-            echo "$config"
-        fi
-    done
-}
-
-################################################################################
-# Parse Arguments
-################################################################################
-
-if [ $# -eq 0 ]; then
-    show_usage
-    exit 1
-fi
-
-# Check for help flag first
-if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    show_usage
-    exit 0
+if [[ $# -lt 1 ]]; then
+    usage
+    exit 2
 fi
 
 SERVER=$1
 shift
+GPU=0
+TASKS="clean_ice,debris_ice,multiclass"
+PAUSE_SECONDS=0
+DRY_RUN=false
+MLFLOW_URI=${MLFLOW_TRACKING_URI:-}
+NTFY_TOPIC=${NTFY_TOPIC:-}
+NTFY_URL=${NTFY_URL:-}
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-    --gpu)
-        GPU="$2"
-        shift 2
-        ;;
-    --dry-run)
-        DRY_RUN=true
-        shift
-        ;;
-    --pause)
-        PAUSE_SECONDS="$2"
-        shift 2
-        ;;
-    --mlflow-uri)
-        MLFLOW_URI="$2"
-        shift 2
-        ;;
-    --ntfy-topic)
-        NTFY_TOPIC="$2"
-        shift 2
-        ;;
-    --ntfy-url)
-        NTFY_URL="$2"
-        shift 2
-        ;;
-    --tasks)
-        TASK_FILTER="$2"
-        shift 2
-        ;;
-    --priority)
-        PRIORITY_ORDER="$2"
-        shift 2
-        ;;
-    --exclude-base)
-        EXCLUDE_BASE=true
-        shift
-        ;;
-    --only-base)
-        ONLY_BASE=true
-        shift
-        ;;
-    --physics-velocity-priority)
-        PHYSICS_VELOCITY_PRIORITY=true
-        shift
-        ;;
-    --gpu-filter)
-        GPU_FILTER="$2"
-        shift 2
-        ;;
-    --help)
-        show_usage
-        exit 0
-        ;;
-    *)
-        echo -e "${RED}Error: Unknown option: $1${NC}"
-        show_usage
-        exit 1
-        ;;
+    case "$1" in
+        --gpu) GPU=$2; shift 2 ;;
+        --tasks) TASKS=$2; shift 2 ;;
+        --pause) PAUSE_SECONDS=$2; shift 2 ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --mlflow-uri) MLFLOW_URI=$2; shift 2 ;;
+        --ntfy-topic) NTFY_TOPIC=$2; shift 2 ;;
+        --ntfy-url) NTFY_URL=$2; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; usage; exit 2 ;;
     esac
 done
 
-################################################################################
-# Validate Arguments
-################################################################################
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR" || exit 1
 
-# Check if server exists in servers.yaml
-if ! grep -q "^${SERVER}:" configs/servers.yaml 2>/dev/null; then
-    print_error "Server '$SERVER' not found in configs/servers.yaml"
-    exit 1
-fi
-
-# Validate conflicting options
-if [ "$EXCLUDE_BASE" = true ] && [ "$ONLY_BASE" = true ]; then
-    print_error "Cannot use both --exclude-base and --only-base together"
-    exit 1
-fi
-
-# Validate task filter
-if [ -n "$TASK_FILTER" ]; then
-    IFS=',' read -ra tasks <<<"$TASK_FILTER"
-    for task in "${tasks[@]}"; do
-        task=$(echo "$task" | xargs)
-        if [[ ! "$task" =~ ^(ci|dci|multi)$ ]]; then
-            print_error "Invalid task in --tasks: $task"
-            echo "Valid tasks: ci, dci, multi"
-            exit 1
-        fi
-    done
-fi
-
-# Validate priority order
-IFS=',' read -ra priority_tasks <<<"$PRIORITY_ORDER"
-for task in "${priority_tasks[@]}"; do
-    task=$(echo "$task" | xargs)
-    if [[ ! "$task" =~ ^(ci|dci|multi)$ ]]; then
-        print_error "Invalid task in --priority: $task"
-        echo "Valid tasks: ci, dci, multi"
-        exit 1
+IFS=',' read -r -a TASK_NAMES <<< "$TASKS"
+CONFIGS=()
+for task in "${TASK_NAMES[@]}"; do
+    task=${task//[[:space:]]/}
+    case "$task" in
+        ci) task=clean_ice ;;
+        dci) task=debris_ice ;;
+        multi) task=multiclass ;;
+    esac
+    config_dir="configs/$SERVER/$task"
+    if [[ ! -d "$config_dir" ]]; then
+        printf 'Skipping missing config directory: %s\n' "$config_dir" >&2
+        continue
     fi
+    while IFS= read -r config; do
+        CONFIGS+=("$config")
+    done < <(find "$config_dir" -maxdepth 1 -type f -name '*.yaml' | sort)
 done
 
-# Export variables for use in Python sorting function
-export SERVER
-export PRIORITY_ORDER
-export PHYSICS_VELOCITY_PRIORITY
-export GPU_FILTER
-
-################################################################################
-# Find and Sort Config Files
-################################################################################
-
-# Step 1: Discover all configs (new hierarchical structure)
-mapfile -t ALL_CONFIGS < <(find configs/${SERVER} -mindepth 2 -name "*.yaml" -type f 2>/dev/null | sort)
-
-if [ ${#ALL_CONFIGS[@]} -eq 0 ]; then
-    print_error "No config files found in: configs/${SERVER}/"
+if [[ ${#CONFIGS[@]} -eq 0 ]]; then
+    printf 'No experiment configs found for server %s\n' "$SERVER" >&2
     exit 1
 fi
 
-# Step 2: Apply task filter if specified
-if [ -n "$TASK_FILTER" ]; then
-    mapfile -t FILTERED_CONFIGS < <(filter_configs_by_tasks "$TASK_FILTER" "${ALL_CONFIGS[@]}")
-else
-    FILTERED_CONFIGS=("${ALL_CONFIGS[@]}")
+if [[ -n "$NTFY_TOPIC" && "$NTFY_TOPIC" != http://* && "$NTFY_TOPIC" != https://* && -z "$NTFY_URL" ]]; then
+    printf 'ntfy topic names require --ntfy-url or NTFY_URL\n' >&2
+    exit 2
 fi
 
-# Step 3: Apply base filtering
-if [ "$EXCLUDE_BASE" = true ]; then
-    mapfile -t FILTERED_CONFIGS < <(filter_base_configs "exclude" "${FILTERED_CONFIGS[@]}")
-elif [ "$ONLY_BASE" = true ]; then
-    mapfile -t FILTERED_CONFIGS < <(filter_base_configs "only" "${FILTERED_CONFIGS[@]}")
-fi
+ntfy_publish_url() {
+    if [[ "$NTFY_TOPIC" == http://* || "$NTFY_TOPIC" == https://* ]]; then
+        printf '%s' "$NTFY_TOPIC"
+    else
+        printf '%s/%s' "${NTFY_URL%/}" "$NTFY_TOPIC"
+    fi
+}
 
-# Step 4: Apply GPU filtering
-if [ -n "$GPU_FILTER" ]; then
-    mapfile -t FILTERED_CONFIGS < <(filter_gpu_configs "$GPU_FILTER" "${FILTERED_CONFIGS[@]}")
-fi
-
-# Step 5: Sort by priority
-mapfile -t CONFIG_FILES < <(sort_configs_by_priority "${FILTERED_CONFIGS[@]}")
-
-# Check if we have any configs after filtering
-if [ ${#CONFIG_FILES[@]} -eq 0 ]; then
-    print_error "No config files match the specified criteria"
-    echo ""
-    echo "Applied filters:"
-    [ -n "$TASK_FILTER" ] && echo "  Tasks: $TASK_FILTER"
-    [ "$EXCLUDE_BASE" = true ] && echo "  Exclude base: yes"
-    [ "$ONLY_BASE" = true ] && echo "  Only base: yes"
-    exit 1
-fi
-
-################################################################################
-# Setup Logging
-################################################################################
+notify() {
+    local title=$1
+    local message=$2
+    [[ -z "$NTFY_TOPIC" ]] && return 0
+    if ! command -v curl >/dev/null 2>&1; then
+        printf 'ntfy skipped: curl is unavailable\n' >&2
+        return 0
+    fi
+    curl -fsS -H "Title: $title" -d "$message" "$(ntfy_publish_url)" >/dev/null || \
+        printf 'ntfy notification failed: %s\n' "$title" >&2
+}
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="sequential_training_summary_${SERVER}_${TIMESTAMP}.log"
+LOG_FILE="sequential_training_${TIMESTAMP}.log"
+notify "Glacier training started" "Server: $SERVER; runs: ${#CONFIGS[@]}; GPU: $GPU"
 
-# Function to log to both console and file
-log() {
-    echo -e "$@" | tee -a "$LOG_FILE"
-}
-
-log_only() {
-    echo -e "$@" >>"$LOG_FILE"
-}
-
-################################################################################
-# Display Plan
-################################################################################
-
-print_header "Sequential Training Script"
-log ""
-log "${BOLD}Configuration:${NC}"
-log "  Server:        $SERVER"
-log "  GPU:           $GPU"
-log "  MLflow URI:    $MLFLOW_URI"
-log "  Priority:      $PRIORITY_ORDER"
-log "  Tasks:         ${TASK_FILTER:-all (dci,ci,multi)}"
-log "  Exclude base:  $EXCLUDE_BASE"
-log "  Only base:     $ONLY_BASE"
-log "  Dry run:       $DRY_RUN"
-log "  Pause:         ${PAUSE_SECONDS}s between runs"
-log "  ntfy topic:    ${NTFY_TOPIC:-disabled}"
-log "  Log file:      $LOG_FILE"
-log ""
-log "${BOLD}Execution order (${#CONFIG_FILES[@]} configs):${NC}"
-log ""
-
-# Display in actual execution order with task labels
-for i in "${!CONFIG_FILES[@]}"; do
-    config="${CONFIG_FILES[$i]}"
-    basename=$(basename "$config" .yaml)
-
-    # Color code by task based on directory path
-    if [[ "$config" =~ /debris_ice/ ]]; then
-        task_label="${MAGENTA}[DCI]${NC}"
-    elif [[ "$config" =~ /clean_ice/ ]]; then
-        task_label="${GREEN}[CI]${NC}"
-    elif [[ "$config" =~ /multiclass/ ]]; then
-        task_label="${BLUE}[Multi]${NC}"
+SUCCESS=0
+FAILED=0
+for config in "${CONFIGS[@]}"; do
+    command=(
+        uv run python scripts/train.py
+        --config "$config"
+        --server "$SERVER"
+        --gpu "$GPU"
+    )
+    if [[ -n "$MLFLOW_URI" ]]; then
+        command+=(--mlflow-enabled true --tracking-uri "$MLFLOW_URI")
     else
-        task_label="[???]"
+        command+=(--mlflow-enabled false)
     fi
 
-    # Add physics+velocity indicator
-    if [[ "$basename" =~ physics_velocity ]]; then
-        pv_label="${CYAN}[PV]${NC}"
-        task_label="$task_label $pv_label"
+    printf 'Running: ' | tee -a "$LOG_FILE"
+    printf '%q ' "${command[@]}" | tee -a "$LOG_FILE"
+    printf '\n' | tee -a "$LOG_FILE"
+    if [[ "$DRY_RUN" == true ]]; then
+        continue
     fi
 
-    log "  $((i + 1)). $task_label $config"
+    if "${command[@]}" 2>&1 | tee -a "$LOG_FILE"; then
+        ((SUCCESS += 1))
+    else
+        ((FAILED += 1))
+        notify "Glacier training failed" "Server: $SERVER; config: $config"
+    fi
+    if [[ "$PAUSE_SECONDS" -gt 0 ]]; then
+        sleep "$PAUSE_SECONDS"
+    fi
 done
-log ""
 
-print_header ""
-
-if [ "$DRY_RUN" = true ]; then
-    echo ""
-    print_info "DRY RUN MODE - Commands that would be executed:"
-    echo ""
-    for config in "${CONFIG_FILES[@]}"; do
-        echo "uv run python scripts/train.py \\"
-        echo "  --config $config \\"
-        echo "  --server $SERVER \\"
-        echo "  --gpu $GPU \\"
-        echo "  --mlflow-enabled true \\"
-        echo "  --tracking-uri $MLFLOW_URI"
-        echo ""
-    done
+if [[ "$DRY_RUN" == true ]]; then
+    printf 'Dry run complete: %s commands\n' "${#CONFIGS[@]}"
     exit 0
 fi
 
-HOST_NAME=$(get_host_name)
-
-send_ntfy \
-    "Glacier training started" \
-    "Server: $SERVER
-Host: $HOST_NAME
-Configs: ${#CONFIG_FILES[@]}
-GPU: $GPU
-Log: $LOG_FILE" \
-    "rocket,glacier" \
-    "default"
-
-################################################################################
-# Signal Handling
-################################################################################
-
-INTERRUPTED=false
-
-cleanup() {
-    INTERRUPTED=true
-    echo ""
-    print_error "Interrupted by user (Ctrl+C)"
-    echo ""
-    # Summary will be printed by the main loop
-}
-
-trap cleanup SIGINT SIGTERM
-
-################################################################################
-# Run Training Sequentially
-################################################################################
-
-TOTAL_CONFIGS=${#CONFIG_FILES[@]}
-SUCCESSFUL_RUNS=0
-FAILED_RUNS=0
-declare -a FAILED_CONFIGS
-declare -a RUN_DURATIONS
-
-OVERALL_START=$(date +%s)
-
-for i in "${!CONFIG_FILES[@]}"; do
-    if [ "$INTERRUPTED" = true ]; then
-        break
-    fi
-
-    CONFIG=${CONFIG_FILES[$i]}
-    CONFIG_NUM=$((i + 1))
-
-    echo ""
-    print_header "[$CONFIG_NUM/$TOTAL_CONFIGS] Running: $(basename $CONFIG)"
-    log_only ""
-    log_only "============================================================"
-    log_only "[$CONFIG_NUM/$TOTAL_CONFIGS] Running: $(basename $CONFIG)"
-    log_only "============================================================"
-
-    RUN_START=$(date +%s)
-    RUN_START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-
-    log "Started: $RUN_START_TIME"
-    log ""
-
-    # Build command
-    CMD="uv run python scripts/train.py \
---config $CONFIG \
---server $SERVER \
---gpu $GPU \
---mlflow-enabled true \
---tracking-uri $MLFLOW_URI"
-
-    log_only "Command: $CMD"
-    log_only ""
-
-    print_subheader "Training Output"
-
-    # Run training and capture exit code
-    if $CMD 2>&1 | tee -a "$LOG_FILE"; then
-        EXIT_CODE=${PIPESTATUS[0]}
-    else
-        EXIT_CODE=$?
-    fi
-
-    RUN_END=$(date +%s)
-    RUN_DURATION=$((RUN_END - RUN_START))
-    RUN_DURATION_FMT=$(format_duration $RUN_DURATION)
-    RUN_DURATIONS+=("$RUN_DURATION_FMT")
-
-    echo ""
-
-    if [ $EXIT_CODE -eq 0 ]; then
-        print_success "SUCCESS (Duration: $RUN_DURATION_FMT)"
-        log_only "✓ SUCCESS (Duration: $RUN_DURATION_FMT)"
-        ((SUCCESSFUL_RUNS++))
-    else
-        print_error "FAILED (Exit code: $EXIT_CODE, Duration: $RUN_DURATION_FMT)"
-        log_only "✗ FAILED (Exit code: $EXIT_CODE, Duration: $RUN_DURATION_FMT)"
-        FAILED_CONFIGS+=("$CONFIG (exit code: $EXIT_CODE)")
-        ((FAILED_RUNS++))
-    fi
-
-    print_header ""
-
-    # Pause between runs if specified
-    if [ $CONFIG_NUM -lt $TOTAL_CONFIGS ] && [ $PAUSE_SECONDS -gt 0 ]; then
-        print_info "Pausing for ${PAUSE_SECONDS}s before next run..."
-        sleep $PAUSE_SECONDS
-    fi
-done
-
-OVERALL_END=$(date +%s)
-OVERALL_DURATION=$((OVERALL_END - OVERALL_START))
-OVERALL_DURATION_FMT=$(format_duration $OVERALL_DURATION)
-
-################################################################################
-# Print Summary
-################################################################################
-
-echo ""
-print_header "SUMMARY"
-log ""
-log "${BOLD}Execution Summary:${NC}"
-log "  Server:           $SERVER"
-log "  Total configs:    $TOTAL_CONFIGS"
-log "  Successful runs:  ${GREEN}$SUCCESSFUL_RUNS${NC}"
-log "  Failed runs:      ${RED}$FAILED_RUNS${NC}"
-log "  Total duration:   $OVERALL_DURATION_FMT"
-log ""
-
-if [ $FAILED_RUNS -gt 0 ]; then
-    log "${RED}${BOLD}Failed Configs:${NC}"
-    for failed in "${FAILED_CONFIGS[@]}"; do
-        log "  ${RED}✗${NC} $failed"
-    done
-    log ""
-fi
-
-if [ "$INTERRUPTED" = true ]; then
-    log "${YELLOW}${BOLD}Note: Execution was interrupted by user${NC}"
-    log ""
-fi
-
-log "${BOLD}Individual Run Durations:${NC}"
-for i in "${!CONFIG_FILES[@]}"; do
-    if [ $i -lt ${#RUN_DURATIONS[@]} ]; then
-        CONFIG_NAME=$(basename "${CONFIG_FILES[$i]}")
-        DURATION="${RUN_DURATIONS[$i]}"
-        log "  $((i + 1)). $CONFIG_NAME - $DURATION"
-    fi
-done
-log ""
-
-log "${BOLD}Full log saved to:${NC} $LOG_FILE"
-print_header ""
-
-if [ "$INTERRUPTED" = true ]; then
-    FINAL_STATUS="interrupted"
-    FINAL_TITLE="Glacier training interrupted"
-    FINAL_TAGS="warning,glacier"
-    FINAL_PRIORITY="high"
-elif [ $FAILED_RUNS -gt 0 ]; then
-    FINAL_STATUS="failed"
-    FINAL_TITLE="Glacier training finished with failures"
-    FINAL_TAGS="x,glacier"
-    FINAL_PRIORITY="high"
-else
-    FINAL_STATUS="success"
-    FINAL_TITLE="Glacier training finished"
-    FINAL_TAGS="white_check_mark,glacier"
-    FINAL_PRIORITY="default"
-fi
-
-send_ntfy \
-    "$FINAL_TITLE" \
-    "Status: $FINAL_STATUS
-Server: $SERVER
-Host: $HOST_NAME
-Successful: $SUCCESSFUL_RUNS/$TOTAL_CONFIGS
-Failed: $FAILED_RUNS
-Duration: $OVERALL_DURATION_FMT
-Log: $LOG_FILE" \
-    "$FINAL_TAGS" \
-    "$FINAL_PRIORITY"
-
-################################################################################
-# Exit with appropriate code
-################################################################################
-
-if [ "$INTERRUPTED" = true ]; then
-    exit 130 # Standard exit code for SIGINT
-elif [ $FAILED_RUNS -gt 0 ]; then
-    exit 1
-else
-    exit 0
-fi
+notify "Glacier training finished" "Server: $SERVER; successful: $SUCCESS; failed: $FAILED"
+printf 'Finished: %s successful, %s failed. Log: %s\n' "$SUCCESS" "$FAILED" "$LOG_FILE"
+[[ "$FAILED" -eq 0 ]]

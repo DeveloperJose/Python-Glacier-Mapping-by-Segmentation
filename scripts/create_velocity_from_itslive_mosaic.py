@@ -19,26 +19,20 @@ Temporal alignment:
 - Velocity: 2002-2008 median (7-year robust estimator)
 
 Usage:
-    # Test with single image on desktop
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --max-images 1
-
-    # Process first 10 images on frodo
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server frodo --max-images 10
-
-    # Process all 202 images (default)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server bilbo
+    # Test with a single image
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server local --max-images 1
 
     # Use 8 parallel workers
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --workers 8
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server local --workers 8
 
     # Skip existing valid files (only regenerate missing + corrupted)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --skip-existing
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server local --skip-existing
 
     # Custom threshold for skip-existing (regenerate if max >= 30000 m/yr)
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop --skip-existing --skip-threshold 30000
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server local --skip-existing --skip-threshold 30000
 
     # Override server paths if needed
-    uv run python scripts/create_velocity_from_itslive_mosaic.py --server desktop \
+    uv run python scripts/create_velocity_from_itslive_mosaic.py --server local \
         --landsat-dir /custom/path/Landsat7_2005 \
         --output-dir /custom/path/Velocity
 """

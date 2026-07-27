@@ -2,7 +2,7 @@
 """Create date-aware ITS_LIVE velocity products using HKH generation provenance.
 
 This v2 pipeline is intentionally separate from fishnet image generation.  It uses
-per-pixel provenance rasters written by dataset/6_create_fishnet_datasets.py to
+per-pixel provenance rasters written by dataset/build_hkh_fishnet.py to
 choose the temporal velocity window for each output pixel, then writes a compact
 quality-aware velocity stack aligned to the selected image variant.
 
@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import multiprocessing
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,12 +57,18 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-RAW_ROOT = Path("/home/devj/local-arch/data/HKH_raw")
+RAW_ROOT = Path(os.environ.get("HKH_RAW_ROOT", "data/raw"))
 VARIANT_DIRS = {
-    "raw_target": "HKH_full8_raw_target",
-    "nspi_timeseries_weighted": "HKH_full8_nspi_timeseries_weighted",
-    "agreement_quality_step3": "HKH_full8_agreement_quality_step3",
-    "nspi_multi_score_all3": "HKH_full8_nspi_multi_score_all3",
+    "raw_target": "HKH_full8_c02t1_dn_raw_target",
+    "nspi_timeseries_weighted": "HKH_full8_c02t1_dn_nspi_timeseries_weighted",
+    "agreement_quality_step3": "HKH_full8_c02t1_dn_agreement_quality_step3",
+    "nspi_multi_score_all3": "HKH_full8_c02t1_dn_nspi_multi_score_all3",
+}
+VARIANT_OUTPUT_NAMES = {
+    "raw_target": "raw_target",
+    "nspi_timeseries_weighted": "nspi_timeseries_weighted",
+    "agreement_quality_step3": "agreement",
+    "nspi_multi_score_all3": "nspi_multi_score_all3",
 }
 
 PROVENANCE_BAND_INDEX = {
@@ -124,7 +131,8 @@ def sort_image_paths(paths: list[Path]) -> list[Path]:
 def output_dir_for_variant(
     output_root: Path, variant: str, date_mode: str, window: int
 ) -> Path:
-    return output_root / f"Velocity_v2_{variant}_{date_mode}_pm{window}yr"
+    name = VARIANT_OUTPUT_NAMES[variant]
+    return output_root / f"Velocity_v2_c02t1_dn_{name}_{date_mode}_pm{window}yr_quality"
 
 
 def is_valid_velocity_file(
@@ -597,7 +605,7 @@ def main() -> None:
         description="Generate date-aware velocity products from ITS_LIVE mosaics and HKH provenance"
     )
     parser.add_argument(
-        "--server", default="desktop", help="Server name from configs/servers.yaml"
+        "--server", default="local", help="Server name from configs/servers.yaml"
     )
     parser.add_argument(
         "--variant",

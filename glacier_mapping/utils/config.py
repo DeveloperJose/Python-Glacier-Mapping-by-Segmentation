@@ -10,12 +10,42 @@ Usage:
     config = load_config("configs/my_config.yaml")
 
     # Load with server paths
-    config, server = load_config_with_server("configs/my_config.yaml", "desktop")
+    config, server = load_config_with_server("configs/my_config.yaml", "local")
 """
 
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
+
 import yaml
+
+
+def load_servers_config(
+    servers_yaml: str = "configs/servers.yaml",
+    local_yaml: str | None = None,
+) -> Dict[str, Any]:
+    """Load public server defaults and an optional untracked local override."""
+    servers_path = Path(servers_yaml)
+    if not servers_path.exists():
+        raise FileNotFoundError(f"Servers config not found: {servers_path}")
+
+    with servers_path.open(encoding="utf-8") as handle:
+        servers = yaml.safe_load(handle) or {}
+    if not isinstance(servers, dict):
+        raise ValueError(f"Expected a server mapping in {servers_path}")
+
+    local_path = (
+        Path(local_yaml) if local_yaml else servers_path.with_name("servers.local.yaml")
+    )
+    if local_path.exists():
+        with local_path.open(encoding="utf-8") as handle:
+            local_servers = yaml.safe_load(handle) or {}
+        if not isinstance(local_servers, dict):
+            raise ValueError(f"Expected a server mapping in {local_path}")
+        for name, values in local_servers.items():
+            if not isinstance(values, dict):
+                raise ValueError(f"Server '{name}' in {local_path} must be a mapping")
+            servers[name] = {**servers.get(name, {}), **values}
+    return servers
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -48,7 +78,7 @@ def load_server_config(
     """Load server configuration from servers.yaml.
 
     Args:
-        server_name: Name of server (e.g., 'desktop', 'frodo', 'bilbo')
+        server_name: Name from the public or local server configuration
         servers_yaml: Path to servers.yaml file (relative to project root)
 
     Returns:
@@ -59,12 +89,7 @@ def load_server_config(
         ValueError: If server_name not found in servers.yaml
     """
     servers_path = Path(servers_yaml)
-
-    if not servers_path.exists():
-        raise FileNotFoundError(f"Servers config not found: {servers_path}")
-
-    with open(servers_path, "r") as f:
-        servers = yaml.safe_load(f)
+    servers = load_servers_config(servers_yaml)
 
     if server_name not in servers:
         available = ", ".join(servers.keys())
@@ -94,7 +119,7 @@ def load_config_with_server(
     Example:
         config, server = load_config_with_server(
             "configs/unet_train.yaml",
-            "desktop"
+            "local"
         )
         data_path = server["processed_data_path"]
     """

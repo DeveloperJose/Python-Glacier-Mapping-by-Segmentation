@@ -37,13 +37,13 @@ ruff format .
 uv run python scripts/test.py --unit
 
 # Integration tests (end-to-end training pipeline)
-uv run python scripts/test.py --server desktop --subset-size 5 --epochs 2
+uv run python scripts/test.py --server local --subset-size 5 --epochs 2
 ```
 
 ### Training
 User reference only. Agents must not execute these commands.
 ```bash
-uv run python scripts/train.py --config configs/desktop/debris_ice/sota_dci_06_bs12_seed42_gpu0.yaml --server desktop --gpu 0
+uv run python scripts/train.py --config configs/local/debris_ice/c02_agreement.yaml --server local --gpu 0
 
 # Sequential runs
 uv run bash run_sequential_training.sh
@@ -59,28 +59,23 @@ uv run python scripts/upload_to_mlflow.py --batch --experiment-type baseline_ci 
 ### Prediction
 ```bash
 # Single model
-uv run python scripts/predict.py --ci-run-name run_name --server desktop --gpu 0 --split test
+uv run python scripts/predict.py --ci-run-name run_name --server local --gpu 0 --split test
 
 # Paired CI/DCI evaluation
-uv run python scripts/predict.py --ci-run-name ci_run_name --deb-run-name dci_run_name --server desktop --gpu 0 --split test
+uv run python scripts/predict.py --ci-run-name ci_run_name --deb-run-name dci_run_name --server local --gpu 0 --split test
 ```
 
 ## Data Location Policy
-- Store all raw/rebuilt HKH data under `/home/devj/local-arch/data/HKH_raw/`.
-- For GEE rebuild downloads, use these directories exactly:
-  - `/home/devj/local-arch/data/HKH_raw/HKH_rebuild_gapfill_mixed/`
-  - `/home/devj/local-arch/data/HKH_raw/HKH_rebuild_gapfill_le07/`
-  - `/home/devj/local-arch/data/HKH_raw/HKH_rebuild_median/`
+- Configure raw and processed data roots in the untracked `configs/servers.local.yaml`.
 - Do not place rebuilt HKH TIFFs in `output/`, temp directories, or ad hoc folders.
-- When creating new scripts, manifests, or audit helpers for rebuild data, default to paths under `/home/devj/local-arch/data/HKH_raw/` unless the user says otherwise.
+- Treat `output/` as valuable retained experiment evidence; never delete, move, or clean it without explicit user authorization.
 
 ## Configuration System
 - 4-level merge: `configs/train.yaml` (global defaults) → `configs/servers.yaml` (server) → `configs/tasks/{task}.yaml` (task) → experiment file.
 - Experiment files live under `configs/{server}/{task}/`. Only override what differs from upstream levels.
 - Keep experiment configs minimal and descriptive.
-- Always use MLflow experiment `sota_replication` for every training batch so all
-  runs remain comparable in one experiment. Do not create batch-specific experiments.
-- Keep MLflow metrics enabled by default, but leave `training_opts.mlflow_artifacts_enabled: false` unless the artifact store is writable from the training machine.
+- MLflow and ntfy are optional and disabled by default. Never add a default remote endpoint.
+- Keep `training_opts.mlflow_artifacts_enabled: false` unless the artifact store is writable from the training machine.
 
 ## Measured Training Performance
 
@@ -118,7 +113,7 @@ Evidence from desktop batches 23-32 on RTX 3060 Ti:
 ## Project Structure
 ```
 configs/
-├── desktop/
+├── local/
 ├── tasks/
 ├── train.yaml
 └── servers.yaml
@@ -128,7 +123,6 @@ glacier_mapping/
 ├── model/       # UNet, losses, evaluation
 └── utils/       # Config, logging, MLflow, GPU, viz
 google_earth_engine/   # GEE export tasks, fishnet
-live_demo/              # Gradio app + demo data
 scripts/
 ├── train.py
 ├── predict.py
