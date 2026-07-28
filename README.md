@@ -1,8 +1,9 @@
 # Physics-Guided Glacier Mapping
 
 Code and workflows for the 2025 dissertation
-*Physics-Guided Strategies for Enhancing Neural Networks Trained With Limited
-Data*. It implements HKH glacier segmentation for clean ice (CI),
+[*Physics-Guided Strategies for Enhancing Neural Networks Trained With Limited
+Data*](https://www.proquest.com/openview/fb93a371cba6ab520c86f21ac0cc0451/1.pdf?pq-origsite=gscholar&cbl=18750&diss=y).
+It implements HKH glacier segmentation for clean ice (CI),
 debris-covered ice (DCI), and multiclass mapping from Landsat imagery.
 
 The results below are those reported in the defended dissertation.
@@ -22,9 +23,10 @@ The results below are those reported in the defended dissertation.
 ## Reproducibility boundary
 
 The original dataset used Landsat Collection 1 and the private Earth Engine
-assets referenced by Aryal's scripts. Collection 1 is no longer available in
-the Earth Engine catalog, so the original inputs cannot be regenerated from
-public services. The original JavaScript files are in
+assets referenced by [Aryal et al.'s original implementation](https://github.com/Aryal007/glacier_mapping).
+Collection 1 is no longer available in the Earth Engine catalog, so the
+original inputs cannot be regenerated from public services. The original
+JavaScript files are in
 `google_earth_engine/boundary_aware_unet_paper/`.
 
 A public-data rebuild uses Landsat Collection 2 Level 1, NASADEM, and ITS_LIVE.
@@ -208,3 +210,11 @@ glacier_mapping/                 data, Lightning, model, and utility modules
 google_earth_engine/             Earth Engine exporter and original Aryal scripts
 scripts/                         preprocess, train, predict, velocity, tests, MLflow
 ```
+
+## References
+
+- Perez, Jose G. (2025). [*Physics-Guided Strategies for Enhancing Neural
+  Networks Trained With Limited Data*](https://www.proquest.com/openview/fb93a371cba6ab520c86f21ac0cc0451/1.pdf?pq-origsite=gscholar&cbl=18750&diss=y).
+- Aryal, Bibek, Katie E. Miles, Sergio A. Vargas Zesati, and Olac Fuentes
+  (2023). [*Boundary Aware U-Net for Glacier Segmentation*](https://doi.org/10.7557/18.6789).
+  [Original implementation](https://github.com/Aryal007/glacier_mapping).
