@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the supported HKH Collection 2 Landsat rebuild from one manifest."""
+"""Export HKH Collection 2 Landsat scenes defined by a rebuild manifest."""
 
 from __future__ import annotations
 

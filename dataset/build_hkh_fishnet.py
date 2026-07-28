@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""Create local HKH fishnet GeoTIFF dataset variants from full8 raw scenes.
+"""Build HKH fishnet GeoTIFF variants from full8 raw scenes.
 
-Self-contained dataset workflow inputs live under dataset/ except optional legacy
-Landsat7_2005 rasters used as exact grid templates. Fishnet copy:
-  dataset/hkh_fishnet.geojson
-
-Outputs one folder per dataset under ``--output-root``:
-  image0.tif, image1.tif, ...
-
-Filled variants run NSPI in per-scene min-max normalized space (same evidence base
-as the normalized full8 tournament), then inverse-transform predictions back to
-raw source values for GeoTIFF output. No ML normalization is applied here.
+Filled variants run NSPI in per-scene min-max space, then inverse-transform
+predictions to raw source values for GeoTIFF output.
 """
 
 from __future__ import annotations

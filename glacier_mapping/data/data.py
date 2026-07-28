@@ -8,9 +8,7 @@ from torch.utils.data import Dataset
 
 import glacier_mapping.utils.logging as fn
 
-# Channel group definitions for semantic selection
-# NOTE: Indices are resolved dynamically from band_metadata.json at runtime.
-# The "names" field is the source of truth - indices are looked up by name.
+# Channel groups resolve from band_metadata.json by name at runtime.
 CHANNEL_GROUP_DEFINITIONS = {
     "landsat": {
         "names": ["B1", "B2", "B3", "B4", "B5", "B6_VCID1", "B6_VCID2", "B7"],

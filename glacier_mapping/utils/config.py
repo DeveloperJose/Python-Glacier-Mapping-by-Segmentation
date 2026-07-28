@@ -23,7 +23,7 @@ def load_servers_config(
     servers_yaml: str = "configs/servers.yaml",
     local_yaml: str | None = None,
 ) -> Dict[str, Any]:
-    """Load public server defaults and an optional untracked local override."""
+    """Load server defaults and an optional local override."""
     servers_path = Path(servers_yaml)
     if not servers_path.exists():
         raise FileNotFoundError(f"Servers config not found: {servers_path}")

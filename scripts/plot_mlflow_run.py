@@ -200,9 +200,6 @@ def plot_epoch_loss(
             ax.scatter(
                 epochs, vals, label=name, marker="*", zorder=10, color="red", s=50
             )
-            # ymin, ymax = ax.get_ylim()
-            # center = (ymin + ymax)/2
-            # ax.vlines(epochs, center - 1, center + 1, color="red")
         else:
             ax.plot(epochs, vals, label=name)
     ax.set_title("Loss Curves")

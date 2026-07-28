@@ -23,7 +23,7 @@ MLFLOW_ARTIFACT_UPLOAD_ENABLED = False
 
 
 def _require_mlflow() -> ModuleType:
-    """Import MLflow only when tracking is explicitly used."""
+    """Import MLflow when tracking is enabled."""
     try:
         import mlflow
     except ImportError as exc:

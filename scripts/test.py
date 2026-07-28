@@ -774,8 +774,7 @@ class GlacierTaskTestSuite:
             # 4. Model Integration
             print("1.5 Model Integration:")
 
-            # Extract channel and class configuration from loader_opts to pass to the model.
-            # This ensures the model and data module use the exact same channel settings.
+            # Use the data module's channel and class configuration for the model.
             loader_opts = config.get("loader_opts", {})
             loader_opts["processed_dir"] = str(
                 dataset_path
@@ -845,16 +844,14 @@ class GlacierTaskTestSuite:
             loss_fn = model.loss_fn
             print(f"  ✓ Loss function: {type(loss_fn).__name__}")
 
-            # The foreground_indices attribute was removed, so we no longer check it directly.
-            # The class_weights parameter in customloss now handles class importance.
-            # We can infer the effective foreground from output_classes and target_class_ids.
+            # Output classes and target IDs determine the foreground mapping.
             if len(output_classes) == 1:
-                # For binary, the foreground is implicitly the non-background class (index 1 after remapping)
+                # Binary tasks remap the target class to channel 1.
                 print(
                     f"  ✓ Binary task: output_classes={output_classes}, target_class_ids={target_class_ids}"
                 )
             else:
-                # For multi-class, all non-background output classes are considered
+                # Multiclass tasks retain all configured foreground classes.
                 print(
                     f"  ✓ Multi-class task: output_classes={output_classes}, target_class_ids={target_class_ids}"
                 )
@@ -872,7 +869,7 @@ class GlacierTaskTestSuite:
                     vel_norm = x[:, model.velocity_idx : model.velocity_idx + 1, :, :]
 
                     if model.normalization == "mean-std":
-                        # These are numpy arrays, convert to tensor
+                        # Convert normalization arrays to tensors.
                         mean = torch.from_numpy(model.norm_arr[0, :]).to(
                             vel_norm.device
                         )

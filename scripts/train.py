@@ -180,8 +180,7 @@ class TrainingLogUploadCallback(pl.Callback):
             log.warning("MLflow logger missing; skipping training log upload")
             return
 
-        # Check artifact URI before uploading. The MLflow server may return a
-        # local path that the client cannot write to (e.g. /mlflow).
+        # Skip uploads when the server's artifact path is not writable locally.
         artifact_uri = mlflow_logger.experiment.get_run(
             mlflow_logger.run_id
         ).info.artifact_uri
