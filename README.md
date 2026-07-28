@@ -5,20 +5,12 @@ This repository is the research software companion to the 2025 dissertation
 Data*. It contains the HKH glacier segmentation pipeline for clean ice (CI),
 debris-covered ice (DCI), and multiclass mapping from Landsat imagery.
 
-Results reported in the dissertation are preserved as defended. A subsequent
-2026 replication and robustness study closely reproduced the Aryal et al.
-baseline, while finding that later model improvements were sensitive to dataset
-construction, training semantics, and random seed. Because the follow-up
-protocols do not recreate every condition of the defended experiments, the
-dissertation and post-dissertation findings are presented separately. This
-repository makes no new state-of-the-art claim.
-
-The detailed follow-up is in [POST_DISSERTATION_RESULTS.md](POST_DISSERTATION_RESULTS.md).
+The repository documents the defended dissertation software and results. It is
+not a benchmark release or a source of new performance claims.
 
 ## Defended dissertation results
 
-These are the results reported in the dissertation, not re-estimates from the
-later protocol.
+These are the results reported in the dissertation.
 
 | Model | CI IoU | DCI IoU |
 |---|---:|---:|
@@ -52,11 +44,9 @@ record. The accompanying source report is
 
 | Dataset | Purpose | Recipe |
 |---|---|---|
-| Dissertation-era `comprehensive_v3` | Defended experiments and later legacy comparisons | `configs/datasets/dissertation.yaml` |
-| Aryal 2023 eight-band reproduction | Public-code parity study | `configs/datasets/aryal_2023.yaml` |
-| C02 current-date agreement | Updated DN-domain rebuild | `configs/datasets/c02_agreement.yaml` |
-| C02 exact-legacy-date agreement | Fair date-controlled comparison | `configs/datasets/c02_legacy_dates.yaml` |
-| C02 agreement with velocity v2 | Date-aware ITS_LIVE comparison | `configs/datasets/c02_velocity_v2.yaml` |
+| Dissertation-era `comprehensive_v3` | Defended experiments | `configs/datasets/dissertation.yaml` |
+| Aryal eight-band workflow | Reference implementation workflow | `configs/datasets/aryal_2023.yaml` |
+| Public-data rebuild | Current rebuild inputs and processing variants | `configs/datasets/` |
 
 ## Installation
 
@@ -89,7 +79,7 @@ local:
 The local `output/` directory is ignored by Git and is the durable experiment
 record. Repository cleanup commands do not manage it.
 
-## Rebuild the updated dataset
+## Rebuild public inputs
 
 Set an Earth Engine project explicitly. The exporter has no personal project or
 remote endpoint embedded in it.
@@ -132,20 +122,14 @@ uv run python dataset/apply_relaxed_valid_mask.py \
   --variants raw_target_relaxed_valid,agreement_quality_step3_relaxed_valid
 ```
 
-Use `--variant c02_legacy_dates` in the exporter and
-`--dataset-variant c02_legacy_dates` in the builders for the exact-date dataset.
-The reselected-donor overlay is named `c02_legacy_dates_reselected`.
-
-Generate ITS_LIVE velocity rasters after the Landsat fishnet exists:
+Generate the dissertation-era ITS_LIVE velocity mosaic after the Landsat
+fishnet exists:
 
 ```bash
 # Dissertation-era seven-year velocity mosaic.
 uv run python scripts/create_velocity_from_itslive_mosaic.py \
   --server local
 
-# Date-aware v2 product using per-pixel provenance.
-uv run python scripts/create_velocity_from_itslive_mosaic_v2.py \
-  --server local --variant agreement_quality_step3
 ```
 
 ## Preprocess and train
@@ -155,21 +139,8 @@ channels, and packs normalized `X.npy`/`y.npy` arrays.
 
 ```bash
 uv run python scripts/preprocess.py \
-  --server local --config configs/datasets/c02_agreement.yaml \
+  --server local --config configs/datasets/dissertation.yaml \
   --regenerate-full
-```
-
-For the velocity-v2 experiments, first create the full source dataset and then
-pack the three documented channel recipes:
-
-```bash
-uv run python scripts/preprocess.py \
-  --server local --config configs/datasets/c02_velocity_v2.yaml \
-  --regenerate-full
-
-uv run python scripts/preprocess.py \
-  --server local --config configs/datasets/c02_velocity_v2.yaml \
-  --recipes c02t1_dn_agreement_ldem_v2_baseline,c02t1_dn_agreement_ldem_v2_speed,c02t1_dn_agreement_ldem_v2_quality
 ```
 
 The Aryal reproduction intentionally has a separate preprocessing entry point:
@@ -181,12 +152,11 @@ uv run python dataset/create_aryal_2023_dataset.py \
 
 Training uses the four-level merge
 `train.yaml -> servers.yaml -> tasks/<task>.yaml -> experiment.yaml`. Canonical
-experiments are under `configs/local/`; change `training_opts.seed` for the
-documented seed sets.
+experiments are under `configs/local/`.
 
 ```bash
 uv run python scripts/train.py \
-  --config configs/local/debris_ice/c02_agreement.yaml \
+  --config configs/local/debris_ice/dissertation_dataset.yaml \
   --server local --gpu 0
 ```
 
@@ -213,7 +183,7 @@ connection unless they are explicitly configured.
 export MLFLOW_TRACKING_URI=https://your-mlflow-server
 
 uv run python scripts/train.py \
-  --config configs/local/debris_ice/c02_agreement.yaml \
+  --config configs/local/debris_ice/dissertation_dataset.yaml \
   --server local --gpu 0 --mlflow-enabled true
 
 uv run python scripts/upload_to_mlflow.py output/<run_name> \
@@ -246,9 +216,6 @@ dataset/                         manifest and local dataset builders
 glacier_mapping/                 data, Lightning, model, and utility modules
 google_earth_engine/             one supported exporter and original Aryal scripts
 scripts/                         preprocess, train, predict, velocity, tests, MLflow
-POST_DISSERTATION_RESULTS.md      replication and robustness report
 ```
 
-The complete pre-cleanup research snapshot is commit `9793e17`. Removed
-exploratory configs and audit helpers remain available through Git history. The
-Gradio demo and its sample arrays were archived outside this repository.
+The Gradio demo and its sample arrays were archived outside this repository.
